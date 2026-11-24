@@ -112,6 +112,7 @@ def test_artifact_store_save_burn_ttl_and_http_upload(tmp_path: Path) -> None:
             )
         },
     )
+    cfg.memory.sqlite_path = str(tmp_path / "test_artifacts.db")
     app = create_app(config=cfg, artifact_store=ArtifactStore(base_dir=tmp_path, max_bytes=100))
     with TestClient(app) as client:
         r_ok = client.post(

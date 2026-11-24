@@ -321,15 +321,19 @@ class LLMRouter:
         elif any(k in user_msg for k in ("状态", "角色", "位置", "装备", "窗口", "感官")) or any(
             k in lower_q for k in ("state", "status", "game", "window", "level")
         ):
-            marker = "【当前桌面感官上下文】" if "【当前桌面感官上下文】" in sys_msg else "【当前感官上下文】"
-            context_section = sys_msg.split(marker)[-1].strip()
-            if "暂无外部感官上下文" in context_section or not context_section:
+            combined_ctx = f"{sys_msg}\n{user_msg}"
+            marker = "【当前桌面感官上下文】" if "【当前桌面感官上下文】" in combined_ctx else "【当前感官上下文】"
+            if marker in combined_ctx:
+                tail_section = combined_ctx.split(marker)[-1].split("【本轮用户提问】")[0].strip()
+            else:
+                tail_section = ""
+            if "暂无外部感官上下文" in tail_section or not tail_section:
                 text = (
                     "[EMOTION:confused]\n"
                     "我目前还没有收到外部感官模块推送的游戏或窗口状态，你可以先运行 mock_senses/simulator.py 注入模拟状态再问我。"
                 )
             else:
-                lines = [ln.lstrip("- ").strip() for ln in context_section.splitlines() if ln.strip()]
+                lines = [ln.lstrip("- ").strip() for ln in tail_section.splitlines() if ln.strip()]
                 summary = "；".join(lines)
                 text = f"[EMOTION:surprised]\n我刚才收到了最新的感官上下文！当前状态记录为：{summary}"
             step = 8

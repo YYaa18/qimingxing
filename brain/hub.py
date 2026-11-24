@@ -12,11 +12,16 @@ from pydantic import ValidationError
 
 from brain.artifact_store import ArtifactStore
 from brain.config import AppConfig
+from brain.context_builder import BuildStats, ContextBuilder
 from brain.context_store import ContextStore
 from brain.history_store import InMemorySlidingWindowStore, MemoryStore
 from brain.intent_detector import ScreenIntentDetector
 from brain.llm_router import LLMError, LLMRouter
-from brain.prompts import build_system_prompt
+from brain.memory.backend import MemoryBackend
+from brain.memory.embeddings import NullEmbeddingProvider
+from brain.memory.extractor import MemoryExtractor
+from brain.memory.models import MemoryFact
+from brain.memory.retrieval import MemoryRetriever
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
 from protocol.models import (
@@ -56,7 +61,7 @@ from protocol.models import (
 
 logger = logging.getLogger("qimingxing.hub")
 
-SERVER_VERSION = "0.2.0-mvp2"
+SERVER_VERSION = "0.3.0-mvp3"
 CAPTURE_TIMEOUT_SECONDS = 3.5
 
 
@@ -87,6 +92,10 @@ class Hub:
         context_store: Optional[ContextStore] = None,
         artifact_store: Optional[ArtifactStore] = None,
         memory_store: Optional[MemoryStore] = None,
+        memory_backend: Optional[MemoryBackend] = None,
+        memory_retriever: Optional[MemoryRetriever] = None,
+        context_builder: Optional[ContextBuilder] = None,
+        memory_extractor: Optional[MemoryExtractor] = None,
         intent_detector: Optional[ScreenIntentDetector] = None,
         screen_router: Optional[ScreenUnderstandingRouter] = None,
         capture_timeout_seconds: float = CAPTURE_TIMEOUT_SECONDS,
@@ -96,6 +105,30 @@ class Hub:
         self.context_store = context_store or ContextStore()
         self.artifact_store = artifact_store or ArtifactStore()
         self.memory_store: MemoryStore = memory_store or InMemorySlidingWindowStore()
+        self.memory_backend: Optional[MemoryBackend] = memory_backend
+        self.context_builder = context_builder or ContextBuilder(self.config.context_budget)
+        if memory_retriever is not None:
+            self.memory_retriever: Optional[MemoryRetriever] = memory_retriever
+        elif memory_backend is not None:
+            self.memory_retriever = MemoryRetriever(
+                memory_backend,
+                NullEmbeddingProvider(),
+                timeout_ms=self.config.memory.embedding.timeout_ms,
+            )
+        else:
+            self.memory_retriever = None
+        if memory_extractor is not None:
+            self.memory_extractor: Optional[MemoryExtractor] = memory_extractor
+        elif memory_backend is not None:
+            self.memory_extractor = MemoryExtractor(
+                memory_backend,
+                llm_router,
+                NullEmbeddingProvider(),
+                self.config.memory.extraction,
+            )
+        else:
+            self.memory_extractor = None
+
         self.intent_detector = intent_detector or ScreenIntentDetector()
         self.screen_router = screen_router or ScreenUnderstandingRouter(
             DeepSeekOCRProvider(self.config.ocr, self.config)
@@ -109,6 +142,7 @@ class Hub:
         self.senses_permissions = PermissionStatus()
         self.senses_permission_hint: str = ""
         self._pending_captures: Dict[str, asyncio.Future[ContextScreenRefPayload]] = {}
+        self.last_build_stats: Optional[BuildStats] = None
 
     def register(self, websocket: WebSocket) -> ClientConnection:
         self._conn_seq += 1
@@ -284,7 +318,15 @@ class Hub:
     ) -> None:
         if payload.action == "clear_history":
             self.memory_store.clear(conn.client_id)
-            logger.info("Cleared short-term memory for client=%s", conn.client_id)
+            if self.memory_backend is not None:
+                prev_session = await self.memory_backend.get_or_create_active_session()
+                await self.memory_backend.create_new_session(archive_previous=True)
+                if self.memory_extractor is not None:
+                    self.memory_extractor.schedule_session_archive(
+                        session_id=prev_session.session_id,
+                        context_store=self.context_store,
+                    )
+            logger.info("Cleared short-term memory & archived active session for client=%s", conn.client_id)
             await conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -292,7 +334,7 @@ class Hub:
                     OutputToolStatusPayload(
                         status="completed",
                         tool="memory",
-                        label="已清空本轮对话记忆（桌面感知状态保持正常）",
+                        label="已清空本轮对话并归档记忆（桌面感知状态保持正常）",
                     ),
                 )
             )
@@ -636,10 +678,48 @@ class Hub:
                     screen_ref=screen_ref,
                 )
 
-            system_prompt = build_system_prompt(self.context_store)
-            messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-            messages.extend(self.memory_store.get_messages(conn.client_id, limit=16))
-            messages.append({"role": "user", "content": user_content})
+            active_session_id = ""
+            rolling_summary = ""
+            core_facts: List[MemoryFact] = []
+            recalled_memories = []
+            retrieval_ms = 0.0
+
+            if self.memory_backend is not None:
+                session = await self.memory_backend.get_or_create_active_session()
+                active_session_id = session.session_id
+                rolling_summary = session.rolling_summary
+                raw_msgs = await self.memory_backend.get_messages(
+                    session.session_id,
+                    after_msg_id=session.last_summarized_msg_id,
+                    limit=20,
+                )
+                recent_messages = [{"role": m.role, "content": m.content} for m in raw_msgs]
+                core_facts = await self.memory_backend.list_facts(status="active", limit=30)
+                if self.memory_retriever is not None:
+                    selected_l1_ids = {f.fact_id for f in core_facts}
+                    recalled_memories, retrieval_ms = await self.memory_retriever.search(
+                        user_text,
+                        top_k=5,
+                        exclude_fact_ids=selected_l1_ids,
+                    )
+                    for item in recalled_memories:
+                        if item.item_type == "fact":
+                            await self.memory_backend.touch_fact(item.item_id)
+            else:
+                recent_messages = self.memory_store.get_messages(conn.client_id, limit=16)
+
+            built = self.context_builder.build(
+                user_text=user_text,
+                user_content=user_content,
+                core_facts=core_facts,
+                rolling_summary=rolling_summary,
+                recent_messages=recent_messages,
+                recalled_memories=recalled_memories,
+                context_store=self.context_store,
+                retrieval_ms=retrieval_ms,
+            )
+            self.last_build_stats = built.stats
+            messages = built.messages
 
             async for chunk in self.llm_router.stream_chat(messages, profile_name=profile.name):
                 events = parser.feed(chunk)
@@ -651,13 +731,39 @@ class Hub:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             assistant_reply = "".join(collected_spoken).strip()
             scene_summary = self.context_store.get_window_summary()
-            self.memory_store.append_turn(
-                conn.client_id, "user", user_text, scene_summary=scene_summary
-            )
-            if assistant_reply:
-                self.memory_store.append_turn(
-                    conn.client_id, "assistant", assistant_reply, scene_summary=scene_summary
+
+            if self.memory_backend is not None and active_session_id:
+                user_rec = await self.memory_backend.append_message(
+                    session_id=active_session_id,
+                    turn_id=turn_id,
+                    role="user",
+                    content=user_text,
+                    desktop_context_summary=scene_summary,
                 )
+                assistant_rec = None
+                if assistant_reply:
+                    assistant_rec = await self.memory_backend.append_message(
+                        session_id=active_session_id,
+                        turn_id=turn_id,
+                        role="assistant",
+                        content=assistant_reply,
+                        desktop_context_summary=scene_summary,
+                    )
+                if self.memory_extractor is not None:
+                    self.memory_extractor.schedule_post_turn(
+                        session_id=active_session_id,
+                        user_msg=user_rec,
+                        assistant_msg=assistant_rec,
+                        context_store=self.context_store,
+                    )
+            else:
+                self.memory_store.append_turn(
+                    conn.client_id, "user", user_text, scene_summary=scene_summary
+                )
+                if assistant_reply:
+                    self.memory_store.append_turn(
+                        conn.client_id, "assistant", assistant_reply, scene_summary=scene_summary
+                    )
 
             await conn.send_envelope(
                 make_envelope(

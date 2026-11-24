@@ -85,18 +85,60 @@ class PrivacyConfig:
 
 
 @dataclass
+class MemoryExtractionConfig:
+    enabled: bool = True
+    profile: str = "fast_deepseek"
+    batch_turns: int = 4
+    idle_seconds: float = 120.0
+    persist_desktop_footprints: bool = True
+    compress_trigger_turns: int = 10
+    compress_batch_turns: int = 6
+
+
+@dataclass
+class EmbeddingConfig:
+    provider: str = "null"  # "null" or "openai_compatible"
+    base_url: str = "http://127.0.0.1:11434/v1"
+    api_key: str = ""
+    model: str = "bge-m3"
+    timeout_ms: int = 800
+
+
+@dataclass
+class MemoryConfig:
+    backend: str = "sqlite"
+    sqlite_path: str = "data/qimingxing_memory.db"
+    extraction: MemoryExtractionConfig = field(default_factory=MemoryExtractionConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+
+
+@dataclass
+class ContextBudgetConfig:
+    l1_profile_tokens: int = 400
+    l2_summary_tokens: int = 350
+    l2_recent_tokens: int = 2000
+    l3_recall_tokens: int = 500
+    l3_desktop_ocr_tokens: int = 1500
+    total_max_tokens: int = 6000
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     default_profile: str = "mock_local"
     profiles: Dict[str, ProfileConfig] = field(default_factory=dict)
     ocr: OCRConfig = field(default_factory=OCRConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
     _secrets: List[str] = field(default_factory=list, repr=False)
 
     def collect_secrets(self) -> List[str]:
         secrets = [p.api_key for p in self.profiles.values() if p.api_key]
         if self.ocr.api_key:
             secrets.append(self.ocr.api_key)
+        if self.memory.embedding.api_key:
+            secrets.append(self.memory.embedding.api_key)
         secrets.extend(self._secrets)
         return sorted({s for s in secrets if len(s) >= 4}, key=len, reverse=True)
 
@@ -178,7 +220,6 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     ocr_raw = raw.get("ocr") or {}
     ocr_key = _expand_env_vars(str(ocr_raw.get("api_key", "") or ""))
     if not ocr_key:
-        # Fallback to any configured DeepSeek profile key if available
         for prof in profiles.values():
             if "deepseek" in prof.base_url and prof.api_key:
                 ocr_key = prof.api_key
@@ -204,10 +245,54 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         ),
     )
 
+    mem_raw = raw.get("memory") or {}
+    ext_raw = mem_raw.get("extraction") or {}
+    emb_raw = mem_raw.get("embedding") or {}
+    emb_key = _expand_env_vars(str(emb_raw.get("api_key", "") or ""))
+    if not emb_key and emb_raw.get("api_key_env"):
+        emb_key = os.environ.get(str(emb_raw["api_key_env"]), "")
+
+    ext_profile = str(ext_raw.get("profile", "fast_deepseek"))
+    if ext_profile not in profiles and default_profile:
+        ext_profile = default_profile
+
+    memory = MemoryConfig(
+        backend=str(mem_raw.get("backend", "sqlite")),
+        sqlite_path=str(mem_raw.get("sqlite_path", "data/qimingxing_memory.db")),
+        extraction=MemoryExtractionConfig(
+            enabled=bool(ext_raw.get("enabled", True)),
+            profile=ext_profile,
+            batch_turns=int(ext_raw.get("batch_turns", 4)),
+            idle_seconds=float(ext_raw.get("idle_seconds", 120.0)),
+            persist_desktop_footprints=bool(ext_raw.get("persist_desktop_footprints", True)),
+            compress_trigger_turns=int(ext_raw.get("compress_trigger_turns", 10)),
+            compress_batch_turns=int(ext_raw.get("compress_batch_turns", 6)),
+        ),
+        embedding=EmbeddingConfig(
+            provider=str(emb_raw.get("provider", "null")),
+            base_url=str(emb_raw.get("base_url", "http://127.0.0.1:11434/v1") or "").rstrip("/"),
+            api_key=emb_key,
+            model=str(emb_raw.get("model", "bge-m3")),
+            timeout_ms=int(emb_raw.get("timeout_ms", 800)),
+        ),
+    )
+
+    budget_raw = raw.get("context_budget") or {}
+    context_budget = ContextBudgetConfig(
+        l1_profile_tokens=int(budget_raw.get("l1_profile_tokens", 400)),
+        l2_summary_tokens=int(budget_raw.get("l2_summary_tokens", 350)),
+        l2_recent_tokens=int(budget_raw.get("l2_recent_tokens", 2000)),
+        l3_recall_tokens=int(budget_raw.get("l3_recall_tokens", 500)),
+        l3_desktop_ocr_tokens=int(budget_raw.get("l3_desktop_ocr_tokens", 1500)),
+        total_max_tokens=int(budget_raw.get("total_max_tokens", 6000)),
+    )
+
     return AppConfig(
         server=server,
         default_profile=default_profile,
         profiles=profiles,
         ocr=ocr,
         privacy=privacy,
+        memory=memory,
+        context_budget=context_budget,
     )

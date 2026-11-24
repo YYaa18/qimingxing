@@ -15,7 +15,7 @@ from protocol.models import (
 
 MAX_TIMELINE_ENTRIES = 20
 TIMELINE_WINDOW_SECONDS = 1800  # 30 minutes
-MIN_TRANSIENT_SECONDS = 2.0
+MIN_TRANSIENT_SECONDS = 3.0
 
 
 @dataclass
@@ -169,6 +169,41 @@ class ContextStore:
         if w.window_title:
             return f"{w.app_name} — {w.window_title}"
         return w.app_name
+
+    def get_sanitized_timeline_for_footprint(self) -> List[ActivityEntry]:
+        """Return recent non-self, non-masked activity entries safe for L3 persistence."""
+        return [
+            entry
+            for entry in self.get_timeline()
+            if not entry.privacy_masked and not entry.is_self_window
+        ]
+
+    def render_compact_focus(self) -> str:
+        """Render a single concise focus line for ordinary chats (minimal noise)."""
+        parts: list[str] = []
+        w = self._snapshot.last_non_self_window or self._snapshot.window_changed
+        if w is not None:
+            if w.privacy_masked:
+                parts.append("当前焦点: [隐私窗口已隐藏]")
+            else:
+                title = f" ({w.window_title})" if w.window_title else ""
+                parts.append(f"当前焦点: {w.app_name}{title} [scene={w.scene}]")
+        if self._snapshot.game_state is not None:
+            g = self._snapshot.game_state
+            data_json = json.dumps(g.data, ensure_ascii=False)
+            parts.append(
+                f"当前游戏状态 (game_id={g.game_id}, provider={g.provider}, "
+                f"version={g.summary_version}): {data_json}"
+            )
+        if self._snapshot.ocr_snippet is not None:
+            o = self._snapshot.ocr_snippet
+            parts.append(f"最近 OCR 片段 (region={o.region}): {o.text}")
+        if not parts:
+            return "暂无外部感官上下文。"
+        return "\n".join(parts)
+
+    def render_full_timeline(self) -> str:
+        return self.render_for_prompt()
 
     def render_for_prompt(self) -> str:
         """Render active desktop context, 30-min timeline, and optional senses metadata."""

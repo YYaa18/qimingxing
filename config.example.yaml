@@ -95,3 +95,29 @@ privacy:
     - "Bank"
     - "Password"
     - "密码"
+
+memory:
+  backend: "sqlite"  # 预留 "postgres" 容器级扩展槽位
+  sqlite_path: "data/qimingxing_memory.db"
+  extraction:
+    enabled: true
+    profile: "fast_deepseek"
+    batch_turns: 4
+    idle_seconds: 120
+    persist_desktop_footprints: true
+    compress_trigger_turns: 10
+    compress_batch_turns: 6
+  embedding:
+    provider: "null"  # 可改配 "openai_compatible" 接入 Ollama / 硅基流动 / OpenAI / 百炼
+    base_url: "http://127.0.0.1:11434/v1"
+    api_key_env: "EMBEDDING_API_KEY"
+    model: "bge-m3"
+    timeout_ms: 800
+
+context_budget:
+  l1_profile_tokens: 400
+  l2_summary_tokens: 350
+  l2_recent_tokens: 2000
+  l3_recall_tokens: 500
+  l3_desktop_ocr_tokens: 1500
+  total_max_tokens: 6000

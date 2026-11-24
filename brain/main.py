@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
@@ -12,11 +13,16 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from brain.artifact_store import ArtifactStore
 from brain.config import AppConfig, load_config
+from brain.context_builder import ContextBuilder
 from brain.context_store import ContextStore
 from brain.history_store import MemoryStore
 from brain.hub import SERVER_VERSION, Hub
 from brain.intent_detector import ScreenIntentDetector
 from brain.llm_router import LLMRouter
+from brain.memory import MemoryBackend, create_memory_backend
+from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
+from brain.memory.extractor import MemoryExtractor
+from brain.memory.retrieval import MemoryRetriever
 from brain.screen_router import ScreenUnderstandingRouter
 from protocol.models import PROTOCOL_VERSION
 
@@ -36,6 +42,8 @@ def create_app(
     context_store: Optional[ContextStore] = None,
     artifact_store: Optional[ArtifactStore] = None,
     memory_store: Optional[MemoryStore] = None,
+    memory_backend: Optional[MemoryBackend] = None,
+    embedding_provider: Optional[EmbeddingProvider] = None,
     intent_detector: Optional[ScreenIntentDetector] = None,
     screen_router: Optional[ScreenUnderstandingRouter] = None,
     capture_timeout_seconds: float = 3.5,
@@ -43,12 +51,31 @@ def create_app(
     cfg = config or load_config()
     router = llm_router or LLMRouter(cfg)
     artifacts = artifact_store or ArtifactStore()
+    backend = memory_backend or create_memory_backend(cfg.memory)
+    emb_provider = embedding_provider or create_embedding_provider(cfg.memory.embedding)
+    retriever = MemoryRetriever(
+        backend,
+        emb_provider,
+        timeout_ms=cfg.memory.embedding.timeout_ms,
+    )
+    context_builder = ContextBuilder(cfg.context_budget)
+    extractor = MemoryExtractor(
+        backend,
+        router,
+        emb_provider,
+        cfg.memory.extraction,
+    )
+
     hub = Hub(
         llm_router=router,
         config=cfg,
         context_store=context_store,
         artifact_store=artifacts,
         memory_store=memory_store,
+        memory_backend=backend,
+        memory_retriever=retriever,
+        context_builder=context_builder,
+        memory_extractor=extractor,
         intent_detector=intent_detector,
         screen_router=screen_router,
         capture_timeout_seconds=capture_timeout_seconds,
@@ -56,6 +83,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        await backend.initialize()
+
         async def _ttl_reaper() -> None:
             while True:
                 await asyncio.sleep(60)
@@ -70,12 +99,18 @@ def create_app(
                 await reaper_task
             except asyncio.CancelledError:
                 pass
+            extractor.cancel_idle_timers()
+            await extractor.wait_for_idle()
+            await backend.close()
             artifacts.cleanup_all()
 
     app = FastAPI(title="Qimingxing Brain", version=SERVER_VERSION, lifespan=lifespan)
     app.state.config = cfg
     app.state.llm_router = router
     app.state.artifact_store = artifacts
+    app.state.memory_backend = backend
+    app.state.memory_retriever = retriever
+    app.state.memory_extractor = extractor
     app.state.hub = hub
 
     @app.get("/health")
@@ -87,6 +122,56 @@ def create_app(
                 "protocol_version": PROTOCOL_VERSION,
                 "active_profile": router.active_profile,
                 "privacy_mode": hub.privacy_mode,
+                "memory_backend": cfg.memory.backend,
+                "embedding_enabled": emb_provider.enabled,
+            }
+        )
+
+    @app.get("/api/memory/debug")
+    async def memory_debug(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=403, detail="Memory debug inspection is restricted to localhost."
+            )
+
+        session = await backend.get_or_create_active_session()
+        facts = await backend.list_facts(status="active", limit=50)
+        episodes = await backend.list_episodes(status="active", limit=20)
+        recent_msgs = await backend.get_messages(session.session_id, limit=12)
+
+        return JSONResponse(
+            {
+                "active_session": {
+                    "session_id": session.session_id,
+                    "status": session.status,
+                    "rolling_summary": session.rolling_summary,
+                    "last_summarized_msg_id": session.last_summarized_msg_id,
+                    "recent_message_count": len(recent_msgs),
+                },
+                "active_facts_count": len(facts),
+                "active_facts": [
+                    {
+                        "fact_id": f.fact_id,
+                        "category": f.category,
+                        "content": f.content,
+                        "importance": f.importance,
+                        "embedding_model": f.embedding_model,
+                    }
+                    for f in facts
+                ],
+                "recent_episodes": [
+                    {
+                        "episode_id": ep.episode_id,
+                        "kind": ep.kind,
+                        "summary": ep.summary,
+                        "embedding_model": ep.embedding_model,
+                    }
+                    for ep in episodes
+                ],
+                "last_context_stats": asdict(hub.last_build_stats)
+                if hub.last_build_stats
+                else None,
             }
         )
 

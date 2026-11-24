@@ -77,6 +77,8 @@ def _make_test_app():
             ),
         },
     )
+    cfg.memory.sqlite_path = ":memory:"
+    cfg.memory.extraction.enabled = False
     router = ControllableRouter(cfg)
     ctx = ContextStore()
     app = create_app(config=cfg, llm_router=router, context_store=ctx)

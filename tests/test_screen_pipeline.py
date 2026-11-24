@@ -152,6 +152,8 @@ def _make_phase2_app(tmp_path: Path, *, timeout_sec: float = 1.5):
         },
         privacy=PrivacyConfig(default_mode="meta_only"),
     )
+    cfg.memory.sqlite_path = ":memory:"
+    cfg.memory.extraction.enabled = False
     router = CaptureSpyRouter(cfg)
     artifacts = ArtifactStore(base_dir=tmp_path)
     screen_router = ScreenUnderstandingRouter(StubOCR())

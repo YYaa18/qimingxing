@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qimingxing"
-version = "0.2.0"
-description = "启明星（Qimingxing）通用 AI 桌面数字人助手 — MVP 2.0"
+version = "0.3.0"
+description = "启明星（Qimingxing）通用 AI 桌面数字人助手 — MVP 3.0"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",
