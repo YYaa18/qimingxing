@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from brain.config import load_config
+from brain.eval_runner import format_eval_report, run_golden_evals
 from brain.memory import MemoryCategory, create_memory_backend, normalize_category_key
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import create_embedding_provider, pack_embedding
@@ -173,6 +174,41 @@ async def cmd_reindex(backend: MemoryBackend, config_path: Optional[Path]) -> in
 
 
 async def run_cli(args: argparse.Namespace) -> int:
+    if args.command == "eval":
+        cases_path = Path(args.cases) if args.cases else None
+        report = await run_golden_evals(cases_path)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "total": report.total,
+                        "applicable": report.applicable,
+                        "passed": report.passed,
+                        "partial": report.partial,
+                        "failed": report.failed,
+                        "not_applicable": report.not_applicable,
+                        "score_pct": report.score_pct,
+                        "results": [
+                            {
+                                "id": r.case_id,
+                                "category": r.category,
+                                "title": r.title,
+                                "status": r.status,
+                                "score": r.score,
+                                "detail": r.detail,
+                                "elapsed_ms": r.elapsed_ms,
+                            }
+                            for r in report.results
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            print(format_eval_report(report))
+        return 0 if report.failed == 0 else 1
+
     cfg = load_config(args.config)
     if args.db:
         cfg.memory.sqlite_path = str(args.db)
@@ -447,6 +483,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="Inspect configured MCP servers and optionally probe live tools")
     p_mcp.add_argument("--probe", action="store_true", help="Connect to enabled MCP servers and list discovered tools")
+
+    p_eval = sub.add_parser("eval", help="Run personal golden regression evaluation suite")
+    p_eval.add_argument("--cases", default=None, help="Path to golden_cases.yaml")
+    p_eval.add_argument("--json", action="store_true", help="Output JSON report")
     return parser
 
 

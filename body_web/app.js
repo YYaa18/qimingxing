@@ -269,6 +269,108 @@
     summaryEl.textContent = payload.summary || "请确认是否允许执行该操作";
 
     const detailsObj = payload.details || {};
+    if (payload.tool_name === "ask_user" || detailsObj.kind === "clarification") {
+      const qText = detailsObj.question || payload.summary || "请补充确认";
+      const opts = Array.isArray(detailsObj.options) ? detailsObj.options : [];
+      titleSpan.textContent = "💬 请帮启明星确认一下";
+      summaryEl.textContent = qText;
+
+      const actionsEl = document.createElement("div");
+      actionsEl.className = "approval-actions";
+      const textInput = document.createElement("input");
+      textInput.type = "text";
+      textInput.placeholder = "或输入自定义回复…";
+      textInput.style.flex = "1";
+
+      const sendBtn = document.createElement("button");
+      sendBtn.type = "button";
+      sendBtn.className = "btn";
+      sendBtn.textContent = "回复";
+
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "btn btn-secondary";
+      cancelBtn.textContent = "取消";
+
+      const resultBadgeEl = document.createElement("span");
+      resultBadgeEl.className = "approval-result";
+
+      const optBtns = [];
+      let clarifyTimer = null;
+      const lockClarify = (label) => {
+        if (clarifyTimer) {
+          clearInterval(clarifyTimer);
+          clarifyTimer = null;
+        }
+        optBtns.forEach((b) => { b.disabled = true; });
+        textInput.disabled = true;
+        sendBtn.disabled = true;
+        cancelBtn.disabled = true;
+        timerSpan.textContent = label;
+        resultBadgeEl.textContent = label;
+      };
+      pendingApprovalCleanups.set(approvalId, lockClarify);
+
+      const submitClarify = (approved, answerText, label) => {
+        pendingApprovalCleanups.delete(approvalId);
+        lockClarify(label);
+        sendEnvelope(
+          "tool.approval_response",
+          {
+            approval_id: approvalId,
+            turn_id: turnId || payload.turn_id || activeTurnId || "",
+            approved,
+            remember_for_session: false,
+            answer_text: answerText
+          },
+          turnId || activeTurnId
+        );
+      };
+
+      opts.forEach((opt) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn btn-secondary";
+        b.textContent = opt;
+        b.addEventListener("click", () => submitClarify(true, String(opt), `💬 已选：${opt}`));
+        optBtns.push(b);
+        actionsEl.appendChild(b);
+      });
+      sendBtn.addEventListener("click", () => {
+        const val = textInput.value.trim();
+        if (val) submitClarify(true, val, `💬 已回复：${val}`);
+      });
+      textInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          const val = textInput.value.trim();
+          if (val) submitClarify(true, val, `💬 已回复：${val}`);
+        }
+      });
+      cancelBtn.addEventListener("click", () => submitClarify(false, "", "已取消确认"));
+
+      actionsEl.appendChild(textInput);
+      actionsEl.appendChild(sendBtn);
+      actionsEl.appendChild(cancelBtn);
+      actionsEl.appendChild(resultBadgeEl);
+
+      clarifyTimer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          pendingApprovalCleanups.delete(approvalId);
+          lockClarify("⌛ 确认超时");
+        } else {
+          timerSpan.textContent = `剩余 ${remaining}s`;
+        }
+      }, 1000);
+
+      card.appendChild(head);
+      card.appendChild(summaryEl);
+      card.appendChild(actionsEl);
+      messagesEl.appendChild(card);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return;
+    }
+
     let detailsText;
     if (detailsObj.command) {
       detailsText = `命令: ${detailsObj.command}\n目录: ${detailsObj.cwd || "~"}`;

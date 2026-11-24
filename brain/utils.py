@@ -7,14 +7,22 @@ def truncate_head_tail(
     *,
     notice: str = "中间输出已按预算截断",
 ) -> str:
-    """Keep 60% head and 40% tail when text exceeds `max_chars`."""
+    """Keep 60% head and 40% tail when text exceeds `max_chars`, strictly bounded by `max_chars`."""
     if not text or max_chars <= 0 or len(text) <= max_chars:
         return text
-    head_len = max(40, int(max_chars * 0.6))
-    tail_len = max(40, max_chars - head_len - 32)
+    sample_sep = f"\n...[{notice}，省略 {len(text)} 字符]...\n"
+    if len(sample_sep) >= max_chars - 40:
+        return text[:max_chars]
+    body_budget = max_chars - len(sample_sep)
+    head_len = max(20, int(body_budget * 0.6))
+    tail_len = max(20, body_budget - head_len)
     omitted = len(text) - head_len - tail_len
-    return (
-        f"{text[:head_len].rstrip()}\n"
-        f"...[{notice}，省略 {omitted} 字符]...\n"
-        f"{text[-tail_len:].lstrip()}"
-    )
+    sep = f"\n...[{notice}，省略 {omitted} 字符]...\n"
+    head_part = text[:head_len].rstrip()
+    tail_part = text[-tail_len:].lstrip()
+    out = f"{head_part}{sep}{tail_part}"
+    if len(out) > max_chars:
+        excess = len(out) - max_chars
+        head_part = text[: max(10, head_len - excess)].rstrip()
+        out = f"{head_part}{sep}{tail_part}"
+    return out

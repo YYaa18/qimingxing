@@ -1267,6 +1267,53 @@ class Hub:
         finally:
             self._pending_approvals.pop(approval_id, None)
 
+    async def _request_user_clarification(
+        self,
+        *,
+        conn: ClientConnection,
+        turn_id: str,
+        question: str,
+        options: List[str],
+        timeout_sec: int,
+    ) -> Optional[str]:
+        approval_id = f"ask_{uuid.uuid4().hex[:10]}"
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[ToolApprovalResponsePayload] = loop.create_future()
+        self._pending_approvals[approval_id] = (turn_id, fut)
+        clean_options = [str(o).strip() for o in options if str(o).strip()][:4]
+        try:
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "tool.approval_request",
+                    ToolApprovalRequestPayload(
+                        approval_id=approval_id,
+                        turn_id=turn_id,
+                        tool_name="ask_user",
+                        risk_level="safe",
+                        summary=question,
+                        details={
+                            "kind": "clarification",
+                            "question": question,
+                            "options": clean_options,
+                            "allow_remember": False,
+                        },
+                        timeout_sec=timeout_sec,
+                    ),
+                    turn_id=turn_id,
+                )
+            )
+            resp = await asyncio.wait_for(fut, timeout=max(1, timeout_sec))
+            ans = (resp.answer_text or "").strip()
+            if resp.approved and ans:
+                return ans
+            return None
+        except asyncio.TimeoutError:
+            logger.info("Clarification request timed out approval_id=%s", approval_id)
+            return None
+        finally:
+            self._pending_approvals.pop(approval_id, None)
+
     async def _record_usage_and_alert(
         self,
         *,
@@ -1695,6 +1742,19 @@ class Hub:
                         timeout_sec=timeout_sec,
                     )
 
+                async def _on_ask_user(
+                    question: str,
+                    options: List[str],
+                    timeout_sec: int,
+                ) -> Optional[str]:
+                    return await self._request_user_clarification(
+                        conn=conn,
+                        turn_id=turn_id,
+                        question=question,
+                        options=options,
+                        timeout_sec=timeout_sec,
+                    )
+
                 tool_ctx = ToolExecutionContext(
                     turn_id=turn_id,
                     session_id=active_session_id,
@@ -1706,6 +1766,7 @@ class Hub:
                     session_approved_tools=self._session_approved_tools,
                     on_status=_on_status,
                     on_approval=_on_approval,
+                    on_ask_user=_on_ask_user,
                 )
                 loop_res = await self.tool_executor.run(
                     messages=messages,

@@ -120,10 +120,14 @@ def test_settings_api_masks_keys_saves_0600_and_hot_reloads(tmp_path: Path) -> N
                     assert msg["payload"]["mode"] == "full_on_demand"
             assert set(seen_types) == {"system.welcome", "system.privacy_state"}
 
-        # 3. Empty key patch preserves existing updated key rather than wiping it
+        # 3. Empty key OR masked placeholder preserves existing updated key rather than wiping it
         r_keep = client.post(
             "/api/config/settings",
-            json={"profiles": {"deepseek_flash": {"model": "deepseek-v4-pro", "api_key": ""}}},
+            json={
+                "shared_deepseek_api_key": "sk-u****9999",
+                "profiles": {"deepseek_flash": {"model": "deepseek-v4-pro", "api_key": "****"}},
+                "audio": {"tts": {"api_key": "sk-****9999"}},
+            },
         )
         assert r_keep.status_code == 200
         kept = r_keep.json()["settings"]

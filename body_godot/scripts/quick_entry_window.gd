@@ -3,6 +3,7 @@ extends Window
 signal prompt_submitted(text: String, with_screen: bool, attached_paths: Array[String])
 signal profile_selected(profile_name: String)
 signal new_chat_requested
+signal visibility_changed_custom(is_visible: bool)
 
 var _card: PanelContainer
 var _prompt_edit: TextEdit
@@ -240,6 +241,7 @@ func open_quick_entry() -> void:
 	var target_y := usable.position.y + int(usable.size.y * 0.22)
 	position = Vector2i(target_x, target_y)
 	visible = true
+	visibility_changed_custom.emit(true)
 	grab_focus()
 	if _prompt_edit != null:
 		_prompt_edit.call_deferred("grab_focus")
@@ -247,7 +249,9 @@ func open_quick_entry() -> void:
 
 
 func close_quick_entry() -> void:
-	visible = false
+	if visible:
+		visible = false
+		visibility_changed_custom.emit(false)
 
 
 func toggle_quick_entry() -> bool:

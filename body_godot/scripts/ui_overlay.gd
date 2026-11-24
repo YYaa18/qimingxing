@@ -3,6 +3,7 @@ class_name QimingxingUIOverlay
 
 signal passthrough_rects_changed(rects: Array[Rect2])
 signal approval_decided(approval_id: String, turn_id: String, approved: bool)
+signal clarification_answered(approval_id: String, turn_id: String, approved: bool, answer_text: String)
 signal cancel_requested(turn_id: String)
 signal drop_queue_submitted(paths: Array[String])
 signal desktop_action_requested(action: String, path: String, media_type: String)
@@ -29,6 +30,13 @@ var _approval_panel: PanelContainer
 var _approval_label: Label
 var _pending_approval_id: String = ""
 var _pending_approval_turn: String = ""
+
+var _clarify_panel: PanelContainer
+var _clarify_label: Label
+var _clarify_options_box: HBoxContainer
+var _clarify_input: LineEdit
+var _pending_clarify_id: String = ""
+var _pending_clarify_turn: String = ""
 
 var _drop_panel: PanelContainer
 var _drop_label: Label
@@ -122,6 +130,59 @@ func _build_ui() -> void:
 	deny_btn.text = "拒绝"
 	deny_btn.pressed.connect(func() -> void: _resolve_approval(false))
 	app_row.add_child(deny_btn)
+
+	# 2.5 Gentle clarification prompt capsule (ask_user, SAFE)
+	_clarify_panel = PanelContainer.new()
+	_clarify_panel.add_theme_stylebox_override(
+		"panel", _make_card_style(Color(0.08, 0.16, 0.24, 0.94), Color(0.36, 0.85, 1.0, 0.85))
+	)
+	_clarify_panel.visible = false
+	_stack.add_child(_clarify_panel)
+
+	var clar_col := VBoxContainer.new()
+	clar_col.add_theme_constant_override("separation", 5)
+	_clarify_panel.add_child(clar_col)
+
+	_clarify_label = Label.new()
+	_clarify_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_clarify_label.add_theme_font_size_override("font_size", 12)
+	_clarify_label.add_theme_color_override("font_color", Color(0.92, 0.97, 1.0))
+	clar_col.add_child(_clarify_label)
+
+	_clarify_options_box = HBoxContainer.new()
+	_clarify_options_box.add_theme_constant_override("separation", 4)
+	clar_col.add_child(_clarify_options_box)
+
+	var clar_input_row := HBoxContainer.new()
+	clar_input_row.add_theme_constant_override("separation", 4)
+	clar_col.add_child(clar_input_row)
+
+	_clarify_input = LineEdit.new()
+	_clarify_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_clarify_input.placeholder_text = "或输入你的说明…"
+	_clarify_input.add_theme_font_size_override("font_size", 11)
+	_clarify_input.text_submitted.connect(func(txt: String) -> void:
+		var cleaned := txt.strip_edges()
+		if cleaned != "":
+			_resolve_clarification(true, cleaned)
+	)
+	clar_input_row.add_child(_clarify_input)
+
+	var clar_ok := Button.new()
+	clar_ok.text = "回复"
+	clar_ok.add_theme_font_size_override("font_size", 11)
+	clar_ok.pressed.connect(func() -> void:
+		var cleaned := _clarify_input.text.strip_edges()
+		if cleaned != "":
+			_resolve_clarification(true, cleaned)
+	)
+	clar_input_row.add_child(clar_ok)
+
+	var clar_cancel := Button.new()
+	clar_cancel.text = "取消"
+	clar_cancel.add_theme_font_size_override("font_size", 11)
+	clar_cancel.pressed.connect(func() -> void: _resolve_clarification(false, ""))
+	clar_input_row.add_child(clar_cancel)
 
 	# 3. Drop Queue capsule (files_dropped accumulation)
 	_drop_panel = PanelContainer.new()
@@ -329,6 +390,40 @@ func _resolve_approval(approved: bool) -> void:
 		_pending_approval_turn = ""
 
 
+func show_clarification_request(approval_id: String, turn_id: String, question: String, options: Array) -> void:
+	_pending_clarify_id = approval_id
+	_pending_clarify_turn = turn_id
+	_clarify_label.text = "💬 %s" % question
+	_clarify_input.text = ""
+	for ch in _clarify_options_box.get_children():
+		ch.queue_free()
+	var has_opts := false
+	for opt_var in options:
+		var opt_txt := str(opt_var).strip_edges()
+		if opt_txt == "":
+			continue
+		has_opts = true
+		var btn := Button.new()
+		btn.text = opt_txt
+		btn.add_theme_font_size_override("font_size", 11)
+		btn.pressed.connect(func() -> void: _resolve_clarification(true, opt_txt))
+		_clarify_options_box.add_child(btn)
+	_clarify_options_box.visible = has_opts
+	_clarify_panel.visible = true
+	if get_window() != null:
+		get_window().grab_focus()
+	_emit_rects()
+
+
+func _resolve_clarification(approved: bool, answer_text: String) -> void:
+	_clarify_panel.visible = false
+	_emit_rects()
+	if _pending_clarify_id != "":
+		clarification_answered.emit(_pending_clarify_id, _pending_clarify_turn, approved, answer_text)
+		_pending_clarify_id = ""
+		_pending_clarify_turn = ""
+
+
 func queue_dropped_files(files: PackedStringArray) -> void:
 	for f in files:
 		if not _dropped_paths.has(f):
@@ -405,12 +500,13 @@ func set_dock_tucked(tucked: bool) -> void:
 
 func _collect_and_emit_rects() -> void:
 	var rects: Array[Rect2] = []
-	for ctrl in [_bubble_panel, _approval_panel, _drop_panel, _artifact_panel, _controls_bar]:
+	for ctrl in [_bubble_panel, _approval_panel, _clarify_panel, _drop_panel, _artifact_panel, _controls_bar]:
 		if ctrl != null and ctrl.visible:
 			rects.append(ctrl.get_global_rect())
 	var active := (
 		_in_turn
 		or (_approval_panel != null and _approval_panel.visible)
+		or (_clarify_panel != null and _clarify_panel.visible)
 		or (_drop_panel != null and _drop_panel.visible)
 		or (_artifact_panel != null and _artifact_panel.visible)
 	)

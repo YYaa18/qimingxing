@@ -304,6 +304,7 @@ class ToolApprovalResponsePayload(ProtocolModel):
     turn_id: str
     approved: bool
     remember_for_session: bool = False
+    answer_text: str = ""
 
 
 class CardAction(ProtocolModel):

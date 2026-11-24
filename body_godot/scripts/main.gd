@@ -69,6 +69,7 @@ func _ready() -> void:
 	overlay.passthrough_rects_changed.connect(avatar.set_ui_interactive_rects)
 	overlay.interaction_active_changed.connect(avatar.set_interaction_active)
 	overlay.approval_decided.connect(_on_approval_decided)
+	overlay.clarification_answered.connect(_on_clarification_answered)
 	overlay.cancel_requested.connect(_on_cancel_requested)
 	overlay.drop_queue_submitted.connect(_on_drop_submitted)
 	overlay.desktop_action_requested.connect(_on_desktop_action)
@@ -229,13 +230,29 @@ func _on_envelope(event_type: String, turn_id: String, payload: Dictionary) -> v
 				payload.get("actions", []),
 			)
 		"tool.approval_request":
-			audio.play_earcon("approval")
-			avatar.set_approval_alert(true)
-			overlay.show_approval_request(
-				str(payload.get("approval_id", "")),
-				str(payload.get("turn_id", turn_id)),
-				str(payload.get("summary", "需要审批")),
-			)
+			var tname := str(payload.get("tool_name", ""))
+			var det: Variant = payload.get("details", {})
+			var det_dict: Dictionary = det if typeof(det) == TYPE_DICTIONARY else {}
+			var kind := str(det_dict.get("kind", ""))
+			if tname == "ask_user" or kind == "clarification":
+				audio.play_earcon("notice")
+				avatar.set_avatar_state("thinking", "thinking")
+				var opts: Variant = det_dict.get("options", [])
+				overlay.call(
+					"show_clarification_request",
+					str(payload.get("approval_id", "")),
+					str(payload.get("turn_id", turn_id)),
+					str(det_dict.get("question", payload.get("summary", "请补充确认"))),
+					opts if typeof(opts) == TYPE_ARRAY else [],
+				)
+			else:
+				audio.play_earcon("approval")
+				avatar.set_approval_alert(true)
+				overlay.show_approval_request(
+					str(payload.get("approval_id", "")),
+					str(payload.get("turn_id", turn_id)),
+					str(payload.get("summary", "需要审批")),
+				)
 		"audio.output_start":
 			audio.start_tts_stream(int(payload.get("sample_rate", 24000)))
 		"audio.output_chunk":
@@ -254,6 +271,16 @@ func _on_approval_decided(approval_id: String, turn_id: String, approved: bool) 
 		"turn_id": turn_id,
 		"approved": approved,
 		"remember_for_session": false,
+	}, turn_id)
+
+
+func _on_clarification_answered(approval_id: String, turn_id: String, approved: bool, answer_text: String) -> void:
+	ws.send_event("tool.approval_response", {
+		"approval_id": approval_id,
+		"turn_id": turn_id,
+		"approved": approved,
+		"remember_for_session": false,
+		"answer_text": answer_text,
 	}, turn_id)
 
 
@@ -280,6 +307,9 @@ func _ensure_quick_entry_window() -> Window:
 		_quick_entry_win.prompt_submitted.connect(_on_quick_entry_submitted)
 		_quick_entry_win.profile_selected.connect(_on_quick_entry_profile_selected)
 		_quick_entry_win.new_chat_requested.connect(_on_quick_entry_new_chat)
+		_quick_entry_win.visibility_changed_custom.connect(func(vis: bool) -> void:
+			avatar.set_interaction_active(vis)
+		)
 		if not _cached_profiles.is_empty():
 			_quick_entry_win.call("sync_profiles", _cached_active_profile, _cached_profiles)
 	return _quick_entry_win

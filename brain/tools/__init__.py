@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from brain.config import AppConfig
+from brain.tools.ask_user import AskUserTool
 from brain.tools.base import Tool, ToolExecutionContext, ToolResult, ToolTraceStep
 from brain.tools.clipboard_tool import ClipboardTool
 from brain.tools.desktop_io import (
@@ -55,6 +56,7 @@ def build_default_tool_registry(
     ))
     registry.register(InboxScanTool(config))
     registry.register(WorkHistoryInspectTool())
+    registry.register(AskUserTool())
     registry.register(ScheduleTaskTool())
     registry.register(ListTasksTool())
     registry.register(CancelTaskTool())
@@ -62,6 +64,7 @@ def build_default_tool_registry(
 
 
 __all__ = [
+    "AskUserTool",
     "BatchPathContextStore",
     "CancelTaskTool",
     "ClipboardTool",

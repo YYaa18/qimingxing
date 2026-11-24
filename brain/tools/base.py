@@ -36,6 +36,9 @@ class ToolResult:
 ApprovalRequester = Callable[
     [str, RiskLevel, str, Dict[str, Any], int], Awaitable[Tuple[bool, bool]]
 ]
+UserQuestionRequester = Callable[
+    [str, List[str], int], Awaitable[Optional[str]]
+]
 StatusEmitter = Callable[
     [str, str, str, Optional[int], Optional[int]], Awaitable[None]
 ]
@@ -57,6 +60,7 @@ class ToolExecutionContext:
         session_approved_tools: Optional[Set[str]] = None,
         on_status: Optional[StatusEmitter] = None,
         on_approval: Optional[ApprovalRequester] = None,
+        on_ask_user: Optional[UserQuestionRequester] = None,
         usage_collector: Optional[List[LLMUsage]] = None,
     ) -> None:
         self.turn_id = turn_id
@@ -71,6 +75,7 @@ class ToolExecutionContext:
         )
         self._on_status = on_status
         self._on_approval = on_approval
+        self._on_ask_user = on_ask_user
         self.usage_collector: List[LLMUsage] = (
             usage_collector if usage_collector is not None else []
         )
@@ -112,6 +117,20 @@ class ToolExecutionContext:
         return await self._on_approval(
             tool_name, risk_level, summary, details or {}, wait_sec
         )
+
+    async def ask_user_clarification(
+        self,
+        *,
+        question: str,
+        options: Optional[List[str]] = None,
+        timeout_sec: Optional[int] = None,
+    ) -> Optional[str]:
+        if self._on_ask_user is None:
+            return None
+        wait_sec = (
+            timeout_sec if timeout_sec is not None else self.config.tools.approval_timeout_sec
+        )
+        return await self._on_ask_user(question, options or [], wait_sec)
 
 
 class Tool(ABC):

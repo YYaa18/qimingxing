@@ -16,6 +16,17 @@ _ACTIVITY_INTENT_RE = re.compile(
     r"|(时间线|桌面足迹|活动记录|刚在忙)"
 )
 
+SOURCE_ATTRIBUTION_REMINDER = (
+    "【结论来源标注要求】引用以下挂载文件、本地路径或工具返回的实测内容时，"
+    "请简短标明“根据本地文件/工具结果”；属于推测或建议的部分请明确标出“以下为推测/建议”，"
+    "若缺乏依据请直白说明，切勿编造或瞎猜。"
+)
+
+
+def get_grounding_guidelines() -> str:
+    """Return canonical source attribution & honest-boundary guidelines injected into prompts."""
+    return f"{BASE_SYSTEM_PROMPT}\n{SOURCE_ATTRIBUTION_REMINDER}"
+
 
 def estimate_tokens(text: str) -> int:
     """Lightweight CJK/ASCII token estimator without heavy tokenizer dependencies."""
@@ -183,6 +194,8 @@ class ContextBuilder:
         for extra_sec in extra_l3_sections or []:
             if extra_sec and extra_sec.strip():
                 l3_sections.append(extra_sec.strip())
+        if any(extra_sec and extra_sec.strip() for extra_sec in (extra_l3_sections or [])):
+            l3_sections.append(SOURCE_ATTRIBUTION_REMINDER)
 
         expand_tl = needs_full_timeline(user_text)
         stats.timeline_expanded = expand_tl

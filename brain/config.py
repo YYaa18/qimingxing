@@ -659,6 +659,14 @@ def mask_secret(secret: str) -> str:
     return f"{s[:4]}****{s[-4:]}"
 
 
+def _is_masked_placeholder(value: str) -> bool:
+    """Return True if a submitted secret looks like a redacted/masked placeholder."""
+    s = (value or "").strip()
+    if not s:
+        return True
+    return "****" in s or "***REDACTED***" in s
+
+
 def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
     """Export safe settings dictionary (API keys masked, never raw secrets)."""
     shared_ds_key = ""
@@ -788,7 +796,7 @@ def save_settings_to_yaml(
 
     # 1. Shared DeepSeek key shortcut (updates DeepSeek profiles + OCR + web_search + audio)
     shared_ds_key = str(updates.get("shared_deepseek_api_key") or "").strip()
-    if shared_ds_key:
+    if shared_ds_key and not _is_masked_placeholder(shared_ds_key):
         for pname, pdict in profiles_raw.items():
             if isinstance(pdict, dict):
                 base_u = str(pdict.get("base_url") or "").lower()
@@ -830,7 +838,7 @@ def save_settings_to_yaml(
             if "supports_vision" in patch and patch["supports_vision"] is not None:
                 cur["supports_vision"] = bool(patch["supports_vision"])
             new_key = str(patch.get("api_key") or "").strip()
-            if new_key:
+            if new_key and not _is_masked_placeholder(new_key):
                 cur["api_key"] = new_key
 
     # 3. Active default profile
@@ -857,7 +865,7 @@ def save_settings_to_yaml(
                 for k, v in sub_up.items():
                     if k == "api_key":
                         kval = str(v or "").strip()
-                        if kval:
+                        if kval and not _is_masked_placeholder(kval):
                             sub_sec["api_key"] = kval
                     elif v is not None:
                         sub_sec[k] = v
