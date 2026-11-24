@@ -1,0 +1,658 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qimingxing.local/schemas/protocol.v1.0.schema.json",
+  "title": "Qimingxing Local Communication Protocol",
+  "description": "Single source of truth JSON Schema for Qimingxing MVP 1.0 WebSocket events.",
+  "protocol_version": "1.0",
+  "$ref": "#/$defs/Envelope",
+  "x-event-payloads": {
+    "system.hello": {
+      "$ref": "#/$defs/SystemHelloPayload"
+    },
+    "system.welcome": {
+      "$ref": "#/$defs/SystemWelcomePayload"
+    },
+    "system.ping": {
+      "$ref": "#/$defs/SystemPingPayload"
+    },
+    "system.pong": {
+      "$ref": "#/$defs/SystemPongPayload"
+    },
+    "system.config_set": {
+      "$ref": "#/$defs/SystemConfigSetPayload"
+    },
+    "system.error": {
+      "$ref": "#/$defs/SystemErrorPayload"
+    },
+    "input.text": {
+      "$ref": "#/$defs/InputTextPayload"
+    },
+    "input.action": {
+      "$ref": "#/$defs/InputActionPayload"
+    },
+    "input.cancel": {
+      "$ref": "#/$defs/InputCancelPayload"
+    },
+    "context.window_changed": {
+      "$ref": "#/$defs/ContextWindowChangedPayload"
+    },
+    "context.game_state": {
+      "$ref": "#/$defs/ContextGameStatePayload"
+    },
+    "context.ocr_snippet": {
+      "$ref": "#/$defs/ContextOcrSnippetPayload"
+    },
+    "output.turn_start": {
+      "$ref": "#/$defs/OutputTurnStartPayload"
+    },
+    "output.turn_end": {
+      "$ref": "#/$defs/OutputTurnEndPayload"
+    },
+    "output.text_delta": {
+      "$ref": "#/$defs/OutputTextDeltaPayload"
+    },
+    "output.tool_status": {
+      "$ref": "#/$defs/OutputToolStatusPayload"
+    },
+    "output.card": {
+      "$ref": "#/$defs/OutputCardPayload"
+    },
+    "avatar.state": {
+      "$ref": "#/$defs/AvatarStatePayload"
+    }
+  },
+  "$defs": {
+    "AvatarStatePayload": {
+      "properties": {
+        "emotion": {
+          "default": "neutral",
+          "enum": [
+            "neutral",
+            "happy",
+            "thinking",
+            "surprised",
+            "confused",
+            "warning"
+          ],
+          "title": "Emotion",
+          "type": "string"
+        },
+        "intensity": {
+          "default": 0.7,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Intensity",
+          "type": "number"
+        },
+        "activity": {
+          "default": "idle",
+          "enum": [
+            "idle",
+            "thinking",
+            "speaking",
+            "tool_running"
+          ],
+          "title": "Activity",
+          "type": "string"
+        },
+        "ext": {
+          "additionalProperties": true,
+          "title": "Ext",
+          "type": "object"
+        }
+      },
+      "title": "AvatarStatePayload",
+      "type": "object"
+    },
+    "CardAction": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "CardAction",
+      "type": "object"
+    },
+    "ClientCapabilities": {
+      "properties": {
+        "avatar_mode": {
+          "default": "simple_2d",
+          "title": "Avatar Mode",
+          "type": "string"
+        },
+        "supported_emotions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Emotions",
+          "type": "array"
+        },
+        "streaming_text": {
+          "default": true,
+          "title": "Streaming Text",
+          "type": "boolean"
+        },
+        "ui_cards": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ui Cards",
+          "type": "array"
+        },
+        "audio_output": {
+          "default": false,
+          "title": "Audio Output",
+          "type": "boolean"
+        },
+        "lip_sync": {
+          "default": false,
+          "title": "Lip Sync",
+          "type": "boolean"
+        }
+      },
+      "title": "ClientCapabilities",
+      "type": "object"
+    },
+    "ContextGameStatePayload": {
+      "properties": {
+        "game_id": {
+          "title": "Game Id",
+          "type": "string"
+        },
+        "provider": {
+          "default": "mock_senses",
+          "title": "Provider",
+          "type": "string"
+        },
+        "summary_version": {
+          "default": 1,
+          "title": "Summary Version",
+          "type": "integer"
+        },
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        }
+      },
+      "required": [
+        "game_id"
+      ],
+      "title": "ContextGameStatePayload",
+      "type": "object"
+    },
+    "ContextOcrSnippetPayload": {
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "region": {
+          "default": "unknown",
+          "title": "Region",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 1.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "ContextOcrSnippetPayload",
+      "type": "object"
+    },
+    "ContextWindowChangedPayload": {
+      "properties": {
+        "app_name": {
+          "title": "App Name",
+          "type": "string"
+        },
+        "process_name": {
+          "default": "",
+          "title": "Process Name",
+          "type": "string"
+        },
+        "window_title": {
+          "default": "",
+          "title": "Window Title",
+          "type": "string"
+        },
+        "scene": {
+          "default": "general",
+          "title": "Scene",
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_name"
+      ],
+      "title": "ContextWindowChangedPayload",
+      "type": "object"
+    },
+    "Envelope": {
+      "description": "Unified v1.0 WebSocket message envelope.",
+      "properties": {
+        "v": {
+          "default": "1.0",
+          "description": "Protocol version",
+          "title": "V",
+          "type": "string"
+        },
+        "id": {
+          "description": "Unique message ID",
+          "title": "Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Conversation turn ID",
+          "title": "Turn Id"
+        },
+        "ts": {
+          "description": "Unix timestamp in milliseconds",
+          "title": "Ts",
+          "type": "integer"
+        },
+        "source": {
+          "description": "Sender role: body, brain, or senses",
+          "enum": [
+            "body",
+            "brain",
+            "senses"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "type": {
+          "description": "Namespaced event type, e.g. output.text_delta",
+          "title": "Type",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "description": "Event payload",
+          "title": "Payload",
+          "type": "object"
+        }
+      },
+      "required": [
+        "source",
+        "type"
+      ],
+      "title": "Envelope",
+      "type": "object"
+    },
+    "InputActionPayload": {
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "card_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Card Id"
+        },
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "InputActionPayload",
+      "type": "object"
+    },
+    "InputCancelPayload": {
+      "properties": {
+        "reason": {
+          "default": "user_cancelled",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "title": "InputCancelPayload",
+      "type": "object"
+    },
+    "InputTextPayload": {
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "InputTextPayload",
+      "type": "object"
+    },
+    "OutputCardPayload": {
+      "properties": {
+        "card_id": {
+          "title": "Card Id",
+          "type": "string"
+        },
+        "card_type": {
+          "default": "markdown",
+          "title": "Card Type",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "content_markdown": {
+          "title": "Content Markdown",
+          "type": "string"
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/CardAction"
+          },
+          "title": "Actions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "card_id",
+        "title",
+        "content_markdown"
+      ],
+      "title": "OutputCardPayload",
+      "type": "object"
+    },
+    "OutputTextDeltaPayload": {
+      "properties": {
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "delta": {
+          "title": "Delta",
+          "type": "string"
+        },
+        "is_final": {
+          "default": false,
+          "title": "Is Final",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "seq",
+        "delta"
+      ],
+      "title": "OutputTextDeltaPayload",
+      "type": "object"
+    },
+    "OutputToolStatusPayload": {
+      "properties": {
+        "status": {
+          "enum": [
+            "running",
+            "completed",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "tool"
+      ],
+      "title": "OutputToolStatusPayload",
+      "type": "object"
+    },
+    "OutputTurnEndPayload": {
+      "properties": {
+        "finish_reason": {
+          "default": "completed",
+          "enum": [
+            "completed",
+            "cancelled",
+            "error"
+          ],
+          "title": "Finish Reason",
+          "type": "string"
+        },
+        "elapsed_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Elapsed Ms"
+        }
+      },
+      "title": "OutputTurnEndPayload",
+      "type": "object"
+    },
+    "OutputTurnStartPayload": {
+      "properties": {
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "provider": {
+          "default": "",
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "title": "Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "title": "OutputTurnStartPayload",
+      "type": "object"
+    },
+    "ProfileInfo": {
+      "description": "Public profile metadata exposed to clients (strictly excludes api_key).",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "label",
+        "provider",
+        "model"
+      ],
+      "title": "ProfileInfo",
+      "type": "object"
+    },
+    "SystemConfigSetPayload": {
+      "properties": {
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "title": "SystemConfigSetPayload",
+      "type": "object"
+    },
+    "SystemErrorPayload": {
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "recoverable": {
+          "default": true,
+          "title": "Recoverable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "SystemErrorPayload",
+      "type": "object"
+    },
+    "SystemHelloPayload": {
+      "properties": {
+        "client_name": {
+          "title": "Client Name",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "body",
+            "brain",
+            "senses"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/ClientCapabilities"
+        }
+      },
+      "required": [
+        "client_name",
+        "role"
+      ],
+      "title": "SystemHelloPayload",
+      "type": "object"
+    },
+    "SystemPingPayload": {
+      "properties": {
+        "client_ts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Ts"
+        }
+      },
+      "title": "SystemPingPayload",
+      "type": "object"
+    },
+    "SystemPongPayload": {
+      "properties": {
+        "client_ts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Ts"
+        },
+        "server_ts": {
+          "title": "Server Ts",
+          "type": "integer"
+        }
+      },
+      "title": "SystemPongPayload",
+      "type": "object"
+    },
+    "SystemWelcomePayload": {
+      "properties": {
+        "server_version": {
+          "title": "Server Version",
+          "type": "string"
+        },
+        "protocol_version": {
+          "default": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "active_profile": {
+          "title": "Active Profile",
+          "type": "string"
+        },
+        "profiles": {
+          "items": {
+            "$ref": "#/$defs/ProfileInfo"
+          },
+          "title": "Profiles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "server_version",
+        "active_profile"
+      ],
+      "title": "SystemWelcomePayload",
+      "type": "object"
+    }
+  }
+}
