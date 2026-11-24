@@ -33,20 +33,9 @@ var _artifact_media_type: String = "file"
 
 var _controls_bar: HBoxContainer
 var _stop_btn: Button
-var _earcon_btn: Button
-var _ambient_btn: Button
 
-var _earcons_on: bool = true
-var _ambient_on: bool = false
-
-signal earcons_toggled(enabled: bool)
-signal ambient_toggled(enabled: bool)
-signal scale_step_requested(delta: float)
-signal roam_toggled(enabled: bool)
 signal interaction_active_changed(active: bool)
 
-var _roam_btn: Button
-var _roam_on: bool = true
 var _dock_tucked: bool = false
 
 
@@ -183,10 +172,11 @@ func _build_ui() -> void:
 	_artifact_buttons_box.add_theme_constant_override("separation", 4)
 	art_col.add_child(_artifact_buttons_box)
 
-	# 5. Lightweight status & quick controls bar
+	# 5. Minimal emergency-stop capsule (hidden cleanly whenever idle)
 	_controls_bar = HBoxContainer.new()
 	_controls_bar.alignment = BoxContainer.ALIGNMENT_CENTER
 	_controls_bar.add_theme_constant_override("separation", 4)
+	_controls_bar.visible = false
 	stack.add_child(_controls_bar)
 
 	_stop_btn = Button.new()
@@ -195,50 +185,6 @@ func _build_ui() -> void:
 	_stop_btn.visible = false
 	_stop_btn.pressed.connect(func() -> void: cancel_requested.emit(_current_turn_id))
 	_controls_bar.add_child(_stop_btn)
-
-	var shrink_btn := Button.new()
-	shrink_btn.text = "−"
-	shrink_btn.tooltip_text = "缩小助手（也可用滚轮）"
-	shrink_btn.add_theme_font_size_override("font_size", 11)
-	shrink_btn.pressed.connect(func() -> void: scale_step_requested.emit(-0.08))
-	_controls_bar.add_child(shrink_btn)
-
-	var grow_btn := Button.new()
-	grow_btn.text = "+"
-	grow_btn.tooltip_text = "放大助手（也可用滚轮）"
-	grow_btn.add_theme_font_size_override("font_size", 11)
-	grow_btn.pressed.connect(func() -> void: scale_step_requested.emit(0.08))
-	_controls_bar.add_child(grow_btn)
-
-	_roam_btn = Button.new()
-	_roam_btn.text = "漫步:开"
-	_roam_btn.add_theme_font_size_override("font_size", 11)
-	_roam_btn.pressed.connect(func() -> void:
-		_roam_on = not _roam_on
-		_roam_btn.text = "漫步:开" if _roam_on else "漫步:关"
-		roam_toggled.emit(_roam_on)
-	)
-	_controls_bar.add_child(_roam_btn)
-
-	_earcon_btn = Button.new()
-	_earcon_btn.text = "音效:开"
-	_earcon_btn.add_theme_font_size_override("font_size", 11)
-	_earcon_btn.pressed.connect(func() -> void:
-		_earcons_on = not _earcons_on
-		_earcon_btn.text = "音效:开" if _earcons_on else "音效:关"
-		earcons_toggled.emit(_earcons_on)
-	)
-	_controls_bar.add_child(_earcon_btn)
-
-	_ambient_btn = Button.new()
-	_ambient_btn.text = "氛围:关"
-	_ambient_btn.add_theme_font_size_override("font_size", 11)
-	_ambient_btn.pressed.connect(func() -> void:
-		_ambient_on = not _ambient_on
-		_ambient_btn.text = "氛围:开" if _ambient_on else "氛围:关"
-		ambient_toggled.emit(_ambient_on)
-	)
-	_controls_bar.add_child(_ambient_btn)
 
 
 func _process(delta: float) -> void:
@@ -257,6 +203,7 @@ func on_turn_start(turn_id: String) -> void:
 	_bubble_label.text = ""
 	_bubble_panel.visible = false
 	_stop_btn.visible = true
+	_controls_bar.visible = not _dock_tucked
 	_emit_rects()
 
 
@@ -277,6 +224,7 @@ func on_text_delta(delta: String, is_final: bool) -> void:
 func on_turn_end() -> void:
 	_in_turn = false
 	_stop_btn.visible = false
+	_controls_bar.visible = false
 	if _bubble_panel.visible:
 		_bubble_fade_timer = 6.5
 	_emit_rects()
@@ -375,16 +323,10 @@ func _emit_rects() -> void:
 	call_deferred("_collect_and_emit_rects")
 
 
-func set_roam_button_state(enabled: bool) -> void:
-	_roam_on = enabled
-	if _roam_btn != null:
-		_roam_btn.text = "漫步:开" if _roam_on else "漫步:关"
-
-
 func set_dock_tucked(tucked: bool) -> void:
 	_dock_tucked = tucked
 	if _controls_bar != null:
-		_controls_bar.visible = not tucked
+		_controls_bar.visible = (not tucked) and _in_turn
 	_emit_rects()
 
 

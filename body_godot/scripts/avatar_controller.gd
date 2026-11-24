@@ -1,6 +1,7 @@
 extends Control
 
 signal avatar_clicked
+signal context_menu_requested
 signal files_dropped_queued(paths: PackedStringArray)
 signal scale_changed(new_scale: float)
 signal dock_state_changed(edge: String, tucked: bool)
@@ -181,6 +182,27 @@ func set_roam_enabled(enabled: bool) -> void:
 	else:
 		_roam_wait_timer = 1.8
 	_save_prefs()
+
+
+func reset_to_default_position() -> void:
+	var win := get_window()
+	if win == null:
+		return
+	_dock_edge = ""
+	_dock_peeking = false
+	_last_reported_tucked = false
+	_roam_state = "rest"
+	_roam_velocity = Vector2.ZERO
+	var usable := DisplayServer.screen_get_usable_rect()
+	var pos := Vector2i(
+		usable.position.x + usable.size.x - win.size.x - 42,
+		usable.position.y + usable.size.y - win.size.y - 36
+	)
+	_win_pos_f = Vector2(pos)
+	_win_pos_inited = true
+	DisplayServer.window_set_position(pos)
+	dock_state_changed.emit("", false)
+	trigger_bounce(0.75)
 
 
 func set_interaction_active(active: bool) -> void:
@@ -787,6 +809,9 @@ func _gui_input(event: InputEvent) -> void:
 			return
 		if mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			adjust_avatar_scale(-0.06)
+			return
+		if mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
+			context_menu_requested.emit()
 			return
 		if mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed:

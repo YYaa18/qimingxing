@@ -622,3 +622,255 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         batch_context=batch_context,
         godot=godot,
     )
+
+
+def mask_secret(secret: str) -> str:
+    """Return a non-reversible masked preview of a secret key."""
+    s = (secret or "").strip()
+    if not s:
+        return ""
+    if len(s) <= 8:
+        return "****"
+    return f"{s[:4]}****{s[-4:]}"
+
+
+def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
+    """Export safe settings dictionary (API keys masked, never raw secrets)."""
+    shared_ds_key = ""
+    for p in cfg.profiles.values():
+        if "deepseek" in (p.base_url or "").lower() and p.api_key:
+            shared_ds_key = p.api_key
+            break
+    if not shared_ds_key:
+        shared_ds_key = (
+            cfg.ocr.api_key
+            or cfg.tools.web_search.api_key
+            or cfg.audio.asr.api_key
+            or cfg.audio.tts.api_key
+        )
+
+    return {
+        "default_profile": cfg.default_profile,
+        "shared_deepseek_key": {
+            "has_key": bool(shared_ds_key),
+            "masked": mask_secret(shared_ds_key),
+        },
+        "profiles": {
+            name: {
+                "name": p.name,
+                "label": p.label,
+                "provider": p.provider,
+                "model": p.model,
+                "base_url": p.base_url,
+                "supports_vision": p.supports_vision,
+                "has_key": bool(p.api_key),
+                "key_masked": mask_secret(p.api_key),
+            }
+            for name, p in cfg.profiles.items()
+        },
+        "ocr": {
+            "provider": cfg.ocr.provider,
+            "base_url": cfg.ocr.base_url,
+            "mode": cfg.ocr.mode,
+            "has_key": bool(cfg.ocr.api_key),
+            "key_masked": mask_secret(cfg.ocr.api_key),
+        },
+        "web_search": {
+            "enabled": cfg.tools.web_search.enabled,
+            "provider": cfg.tools.web_search.provider,
+            "base_url": cfg.tools.web_search.base_url,
+            "has_key": bool(cfg.tools.web_search.api_key),
+            "key_masked": mask_secret(cfg.tools.web_search.api_key),
+        },
+        "audio": {
+            "enabled": cfg.audio.enabled,
+            "asr": {
+                "provider": cfg.audio.asr.provider,
+                "base_url": cfg.audio.asr.base_url,
+                "model": cfg.audio.asr.model,
+                "has_key": bool(cfg.audio.asr.api_key),
+                "key_masked": mask_secret(cfg.audio.asr.api_key),
+            },
+            "tts": {
+                "provider": cfg.audio.tts.provider,
+                "base_url": cfg.audio.tts.base_url,
+                "model": cfg.audio.tts.model,
+                "voice": cfg.audio.tts.voice,
+                "sample_rate": cfg.audio.tts.sample_rate,
+                "has_key": bool(cfg.audio.tts.api_key),
+                "key_masked": mask_secret(cfg.audio.tts.api_key),
+            },
+            "ptt": {
+                "hotkey": cfg.audio.ptt.hotkey,
+                "sample_rate": cfg.audio.ptt.sample_rate,
+                "max_record_sec": cfg.audio.ptt.max_record_sec,
+            },
+        },
+        "privacy": {
+            "default_mode": cfg.privacy.default_mode,
+        },
+        "batch_context": {
+            "inbox_dir": cfg.batch_context.inbox_dir,
+            "max_paths": cfg.batch_context.max_paths,
+            "max_tree_depth": cfg.batch_context.max_tree_depth,
+        },
+        "godot": {
+            "auto_hide_on_capture": cfg.godot.auto_hide_on_capture,
+            "earcons_enabled": cfg.godot.earcons_enabled,
+            "ambient_duck_db": cfg.godot.ambient_duck_db,
+        },
+    }
+
+
+def resolve_writable_config_path(explicit_path: Optional[Path] = None) -> Path:
+    if explicit_path is not None:
+        return explicit_path
+    env_path = os.environ.get("QIMINGXING_CONFIG")
+    if env_path:
+        return Path(env_path)
+    return _REPO_ROOT / "config.yaml"
+
+
+def save_settings_to_yaml(
+    updates: Dict[str, Any],
+    *,
+    config_path: Optional[Path] = None,
+) -> AppConfig:
+    """Safely update user config YAML (`config.yaml`) with 0600 permissions and reload AppConfig."""
+    target = resolve_writable_config_path(config_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: Dict[str, Any] = {}
+    if target.exists():
+        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    elif (_REPO_ROOT / "config.example.yaml").exists():
+        raw = yaml.safe_load((_REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8")) or {}
+
+    if not isinstance(raw, dict):
+        raw = {}
+
+    profiles_raw = raw.setdefault("profiles", {})
+    if not isinstance(profiles_raw, dict):
+        profiles_raw = {}
+        raw["profiles"] = profiles_raw
+
+    # 1. Shared DeepSeek key shortcut (updates DeepSeek profiles + OCR + web_search + audio)
+    shared_ds_key = str(updates.get("shared_deepseek_api_key") or "").strip()
+    if shared_ds_key:
+        for pname, pdict in profiles_raw.items():
+            if isinstance(pdict, dict):
+                base_u = str(pdict.get("base_url") or "").lower()
+                prov = str(pdict.get("provider") or "").lower()
+                if prov != "mock" and ("deepseek" in base_u or "deepseek" in str(pname).lower()):
+                    pdict["api_key"] = shared_ds_key
+        ocr_sec = raw.setdefault("ocr", {})
+        if isinstance(ocr_sec, dict):
+            ocr_sec["api_key"] = shared_ds_key
+        tools_sec = raw.setdefault("tools", {})
+        if isinstance(tools_sec, dict):
+            ws_sec = tools_sec.setdefault("web_search", {})
+            if isinstance(ws_sec, dict):
+                ws_sec["api_key"] = shared_ds_key
+        audio_sec = raw.setdefault("audio", {})
+        if isinstance(audio_sec, dict):
+            asr_sec = audio_sec.setdefault("asr", {})
+            tts_sec = audio_sec.setdefault("tts", {})
+            if isinstance(asr_sec, dict):
+                asr_sec["api_key"] = shared_ds_key
+            if isinstance(tts_sec, dict):
+                tts_sec["api_key"] = shared_ds_key
+
+    # 2. Per-profile updates (empty api_key preserves existing secret)
+    prof_updates = updates.get("profiles")
+    if isinstance(prof_updates, dict):
+        for pname, patch in prof_updates.items():
+            if not isinstance(patch, dict):
+                continue
+            cur = profiles_raw.get(pname)
+            if not isinstance(cur, dict):
+                cur = {"label": str(patch.get("label") or pname), "provider": str(patch.get("provider") or "openai_compatible")}
+                profiles_raw[pname] = cur
+            for field_name in ("label", "provider", "model", "base_url"):
+                if field_name in patch and patch[field_name] is not None:
+                    val_str = str(patch[field_name]).strip()
+                    if val_str:
+                        cur[field_name] = val_str
+            if "supports_vision" in patch and patch["supports_vision"] is not None:
+                cur["supports_vision"] = bool(patch["supports_vision"])
+            new_key = str(patch.get("api_key") or "").strip()
+            if new_key:
+                cur["api_key"] = new_key
+
+    # 3. Active default profile
+    req_def = str(updates.get("default_profile") or "").strip()
+    if req_def and req_def in profiles_raw:
+        raw["default_profile"] = req_def
+
+    # 4. Audio settings
+    audio_up = updates.get("audio")
+    if isinstance(audio_up, dict):
+        audio_sec = raw.setdefault("audio", {})
+        if not isinstance(audio_sec, dict):
+            audio_sec = {}
+            raw["audio"] = audio_sec
+        if "enabled" in audio_up:
+            audio_sec["enabled"] = bool(audio_up["enabled"])
+        for sub_key in ("asr", "tts", "ptt"):
+            sub_up = audio_up.get(sub_key)
+            if isinstance(sub_up, dict):
+                sub_sec = audio_sec.setdefault(sub_key, {})
+                if not isinstance(sub_sec, dict):
+                    sub_sec = {}
+                    audio_sec[sub_key] = sub_sec
+                for k, v in sub_up.items():
+                    if k == "api_key":
+                        kval = str(v or "").strip()
+                        if kval:
+                            sub_sec["api_key"] = kval
+                    elif v is not None:
+                        sub_sec[k] = v
+
+    # 5. Privacy mode
+    priv_up = updates.get("privacy")
+    if isinstance(priv_up, dict) and "default_mode" in priv_up:
+        mode_str = str(priv_up["default_mode"]).strip().lower()
+        if mode_str in ("off", "meta_only", "full_on_demand"):
+            priv_sec = raw.setdefault("privacy", {})
+            if isinstance(priv_sec, dict):
+                priv_sec["default_mode"] = mode_str
+
+    # 6. Batch context & Godot preferences
+    batch_up = updates.get("batch_context")
+    if isinstance(batch_up, dict):
+        batch_sec = raw.setdefault("batch_context", {})
+        if isinstance(batch_sec, dict):
+            if "inbox_dir" in batch_up and str(batch_up["inbox_dir"]).strip():
+                batch_sec["inbox_dir"] = str(batch_up["inbox_dir"]).strip()
+            if "max_paths" in batch_up and batch_up["max_paths"] is not None:
+                batch_sec["max_paths"] = max(10, int(batch_up["max_paths"]))
+            if "max_tree_depth" in batch_up and batch_up["max_tree_depth"] is not None:
+                batch_sec["max_tree_depth"] = max(1, int(batch_up["max_tree_depth"]))
+
+    godot_up = updates.get("godot")
+    if isinstance(godot_up, dict):
+        godot_sec = raw.setdefault("godot", {})
+        if isinstance(godot_sec, dict):
+            for k in ("auto_hide_on_capture", "earcons_enabled"):
+                if k in godot_up:
+                    godot_sec[k] = bool(godot_up[k])
+            if "ambient_duck_db" in godot_up and godot_up["ambient_duck_db"] is not None:
+                godot_sec["ambient_duck_db"] = float(godot_up["ambient_duck_db"])
+
+    tmp_path = target.with_suffix(".yaml.tmp")
+    dumped = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
+    tmp_path.write_text(dumped, encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp_path, target)
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    return load_config(target)

@@ -643,6 +643,25 @@ class Hub:
             max_tree_depth=self.config.batch_context.max_tree_depth,
         )
 
+    async def apply_config_update(self, fresh_cfg: AppConfig) -> None:
+        """Apply hot-reloaded settings (API keys, profiles, audio, privacy, godot) across Hub."""
+        self.config = fresh_cfg
+        self.llm_router.reload_config(fresh_cfg)
+        self.privacy_mode = fresh_cfg.privacy.default_mode
+        if hasattr(self.asr_provider, "config"):
+            self.asr_provider.config = fresh_cfg.audio.asr  # type: ignore[attr-defined]
+        if hasattr(self.tts_provider, "config"):
+            self.tts_provider.config = fresh_cfg.audio.tts  # type: ignore[attr-defined]
+        if hasattr(self.screen_router, "ocr_provider") and hasattr(
+            self.screen_router.ocr_provider, "config"
+        ):
+            self.screen_router.ocr_provider.config = fresh_cfg.ocr  # type: ignore[attr-defined]
+        inbox_tool = self.tool_registry.get("inbox_scan")
+        if inbox_tool is not None and hasattr(inbox_tool, "config"):
+            inbox_tool.config = fresh_cfg  # type: ignore[attr-defined]
+        await self._broadcast_welcome_to_bodies()
+        await self._broadcast_privacy_state()
+
     async def broadcast_tool_notice(self, tool: str, label: str) -> None:
         env = make_envelope(
             "brain",

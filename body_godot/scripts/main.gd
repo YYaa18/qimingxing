@@ -1,18 +1,26 @@
 extends Control
 
+const SETTINGS_SCENE := preload("res://scenes/SettingsWindow.tscn")
+const PREFS_PATH := "user://qimingxing_body_prefs.cfg"
+
 @onready var ws: Node = $WSClient
 @onready var audio: Node = $AudioPlayer
 @onready var avatar: Control = $AvatarController
 @onready var overlay: Control = $UIOverlay
+@onready var tray: Node = $TrayManager
 
 var _http: HTTPRequest
 var _pending_http_label: String = ""
+var _settings_win: Window
 
 
 func _ready() -> void:
 	_http = HTTPRequest.new()
 	add_child(_http)
 	_http.request_completed.connect(_on_http_completed)
+
+	_load_audio_prefs()
+	tray.call("sync_toggles", avatar.call("is_roam_enabled"), audio.earcons_enabled, audio.call("is_ambient_enabled"))
 
 	ws.connected_changed.connect(func(ok: bool) -> void:
 		if ok:
@@ -28,10 +36,13 @@ func _ready() -> void:
 
 	avatar.avatar_clicked.connect(func() -> void:
 		audio.play_earcon("done")
-		overlay.show_transient_status("我在呢～随时听候吩咐 ✨", 2.0)
+		overlay.show_transient_status("我在呢～右键或菜单栏图标可打开设置 ✨", 2.4)
+	)
+	avatar.context_menu_requested.connect(func() -> void:
+		tray.call("popup_at_cursor")
 	)
 	avatar.scale_changed.connect(func(sc: float) -> void:
-		overlay.show_transient_status("当前大小: %d%%（滚轮或 ± 随时调节）" % int(round(sc * 100.0)), 1.8)
+		overlay.show_transient_status("当前大小: %d%%（可在托盘设置调整）" % int(round(sc * 100.0)), 1.8)
 	)
 	avatar.dock_state_changed.connect(func(edge: String, tucked: bool) -> void:
 		overlay.set_dock_tucked(tucked)
@@ -39,17 +50,106 @@ func _ready() -> void:
 			overlay.show_transient_status("已贴边隐藏（悬停边缘即可呼出）", 1.8)
 	)
 	avatar.files_dropped_queued.connect(overlay.queue_dropped_files)
-	overlay.set_roam_button_state(avatar.is_roam_enabled())
+
 	overlay.passthrough_rects_changed.connect(avatar.set_ui_interactive_rects)
 	overlay.interaction_active_changed.connect(avatar.set_interaction_active)
-	overlay.scale_step_requested.connect(avatar.adjust_avatar_scale)
-	overlay.roam_toggled.connect(avatar.set_roam_enabled)
 	overlay.approval_decided.connect(_on_approval_decided)
 	overlay.cancel_requested.connect(_on_cancel_requested)
 	overlay.drop_queue_submitted.connect(_on_drop_submitted)
 	overlay.desktop_action_requested.connect(_on_desktop_action)
-	overlay.earcons_toggled.connect(func(on: bool) -> void: audio.earcons_enabled = on)
-	overlay.ambient_toggled.connect(audio.set_ambient_enabled)
+
+	tray.open_settings_requested.connect(_open_settings_window)
+	tray.toggle_roam_requested.connect(func(on: bool) -> void:
+		avatar.set_roam_enabled(on)
+		overlay.show_transient_status("桌面自由漫步: %s" % ("已开启" if on else "已暂停"), 1.8)
+	)
+	tray.toggle_earcons_requested.connect(func(on: bool) -> void:
+		audio.earcons_enabled = on
+		_save_audio_prefs()
+	)
+	tray.toggle_ambient_requested.connect(func(on: bool) -> void:
+		audio.set_ambient_enabled(on)
+		_save_audio_prefs()
+	)
+	tray.reset_position_requested.connect(func() -> void:
+		avatar.call("reset_to_default_position")
+		overlay.show_transient_status("已回到默认桌面位置", 1.8)
+	)
+	tray.reload_mcp_requested.connect(_reload_mcp_tools)
+	tray.open_web_requested.connect(func() -> void:
+		OS.shell_open("%s/" % ws.http_base)
+	)
+	tray.quit_requested.connect(func() -> void:
+		get_tree().quit()
+	)
+
+	call_deferred("_ensure_settings_window")
+
+
+func _load_audio_prefs() -> void:
+	var cfg := ConfigFile.new()
+	if cfg.load(PREFS_PATH) == OK:
+		audio.earcons_enabled = bool(cfg.get_value("audio_prefs", "earcons_enabled", true))
+		var amb := bool(cfg.get_value("audio_prefs", "ambient_enabled", false))
+		if amb:
+			audio.set_ambient_enabled(true)
+
+
+func _save_audio_prefs() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(PREFS_PATH)
+	cfg.set_value("audio_prefs", "earcons_enabled", audio.earcons_enabled)
+	cfg.set_value("audio_prefs", "ambient_enabled", audio.call("is_ambient_enabled"))
+	cfg.save(PREFS_PATH)
+
+
+func _ensure_settings_window() -> Window:
+	if _settings_win == null:
+		_settings_win = SETTINGS_SCENE.instantiate() as Window
+		get_tree().root.add_child(_settings_win)
+		_settings_win.prefs_applied.connect(_on_settings_prefs_applied)
+		_settings_win.scale_previewed.connect(func(sc: float) -> void:
+			avatar.set_avatar_scale(sc)
+		)
+		_settings_win.reset_position_requested.connect(func() -> void:
+			avatar.call("reset_to_default_position")
+		)
+		_settings_win.reload_mcp_requested.connect(_reload_mcp_tools)
+		_settings_win.open_web_requested.connect(func() -> void:
+			OS.shell_open("%s/" % ws.http_base)
+		)
+	return _settings_win
+
+
+func _open_settings_window() -> void:
+	var win := _ensure_settings_window()
+	win.call(
+		"open_settings",
+		ws.http_base,
+		avatar.call("get_avatar_scale"),
+		avatar.call("is_roam_enabled"),
+		audio.earcons_enabled,
+		audio.call("is_ambient_enabled")
+	)
+
+
+func _on_settings_prefs_applied(
+	avatar_scale: float,
+	roam_on: bool,
+	earcons_on: bool,
+	ambient_on: bool,
+	_auto_hide: bool
+) -> void:
+	avatar.set_avatar_scale(avatar_scale)
+	avatar.set_roam_enabled(roam_on)
+	audio.earcons_enabled = earcons_on
+	audio.set_ambient_enabled(ambient_on)
+	_save_audio_prefs()
+	tray.call("sync_toggles", roam_on, earcons_on, ambient_on)
+
+
+func _reload_mcp_tools() -> void:
+	_post_json("%s/api/mcp/reload" % ws.http_base, {}, "已热重载 MCP 工具列表")
 
 
 func _on_envelope(event_type: String, turn_id: String, payload: Dictionary) -> void:

@@ -13,7 +13,12 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from brain.artifact_store import ArtifactStore
 from brain.audio import ASRProvider, TTSProvider
-from brain.config import AppConfig, load_config
+from brain.config import (
+    AppConfig,
+    get_sanitized_settings,
+    load_config,
+    save_settings_to_yaml,
+)
 from brain.context_builder import ContextBuilder
 from brain.context_store import ContextStore
 from brain.history_store import MemoryStore
@@ -55,6 +60,7 @@ def create_app(
     asr_provider: Optional[ASRProvider] = None,
     tts_provider: Optional[TTSProvider] = None,
     desktop_command_runner: Optional[CommandRunner] = None,
+    settings_config_path: Optional[Path] = None,
     capture_timeout_seconds: float = 3.5,
 ) -> FastAPI:
     _config_injected = config is not None
@@ -379,6 +385,43 @@ def create_app(
             raise HTTPException(status_code=500, detail=safe_err) from exc
 
         return JSONResponse(result)
+
+    @app.get("/api/config/settings")
+    async def get_settings(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=403, detail="Settings access is restricted to localhost."
+            )
+        return JSONResponse(get_sanitized_settings(hub.config))
+
+    @app.post("/api/config/settings")
+    async def update_settings(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=403, detail="Settings updates are restricted to localhost."
+            )
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+
+        try:
+            fresh_cfg = save_settings_to_yaml(body, config_path=settings_config_path)
+        except Exception as exc:
+            safe_err = hub.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            raise HTTPException(status_code=400, detail=f"保存配置失败: {safe_err}") from exc
+
+        await hub.apply_config_update(fresh_cfg)
+        return JSONResponse(
+            {
+                "status": "ok",
+                "settings": get_sanitized_settings(fresh_cfg),
+            }
+        )
 
     @app.get("/")
     async def index() -> FileResponse:

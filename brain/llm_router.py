@@ -156,6 +156,14 @@ class LLMRouter:
         )
         return profile
 
+    def reload_config(self, config: AppConfig) -> None:
+        """Hot-replace router config & profiles while keeping a valid active profile."""
+        self._config = config
+        if config.default_profile and config.default_profile in config.profiles:
+            self._active_profile = config.default_profile
+        elif self._active_profile not in config.profiles and config.profiles:
+            self._active_profile = next(iter(config.profiles))
+
     def list_public_profiles(self) -> List[ProfileInfo]:
         return self._config.list_public_profiles()
 

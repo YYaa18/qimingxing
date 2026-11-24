@@ -1,10 +1,11 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/ws_client.gd" id="2"]
 [ext_resource type="Script" path="res://scripts/audio_player.gd" id="3"]
 [ext_resource type="Script" path="res://scripts/avatar_controller.gd" id="4"]
 [ext_resource type="Script" path="res://scripts/ui_overlay.gd" id="5"]
+[ext_resource type="Script" path="res://scripts/tray_manager.gd" id="6"]
 
 [node name="Main" type="Control"]
 layout_mode = 3
@@ -47,3 +48,6 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("5")
+
+[node name="TrayManager" type="Node" parent="."]
+script = ExtResource("6")
