@@ -371,11 +371,14 @@ class SQLiteMemoryStore(MemoryBackend):
             if excess <= 0:
                 return 0
             to_move = min(excess, max(1, batch_size))
-            # Prefer moving oldest messages from archived sessions first, then oldest overall
+            # Never archive unsummarized messages in the active session; move archived sessions first
             rows = conn.execute(
                 """
                 SELECT m.* FROM messages m
                 LEFT JOIN sessions s ON m.session_id = s.session_id
+                WHERE s.status = 'archived'
+                   OR s.status IS NULL
+                   OR (s.status = 'active' AND m.msg_id <= COALESCE(s.last_summarized_msg_id, 0))
                 ORDER BY CASE WHEN s.status = 'archived' THEN 0 ELSE 1 END ASC, m.msg_id ASC
                 LIMIT ?
                 """,

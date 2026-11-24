@@ -140,8 +140,25 @@ class MemoryRetriever:
             results = list(candidate_meta.values())
 
         results.sort(key=lambda r: r.score, reverse=True)
+        if not recall_chitchat:
+            # Cap raw hot message hits on normal queries so they cannot crowd out curated facts/episodes
+            selected: List[RetrievedMemory] = []
+            msg_count = 0
+            max_message_slots = 1
+            for item in results:
+                if item.item_type == "message":
+                    if msg_count >= max_message_slots:
+                        continue
+                    msg_count += 1
+                selected.append(item)
+                if len(selected) >= top_k:
+                    break
+            final_results = selected
+        else:
+            final_results = results[:top_k]
+
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        return results[:top_k], elapsed_ms
+        return final_results, elapsed_ms
 
     def _category_params(
         self,

@@ -26,6 +26,8 @@ from brain.memory.models import (
 
 logger = logging.getLogger("qimingxing.memory.extractor")
 
+MAX_DYNAMIC_CATEGORIES = 25
+
 _EXPLICIT_CMD_RE = re.compile(
     r"(记住|帮我记|记一下|以后回答|以后回复|忘掉|忘记|删掉关于|删除关于|别再提|新建分类|建一个分类|建个分类|remember that|forget )"
 )
@@ -57,8 +59,8 @@ _EXTRACTION_SYSTEM_PROMPT = """你是一个严谨的长期记忆分类、提炼�
 }
 
 规则：
-1. **分类优先复用**：尽量复用【当前已有记忆分类】中的 `category_key`。只有当用户明确要求“新建分类”，或出现持续性全新主题且现有分类无法覆盖时，才可在 `new_categories` 中注册（每次最多 2 个），严禁为单次闲聊乱建分类。
-2. **闲聊分级沉淀**：讲过的笑话、有趣梗或生活趣事不要丢弃，优先记录到 `chitchat_summary`（归类为闲聊情景记忆，平时不干扰正事，被问到时能精准捞出）；纯单字寒暄（如“你好”“谢谢”“好的”）填 `NONE` 且 `chitchat_summary: null`。
+1. **分类优先复用（严禁同义重复）**：必须优先复用【当前已有记忆分类】中的 `category_key`（例如已有 `preference`/`tech_stack` 时禁止再建 `coding_prefs`/`my_tools` 等同义近义分类）。只有当用户明确要求“新建分类”，或出现持续性全新主题且现有分类无法覆盖时，才可在 `new_categories` 中注册（每次最多 2 个），且 `inject_to_l1` 必须保持 `false`，严禁为单次闲聊乱建分类。
+2. **闲聊分级沉淀（严格区分纯寒暄与趣事）**：纯礼貌应答或单句寒暄（如“你好”“谢谢”“好的”“收到”“嗯”）必须输出 `op: "NONE"` 且 `chitchat_summary: null`；只有包含具体笑话、段子、生活趣事、吐槽或情感瞬间时，才总结写入 `chitchat_summary`（平时不干扰正事，被问到时能精准捞出）。
 3. **冲突消解**：当新对话修正或升级了已有事实（如 Python 版本升级、项目变更、偏好改变），**必须**使用 `op: "UPDATE"` 并准确填入旧事实的 `target_fact_id`，严禁重复 `ADD` 造成矛盾事实共存。
 4. **主动遗忘**：当用户明确要求“忘掉/忘记/删除”某信息时，**必须**输出 `op: "DELETE"` 并匹配对应 `target_fact_id`。
 5. 绝对禁止编造不存在的信息，也禁止写入任何隐私占位（如 `[隐私窗口已隐藏]`）。"""
@@ -95,7 +97,8 @@ def parse_extraction_json(
         tier: CategoryTier = (
             raw_tier if raw_tier in ("core", "episodic", "chitchat") else "episodic"
         )  # type: ignore[assignment]
-        inject_l1 = bool(item.get("inject_to_l1", tier == "core"))
+        # Protect L1 static prefix cache: LLM-created categories never auto-inject into L1
+        inject_l1 = False
         default_w = 1.0 if tier == "core" else (0.55 if tier == "chitchat" else 0.90)
         default_d = 0.015 if tier == "core" else (0.15 if tier == "chitchat" else 0.04)
         new_categories.append(
@@ -336,6 +339,13 @@ class MemoryExtractor:
 
         for cat in new_categories:
             if cat.category_key not in cat_keys:
+                if len(cat_keys) >= MAX_DYNAMIC_CATEGORIES:
+                    logger.warning(
+                        "Dynamic category cap (%d) reached; skipping LLM-proposed category key=%s",
+                        MAX_DYNAMIC_CATEGORIES,
+                        cat.category_key,
+                    )
+                    continue
                 await self.backend.register_category(cat)
                 cat_keys.add(cat.category_key)
                 logger.info(

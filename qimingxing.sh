@@ -6,10 +6,17 @@ VENV_PY="${ROOT_DIR}/.venv/bin/python"
 RUN_DIR="${ROOT_DIR}/.run"
 HOST="${QIMINGXING_HOST:-127.0.0.1}"
 PORT="${QIMINGXING_PORT:-18790}"
-BRAIN_PID_FILE="${RUN_DIR}/brain.pid"
-SENSES_PID_FILE="${RUN_DIR}/senses.pid"
-BRAIN_LOG="${RUN_DIR}/brain.log"
-SENSES_LOG="${RUN_DIR}/senses.log"
+if [[ "${PORT}" == "18790" ]]; then
+  BRAIN_PID_FILE="${RUN_DIR}/brain.pid"
+  SENSES_PID_FILE="${RUN_DIR}/senses.pid"
+  BRAIN_LOG="${RUN_DIR}/brain.log"
+  SENSES_LOG="${RUN_DIR}/senses.log"
+else
+  BRAIN_PID_FILE="${RUN_DIR}/brain.${PORT}.pid"
+  SENSES_PID_FILE="${RUN_DIR}/senses.${PORT}.pid"
+  BRAIN_LOG="${RUN_DIR}/brain.${PORT}.log"
+  SENSES_LOG="${RUN_DIR}/senses.${PORT}.log"
+fi
 
 BASE_HTTP="http://${HOST}:${PORT}"
 BASE_WS="ws://${HOST}:${PORT}/ws"
@@ -43,8 +50,13 @@ is_health_ok() {
 find_orphan_pids() {
   local module="$1"
   local pattern=" -m ${module}"
-  if [[ -n "${QIMINGXING_PORT:-}" && "${module}" == "senses.main" ]]; then
-    pattern=" -m ${module}.*--ws-url ${BASE_WS}"
+  if [[ "${PORT}" != "18790" ]]; then
+    if [[ "${module}" == "senses.main" ]]; then
+      pattern=" -m ${module}.*--ws-url ${BASE_WS}"
+    else
+      # Avoid matching default-port brain processes when using an isolated QIMINGXING_PORT
+      return 0
+    fi
   fi
   pgrep -f "${VENV_PY}${pattern}" || true
 }
@@ -131,7 +143,11 @@ stop_component() {
 
   if (( ${#pids[@]} == 0 )); then
     rm -f "${pid_file}"
-    echo "ℹ️  ${name} 未运行"
+    if [[ -n "${file_pid}" ]]; then
+      echo "ℹ️  ${name} 未运行（已清理陈旧 PID ${file_pid}）"
+    else
+      echo "ℹ️  ${name} 未运行"
+    fi
     return 0
   fi
 
@@ -139,7 +155,7 @@ stop_component() {
   kill "${pids[@]}" 2>/dev/null || true
 
   local i=0
-  while (( i < 20 )); do
+  while (( i < 24 )); do
     local any_alive=0
     for p in "${pids[@]}"; do
       if is_pid_running "${p}"; then
@@ -149,17 +165,26 @@ stop_component() {
     done
     if (( any_alive == 0 )); then
       rm -f "${pid_file}"
-      echo "✅ ${name} 已停止"
+      echo "✅ ${name} 已优雅停止 (WAL/资源已释放)"
       return 0
     fi
     sleep 0.25
     i=$((i + 1))
   done
 
-  echo "⚠️  ${name} 未在 5s 内退出，强制结束..."
-  kill -9 "${pids[@]}" 2>/dev/null || true
+  local remaining=()
+  for p in "${pids[@]}"; do
+    if is_pid_running "${p}"; then
+      remaining+=("${p}")
+    fi
+  done
+  if (( ${#remaining[@]} > 0 )); then
+    echo "⚠️  ${name} 未在 6s 内退出，强制结束 (PID: ${remaining[*]})..."
+    kill -9 "${remaining[@]}" 2>/dev/null || true
+    sleep 0.2
+  fi
   rm -f "${pid_file}"
-  echo "✅ ${name} 已强制停止"
+  echo "✅ ${name} 已强制停止并清理 PID 文件"
 }
 
 cmd_start() {
@@ -192,24 +217,36 @@ cmd_status() {
   bpid="$(read_pid "${BRAIN_PID_FILE}")"
   spid="$(read_pid "${SENSES_PID_FILE}")"
 
-  echo "=== 启明星（Qimingxing）运行状态 ==="
+  local brain_stale=""
+  if [[ -n "${bpid}" ]] && ! is_pid_running "${bpid}"; then
+    rm -f "${BRAIN_PID_FILE}"
+    brain_stale=" [已清理陈旧 PID ${bpid}]"
+  fi
+
+  local senses_stale=""
+  if [[ -n "${spid}" ]] && ! is_pid_running "${spid}"; then
+    rm -f "${SENSES_PID_FILE}"
+    senses_stale=" [已清理陈旧 PID ${spid}]"
+  fi
+
+  echo "=== 启明星（Qimingxing）运行状态 (${BASE_HTTP}) ==="
   if is_pid_running "${bpid}"; then
-    echo "Brain : 运行中 (PID ${bpid})"
+    echo "Brain : 运行中 (PID ${bpid}, kill -0=存活)"
   elif is_health_ok; then
-    echo "Brain : 运行中 (外部启动进程，监听 ${PORT})"
+    echo "Brain : 运行中 (外部启动进程，监听 ${PORT})${brain_stale}"
   else
-    echo "Brain : 已停止"
+    echo "Brain : 已停止${brain_stale}"
   fi
 
   if is_pid_running "${spid}"; then
-    echo "Senses: 运行中 (PID ${spid})"
+    echo "Senses: 运行中 (PID ${spid}, kill -0=存活)"
   else
     local orphans
     orphans="$(find_orphan_pids "senses.main" | tr '\n' ' ')"
     if [[ -n "${orphans// /}" ]]; then
-      echo "Senses: 运行中 (PID ${orphans})"
+      echo "Senses: 运行中 (PID ${orphans}, kill -0=存活)${senses_stale}"
     else
-      echo "Senses: 已停止"
+      echo "Senses: 已停止${senses_stale}"
     fi
   fi
 
@@ -219,6 +256,19 @@ cmd_status() {
     echo ""
   else
     echo "Health: 不可达 (${BASE_HTTP}/health)"
+  fi
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "macOS 权限提示: 切换终端或启动器会改变录屏权限归属（系统设置 -> 隐私与安全性 -> 录屏与系统录音）"
+  fi
+
+  if [[ -s "${BRAIN_LOG}" ]]; then
+    echo "--- Brain 最近日志 (tail -n 3) ---"
+    tail -n 3 "${BRAIN_LOG}"
+  fi
+  if [[ -s "${SENSES_LOG}" ]]; then
+    echo "--- Senses 最近日志 (tail -n 3) ---"
+    tail -n 3 "${SENSES_LOG}"
   fi
 }
 
