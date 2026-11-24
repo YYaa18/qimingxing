@@ -46,6 +46,29 @@ var _sc_cancel_opt: OptionButton
 var _sc_dock_opt: OptionButton
 var _sc_settings_opt: OptionButton
 
+# UI widgets — Tab 5: MCP 服务
+var _mcp_http: HTTPRequest
+var _mcp_pending_op: String = ""
+var _mcp_servers: Array = []
+var _mcp_list: ItemList
+var _mcp_name_edit: LineEdit
+var _mcp_transport_opt: OptionButton
+var _mcp_auth_row: HBoxContainer
+var _mcp_auth_opt: OptionButton
+var _mcp_url_row: HBoxContainer
+var _mcp_url_edit: LineEdit
+var _mcp_cmd_row: HBoxContainer
+var _mcp_cmd_edit: LineEdit
+var _mcp_args_row: HBoxContainer
+var _mcp_args_edit: LineEdit
+var _mcp_safe_tools_edit: LineEdit
+var _mcp_enabled_check: CheckButton
+var _mcp_auth_url_row: HBoxContainer
+var _mcp_auth_url_edit: LineEdit
+var _mcp_tools_label: Label
+var _mcp_poll_timer: Timer
+var _mcp_poll_ticks: int = 0
+
 # Footer
 var _status_label: Label
 var _save_btn: Button
@@ -63,7 +86,18 @@ func _ready() -> void:
 	_http = HTTPRequest.new()
 	add_child(_http)
 	_http.request_completed.connect(_on_http_completed)
-	close_requested.connect(func() -> void: visible = false)
+	_mcp_http = HTTPRequest.new()
+	add_child(_mcp_http)
+	_mcp_http.request_completed.connect(_on_mcp_http_completed)
+	_mcp_poll_timer = Timer.new()
+	_mcp_poll_timer.wait_time = 2.0
+	_mcp_poll_timer.one_shot = false
+	_mcp_poll_timer.timeout.connect(_on_mcp_poll_timeout)
+	add_child(_mcp_poll_timer)
+	close_requested.connect(func() -> void:
+		_mcp_poll_timer.stop()
+		visible = false
+	)
 	_build_ui()
 
 
@@ -91,6 +125,7 @@ func open_settings(
 	visible = true
 	grab_focus()
 	_fetch_backend_settings()
+	_fetch_mcp_servers()
 
 
 func _make_bg_panel() -> PanelContainer:
@@ -350,6 +385,166 @@ func _build_ui() -> void:
 	_add_section_label(t4, "鼠标与窗口快捷操作一览")
 	_add_hint_label(t4, "• 左键单击启明星：快速打开/收起文字输入框\n• 右键角色 / 顶部状态栏图标：打开快捷菜单\n• 鼠标滚轮上下滚动：即时调整角色大小 (50% - 130%)\n• 拖动至屏幕左/右/上边缘松手：贴边隐藏（鼠标靠近边缘自动滑出）\n• 拖入文件/文件夹到角色身上：直接挂载上下文")
 
+	# --- Tab 5: MCP 服务 ---
+	var tab5_scroll := ScrollContainer.new()
+	tab5_scroll.name = "MCP 服务"
+	tabs.add_child(tab5_scroll)
+
+	var t5 := VBoxContainer.new()
+	t5.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	t5.add_theme_constant_override("separation", 7)
+	tab5_scroll.add_child(t5)
+
+	_add_section_label(t5, "已配置 MCP 服务（支持远程 OAuth 2.1 / SSE / 本地 stdio）")
+	_mcp_list = ItemList.new()
+	_mcp_list.custom_minimum_size = Vector2(0, 88)
+	_mcp_list.item_selected.connect(_on_mcp_item_selected)
+	t5.add_child(_mcp_list)
+
+	var mcp_name_row := HBoxContainer.new()
+	mcp_name_row.add_theme_constant_override("separation", 8)
+	t5.add_child(mcp_name_row)
+	var mnl := Label.new()
+	mnl.text = "服务名称:"
+	mnl.custom_minimum_size = Vector2(88, 0)
+	mcp_name_row.add_child(mnl)
+	_mcp_name_edit = LineEdit.new()
+	_mcp_name_edit.placeholder_text = "英文/数字/下划线（例如 t3_code）"
+	_mcp_name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mcp_name_row.add_child(_mcp_name_edit)
+
+	var mcp_tr_row := HBoxContainer.new()
+	mcp_tr_row.add_theme_constant_override("separation", 8)
+	t5.add_child(mcp_tr_row)
+	var mtl := Label.new()
+	mtl.text = "传输方式:"
+	mtl.custom_minimum_size = Vector2(88, 0)
+	mcp_tr_row.add_child(mtl)
+	_mcp_transport_opt = OptionButton.new()
+	_mcp_transport_opt.add_item("streamable_http（远程 HTTP MCP，推荐）", 0)
+	_mcp_transport_opt.set_item_metadata(0, "streamable_http")
+	_mcp_transport_opt.add_item("sse（远程 SSE MCP）", 1)
+	_mcp_transport_opt.set_item_metadata(1, "sse")
+	_mcp_transport_opt.add_item("stdio（本地命令行 MCP）", 2)
+	_mcp_transport_opt.set_item_metadata(2, "stdio")
+	_mcp_transport_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mcp_transport_opt.item_selected.connect(func(_idx: int) -> void: _update_mcp_field_visibility())
+	mcp_tr_row.add_child(_mcp_transport_opt)
+
+	_mcp_auth_row = HBoxContainer.new()
+	_mcp_auth_row.add_theme_constant_override("separation", 8)
+	t5.add_child(_mcp_auth_row)
+	var mal := Label.new()
+	mal.text = "认证方式:"
+	mal.custom_minimum_size = Vector2(88, 0)
+	_mcp_auth_row.add_child(mal)
+	_mcp_auth_opt = OptionButton.new()
+	_mcp_auth_opt.add_item("oauth（OAuth 2.1 动态注册浏览器登录，如 T3 Code）", 0)
+	_mcp_auth_opt.set_item_metadata(0, "oauth")
+	_mcp_auth_opt.add_item("none（无认证或自定义 Header）", 1)
+	_mcp_auth_opt.set_item_metadata(1, "none")
+	_mcp_auth_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mcp_auth_row.add_child(_mcp_auth_opt)
+
+	_mcp_url_row = HBoxContainer.new()
+	_mcp_url_row.add_theme_constant_override("separation", 8)
+	t5.add_child(_mcp_url_row)
+	var mul := Label.new()
+	mul.text = "远程 URL:"
+	mul.custom_minimum_size = Vector2(88, 0)
+	_mcp_url_row.add_child(mul)
+	_mcp_url_edit = LineEdit.new()
+	_mcp_url_edit.placeholder_text = "https://.../mcp"
+	_mcp_url_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mcp_url_row.add_child(_mcp_url_edit)
+
+	_mcp_cmd_row = HBoxContainer.new()
+	_mcp_cmd_row.add_theme_constant_override("separation", 8)
+	t5.add_child(_mcp_cmd_row)
+	var mcl := Label.new()
+	mcl.text = "启动命令:"
+	mcl.custom_minimum_size = Vector2(88, 0)
+	_mcp_cmd_row.add_child(mcl)
+	_mcp_cmd_edit = LineEdit.new()
+	_mcp_cmd_edit.placeholder_text = "例如 npx 或 uvx"
+	_mcp_cmd_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mcp_cmd_row.add_child(_mcp_cmd_edit)
+
+	_mcp_args_row = HBoxContainer.new()
+	_mcp_args_row.add_theme_constant_override("separation", 8)
+	t5.add_child(_mcp_args_row)
+	var mgl := Label.new()
+	mgl.text = "命令参数:"
+	mgl.custom_minimum_size = Vector2(88, 0)
+	_mcp_args_row.add_child(mgl)
+	_mcp_args_edit = LineEdit.new()
+	_mcp_args_edit.placeholder_text = "空格分隔参数，例如 -y @modelcontextprotocol/server-filesystem ~/Desktop"
+	_mcp_args_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mcp_args_row.add_child(_mcp_args_edit)
+
+	var mcp_safe_row := HBoxContainer.new()
+	mcp_safe_row.add_theme_constant_override("separation", 8)
+	t5.add_child(mcp_safe_row)
+	var msl := Label.new()
+	msl.text = "只读白名单:"
+	msl.custom_minimum_size = Vector2(88, 0)
+	mcp_safe_row.add_child(msl)
+	_mcp_safe_tools_edit = LineEdit.new()
+	_mcp_safe_tools_edit.placeholder_text = "可选，逗号分隔免审批只读工具名"
+	_mcp_safe_tools_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mcp_safe_row.add_child(_mcp_safe_tools_edit)
+
+	_mcp_enabled_check = CheckButton.new()
+	_mcp_enabled_check.text = "启用该 MCP 服务"
+	_mcp_enabled_check.button_pressed = true
+	t5.add_child(_mcp_enabled_check)
+
+	var mcp_btns := HBoxContainer.new()
+	mcp_btns.add_theme_constant_override("separation", 6)
+	t5.add_child(mcp_btns)
+	var mcp_new_btn := Button.new()
+	mcp_new_btn.text = "＋ 新建"
+	mcp_new_btn.pressed.connect(_clear_mcp_editor)
+	mcp_btns.add_child(mcp_new_btn)
+	var mcp_save_btn := Button.new()
+	mcp_save_btn.text = "保存并连接"
+	mcp_save_btn.pressed.connect(_on_mcp_save_pressed)
+	mcp_btns.add_child(mcp_save_btn)
+	var mcp_auth_btn := Button.new()
+	mcp_auth_btn.text = "🔐 OAuth 授权"
+	mcp_auth_btn.pressed.connect(_on_mcp_authorize_pressed)
+	mcp_btns.add_child(mcp_auth_btn)
+	var mcp_ref_btn := Button.new()
+	mcp_ref_btn.text = "刷新"
+	mcp_ref_btn.pressed.connect(_fetch_mcp_servers)
+	mcp_btns.add_child(mcp_ref_btn)
+	var mcp_del_btn := Button.new()
+	mcp_del_btn.text = "删除"
+	mcp_del_btn.pressed.connect(_on_mcp_delete_pressed)
+	mcp_btns.add_child(mcp_del_btn)
+
+	_mcp_auth_url_row = HBoxContainer.new()
+	_mcp_auth_url_row.add_theme_constant_override("separation", 6)
+	_mcp_auth_url_row.visible = false
+	t5.add_child(_mcp_auth_url_row)
+	var aul := Label.new()
+	aul.text = "授权链接:"
+	_mcp_auth_url_row.add_child(aul)
+	_mcp_auth_url_edit = LineEdit.new()
+	_mcp_auth_url_edit.editable = false
+	_mcp_auth_url_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mcp_auth_url_row.add_child(_mcp_auth_url_edit)
+	var open_url_btn := Button.new()
+	open_url_btn.text = "浏览器打开"
+	open_url_btn.pressed.connect(func() -> void:
+		if _mcp_auth_url_edit.text.strip_edges() != "":
+			OS.shell_open(_mcp_auth_url_edit.text.strip_edges())
+	)
+	_mcp_auth_url_row.add_child(open_url_btn)
+
+	_mcp_tools_label = _add_hint_label(t5, "提示：添加支持 OAuth 2.1 动态注册的远程 MCP（如 T3 Code）后，先点「保存并连接」，再点「🔐 OAuth 授权」在浏览器完成登录即可自动挂载工具。")
+	_update_mcp_field_visibility()
+
 	# Footer bar
 	var footer := HBoxContainer.new()
 	footer.add_theme_constant_override("separation", 8)
@@ -606,3 +801,241 @@ func _on_save_pressed() -> void:
 	if err != OK:
 		_save_btn.disabled = false
 		_status_label.text = "保存请求失败 (%d)" % err
+
+
+# --- Tab 5: MCP 服务管理与 OAuth 授权 ---
+
+func _update_mcp_field_visibility() -> void:
+	if _mcp_transport_opt == null:
+		return
+	var tr := str(_mcp_transport_opt.get_item_metadata(_mcp_transport_opt.selected))
+	var is_remote := tr == "streamable_http" or tr == "sse"
+	_mcp_auth_row.visible = is_remote
+	_mcp_url_row.visible = is_remote
+	_mcp_cmd_row.visible = not is_remote
+	_mcp_args_row.visible = not is_remote
+
+
+func _clear_mcp_editor() -> void:
+	_mcp_name_edit.text = ""
+	_mcp_transport_opt.select(0)
+	_mcp_auth_opt.select(0)
+	_mcp_url_edit.text = ""
+	_mcp_cmd_edit.text = ""
+	_mcp_args_edit.text = ""
+	_mcp_safe_tools_edit.text = ""
+	_mcp_enabled_check.button_pressed = true
+	_mcp_auth_url_row.visible = false
+	_mcp_auth_url_edit.text = ""
+	_update_mcp_field_visibility()
+	_status_label.text = "已清空编辑器，填写后点击「保存并连接」即可新建 MCP"
+
+
+func _fetch_mcp_servers() -> void:
+	if _mcp_http == null:
+		return
+	_mcp_pending_op = "list"
+	_mcp_http.cancel_request()
+	_mcp_http.request("%s/api/mcp/servers" % http_base, [], HTTPClient.METHOD_GET)
+
+
+func _on_mcp_item_selected(idx: int) -> void:
+	if idx < 0 or idx >= _mcp_servers.size():
+		return
+	var d_var: Variant = _mcp_servers[idx]
+	if typeof(d_var) != TYPE_DICTIONARY:
+		return
+	var d: Dictionary = d_var
+	_mcp_name_edit.text = str(d.get("name", ""))
+	var tr := str(d.get("transport", "streamable_http"))
+	for i in range(_mcp_transport_opt.item_count):
+		if str(_mcp_transport_opt.get_item_metadata(i)) == tr:
+			_mcp_transport_opt.select(i)
+			break
+	var am := str(d.get("auth_mode", "none"))
+	for i in range(_mcp_auth_opt.item_count):
+		if str(_mcp_auth_opt.get_item_metadata(i)) == am:
+			_mcp_auth_opt.select(i)
+			break
+	_mcp_url_edit.text = str(d.get("url", ""))
+	_mcp_cmd_edit.text = str(d.get("command", ""))
+	var args_arr: Variant = d.get("args", [])
+	if typeof(args_arr) == TYPE_ARRAY:
+		_mcp_args_edit.text = " ".join(PackedStringArray(args_arr))
+	else:
+		_mcp_args_edit.text = ""
+	var safe_arr: Variant = d.get("safe_tools", [])
+	if typeof(safe_arr) == TYPE_ARRAY:
+		_mcp_safe_tools_edit.text = ", ".join(PackedStringArray(safe_arr))
+	else:
+		_mcp_safe_tools_edit.text = ""
+	_mcp_enabled_check.button_pressed = bool(d.get("enabled", true))
+	_update_mcp_field_visibility()
+	_render_mcp_detail(d)
+
+
+func _render_mcp_detail(d: Dictionary) -> void:
+	var st := str(d.get("status", "offline"))
+	var err := str(d.get("error", ""))
+	var tools: Variant = d.get("tools", [])
+	var tools_arr: Array = tools if typeof(tools) == TYPE_ARRAY else []
+	var summary := "状态: %s" % st
+	if not tools_arr.is_empty():
+		var t_names: PackedStringArray = []
+		for t in tools_arr:
+			t_names.append(str(t))
+		summary += " | 已挂载 %d 个工具: %s" % [tools_arr.size(), ", ".join(t_names)]
+	elif err != "":
+		summary += " | %s" % err
+	_mcp_tools_label.text = summary
+
+
+func _apply_mcp_servers_list(servers: Array) -> void:
+	var prev_name := _mcp_name_edit.text.strip_edges()
+	_mcp_servers = servers
+	_mcp_list.clear()
+	var sel_idx := -1
+	for i in range(servers.size()):
+		var item_var: Variant = servers[i]
+		if typeof(item_var) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = item_var
+		var sname := str(d.get("name", ""))
+		var tr := str(d.get("transport", "stdio"))
+		var st := str(d.get("status", "offline"))
+		var tools: Variant = d.get("tools", [])
+		var tcount := (tools as Array).size() if typeof(tools) == TYPE_ARRAY else 0
+		var icon := "⚪"
+		if st == "connected":
+			icon = "🟢"
+		elif st == "needs_auth":
+			icon = "🔐"
+		elif st == "offline":
+			icon = "🔴"
+		_mcp_list.add_item("%s %s (%s | %d 工具 | %s)" % [icon, sname, tr, tcount, st])
+		if sname == prev_name:
+			sel_idx = _mcp_list.item_count - 1
+	if sel_idx >= 0:
+		_mcp_list.select(sel_idx)
+		_render_mcp_detail(_mcp_servers[sel_idx])
+	elif not servers.is_empty() and prev_name == "":
+		_mcp_list.select(0)
+		_on_mcp_item_selected(0)
+
+
+func _build_mcp_payload() -> Dictionary:
+	var tr := str(_mcp_transport_opt.get_item_metadata(_mcp_transport_opt.selected))
+	var am := str(_mcp_auth_opt.get_item_metadata(_mcp_auth_opt.selected))
+	return {
+		"name": _mcp_name_edit.text.strip_edges(),
+		"enabled": _mcp_enabled_check.button_pressed,
+		"transport": tr,
+		"auth_mode": am if (tr == "streamable_http" or tr == "sse") else "none",
+		"url": _mcp_url_edit.text.strip_edges(),
+		"command": _mcp_cmd_edit.text.strip_edges(),
+		"args": _mcp_args_edit.text.strip_edges(),
+		"safe_tools": _mcp_safe_tools_edit.text.strip_edges(),
+	}
+
+
+func _on_mcp_save_pressed() -> void:
+	var payload := _build_mcp_payload()
+	if str(payload.get("name", "")) == "":
+		_status_label.text = "⚠️ 请填写 MCP 服务名称（如 t3_code）"
+		return
+	_mcp_pending_op = "save"
+	_status_label.text = "正在保存并连接 MCP 服务「%s」…" % str(payload["name"])
+	_mcp_http.cancel_request()
+	_mcp_http.request(
+		"%s/api/mcp/servers" % http_base,
+		["Content-Type: application/json"],
+		HTTPClient.METHOD_POST,
+		JSON.stringify(payload),
+	)
+
+
+func _on_mcp_authorize_pressed() -> void:
+	var sname := _mcp_name_edit.text.strip_edges()
+	if sname == "":
+		_status_label.text = "⚠️ 请先填写并保存需要 OAuth 授权的 MCP 名称"
+		return
+	_mcp_pending_op = "authorize"
+	_mcp_auth_url_row.visible = false
+	_status_label.text = "正在向「%s」发起 OAuth 2.1 动态注册与授权…" % sname
+	_mcp_http.cancel_request()
+	_mcp_http.request(
+		"%s/api/mcp/servers/%s/authorize" % [http_base, sname.uri_encode()],
+		["Content-Type: application/json"],
+		HTTPClient.METHOD_POST,
+		"{}",
+	)
+
+
+func _on_mcp_delete_pressed() -> void:
+	var sname := _mcp_name_edit.text.strip_edges()
+	if sname == "":
+		return
+	_mcp_pending_op = "delete"
+	_status_label.text = "正在删除 MCP「%s」…" % sname
+	_mcp_http.cancel_request()
+	_mcp_http.request(
+		"%s/api/mcp/servers/%s" % [http_base, sname.uri_encode()],
+		[],
+		HTTPClient.METHOD_DELETE,
+	)
+
+
+func _on_mcp_poll_timeout() -> void:
+	_mcp_poll_ticks += 1
+	if _mcp_poll_ticks > 25:
+		_mcp_poll_timer.stop()
+		return
+	_fetch_mcp_servers()
+
+
+func _on_mcp_http_completed(_result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	var txt := body.get_string_from_utf8()
+	var parsed: Variant = JSON.parse_string(txt)
+	if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
+		var detail := ""
+		if typeof(parsed) == TYPE_DICTIONARY:
+			detail = str((parsed as Dictionary).get("detail", ""))
+		_status_label.text = "MCP 请求失败 (%d)%s" % [code, (": " + detail) if detail != "" else ""]
+		return
+
+	var dict: Dictionary = parsed
+	var srv_arr: Variant = dict.get("servers", [])
+	if typeof(srv_arr) == TYPE_ARRAY:
+		_apply_mcp_servers_list(srv_arr)
+
+	if _mcp_pending_op == "save":
+		_status_label.text = "已保存 MCP 配置并尝试连接；若需 OAuth 登录请点「🔐 OAuth 授权」"
+	elif _mcp_pending_op == "delete":
+		_clear_mcp_editor()
+		_status_label.text = "已删除该 MCP 配置并清理授权缓存"
+	elif _mcp_pending_op == "authorize":
+		var st := str(dict.get("status", ""))
+		var auth_url := str(dict.get("auth_url", ""))
+		if st == "authorizing" and auth_url != "":
+			_mcp_auth_url_edit.text = auth_url
+			_mcp_auth_url_row.visible = true
+			_mcp_tools_label.text = "请在浏览器中批准登录（授权完成后将自动连接并同步工具）"
+			_status_label.text = "已打开浏览器 OAuth 授权页，等待回调中…"
+			_mcp_poll_ticks = 0
+			_mcp_poll_timer.start()
+		elif st == "connected":
+			_mcp_poll_timer.stop()
+			_mcp_auth_url_row.visible = false
+			_status_label.text = "MCP 授权并连接成功！"
+		else:
+			_mcp_poll_timer.stop()
+			_status_label.text = "OAuth 授权失败: %s" % str(dict.get("error", "未知错误"))
+	elif _mcp_pending_op == "list":
+		var cur_name := _mcp_name_edit.text.strip_edges()
+		for item_var in _mcp_servers:
+			if typeof(item_var) == TYPE_DICTIONARY and str((item_var as Dictionary).get("name", "")) == cur_name:
+				if str((item_var as Dictionary).get("status", "")) == "connected":
+					_mcp_poll_timer.stop()
+					_mcp_auth_url_row.visible = false
+					_status_label.text = "MCP「%s」已授权连接成功，工具已挂载！" % cur_name
+				break

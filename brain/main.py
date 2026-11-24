@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from brain.artifact_store import ArtifactStore
 from brain.audio import ASRProvider, TTSProvider
 from brain.config import (
     AppConfig,
+    delete_mcp_server_in_yaml,
+    get_sanitized_mcp_servers,
     get_sanitized_settings,
     load_config,
     save_settings_to_yaml,
+    upsert_mcp_server_in_yaml,
 )
 from brain.context_builder import ContextBuilder
 from brain.context_store import ContextStore
@@ -33,6 +37,7 @@ from brain.scheduler import TaskScheduler
 from brain.screen_router import ScreenUnderstandingRouter
 from brain.tools.desktop_io import CommandRunner, execute_desktop_action
 from brain.tools.mcp_client import MCPClientManager
+from brain.tools.mcp_oauth import MCPOAuthCoordinator
 from protocol.models import PROTOCOL_VERSION
 
 logging.basicConfig(
@@ -56,6 +61,7 @@ def create_app(
     intent_detector: Optional[ScreenIntentDetector] = None,
     screen_router: Optional[ScreenUnderstandingRouter] = None,
     mcp_manager: Optional[MCPClientManager] = None,
+    oauth_coordinator: Optional[MCPOAuthCoordinator] = None,
     scheduler: Optional[TaskScheduler] = None,
     asr_provider: Optional[ASRProvider] = None,
     tts_provider: Optional[TTSProvider] = None,
@@ -104,7 +110,19 @@ def create_app(
         tts_provider=tts_provider,
         capture_timeout_seconds=capture_timeout_seconds,
     )
-    active_mcp = mcp_manager or MCPClientManager(cfg)
+    active_oauth = oauth_coordinator or (
+        mcp_manager.oauth_coordinator
+        if mcp_manager is not None and mcp_manager.oauth_coordinator is not None
+        else MCPOAuthCoordinator(
+            callback_url=f"http://127.0.0.1:{cfg.server.port}/api/mcp/oauth/callback"
+        )
+    )
+    if mcp_manager is not None:
+        active_mcp = mcp_manager
+        if active_mcp.oauth_coordinator is None:
+            active_mcp.oauth_coordinator = active_oauth
+    else:
+        active_mcp = MCPClientManager(cfg, oauth_coordinator=active_oauth)
     active_scheduler = scheduler or TaskScheduler(
         backend,
         router,
@@ -151,6 +169,7 @@ def create_app(
     app.state.hub = hub
     app.state.scheduler = active_scheduler
     app.state.mcp_manager = active_mcp
+    app.state.oauth_coordinator = active_oauth
 
     @app.get("/health")
     async def health() -> JSONResponse:
@@ -308,6 +327,106 @@ def create_app(
                 "mcp_servers": [asdict(s) for s in statuses],
             }
         )
+
+    def _merged_mcp_server_views() -> List[Dict[str, Any]]:
+        status_map = {s.name: asdict(s) for s in active_mcp.list_statuses()}
+        out: List[Dict[str, Any]] = []
+        for item in get_sanitized_mcp_servers(hub.config):
+            st = status_map.get(item["name"], {})
+            merged = dict(item)
+            merged["status"] = st.get("status", "disabled" if not item["enabled"] else "offline")
+            merged["tools"] = st.get("tools", [])
+            merged["error"] = st.get("error", "")
+            merged["has_oauth_token"] = bool(
+                st.get("has_oauth_token", active_oauth.has_saved_token(item["name"]))
+            )
+            out.append(merged)
+        return out
+
+    @app.get("/api/mcp/servers")
+    async def list_mcp_servers(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="MCP config access is restricted to localhost.")
+        return JSONResponse({"status": "ok", "servers": _merged_mcp_server_views()})
+
+    @app.post("/api/mcp/servers")
+    async def upsert_mcp_server(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="MCP config updates are restricted to localhost.")
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+
+        try:
+            fresh_cfg = upsert_mcp_server_in_yaml(body, config_path=settings_config_path)
+        except Exception as exc:
+            safe_err = hub.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            raise HTTPException(status_code=400, detail=f"保存 MCP 配置失败: {safe_err}") from exc
+
+        hub.config = fresh_cfg
+        await active_mcp.reload(hub.tool_registry, servers=fresh_cfg.mcp_servers)
+        return JSONResponse({"status": "ok", "servers": _merged_mcp_server_views()})
+
+    @app.delete("/api/mcp/servers/{server_name}")
+    async def remove_mcp_server(server_name: str, request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="MCP deletion is restricted to localhost.")
+        clear_auth = str(request.query_params.get("clear_auth", "true")).lower() != "false"
+        fresh_cfg = delete_mcp_server_in_yaml(server_name, config_path=settings_config_path)
+        if clear_auth:
+            active_oauth.clear_saved_auth(server_name)
+        hub.config = fresh_cfg
+        await active_mcp.reload(hub.tool_registry, servers=fresh_cfg.mcp_servers)
+        return JSONResponse({"status": "ok", "servers": _merged_mcp_server_views()})
+
+    @app.post("/api/mcp/servers/{server_name}/authorize")
+    async def authorize_mcp_server(server_name: str, request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="MCP authorization is restricted to localhost.")
+        result = await active_mcp.start_oauth_authorization(server_name, hub.tool_registry)
+        return JSONResponse(
+            {
+                **result,
+                "servers": _merged_mcp_server_views(),
+            }
+        )
+
+    @app.get("/api/mcp/oauth/callback")
+    async def mcp_oauth_callback(
+        code: Optional[str] = None,
+        state: Optional[str] = None,
+        iss: Optional[str] = None,
+        error: Optional[str] = None,
+        error_description: Optional[str] = None,
+    ) -> HTMLResponse:
+        ok, message = active_oauth.complete_callback(
+            code=code,
+            state=state,
+            iss=iss,
+            error=error,
+            error_description=error_description,
+        )
+        safe_title = "启明星 MCP 授权成功 ✨" if ok else "启明星 MCP 授权未完成"
+        badge_col = "#38bdf8" if ok else "#f97316"
+        body_html = (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{html.escape(safe_title)}</title></head>"
+            "<body style='background:#0f172a;color:#f1f5f9;font-family:-apple-system,sans-serif;"
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0;'>"
+            "<div style='background:#1e293b;border:1px solid rgba(255,255,255,0.12);"
+            "border-radius:14px;padding:28px 32px;max-width:460px;text-align:center;'>"
+            f"<h2 style='color:{badge_col};margin-top:0;'>{html.escape(safe_title)}</h2>"
+            f"<p style='line-height:1.6;color:#cbd5e1;'>{html.escape(message)}</p>"
+            "</div></body></html>"
+        )
+        return HTMLResponse(content=body_html, status_code=200 if ok else 400)
 
     @app.post("/api/context/attach_paths")
     async def attach_paths(request: Request) -> JSONResponse:

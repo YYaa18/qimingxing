@@ -77,6 +77,7 @@ func _ready() -> void:
 	tray.open_chat_input_requested.connect(_open_chat_input)
 	tray.open_settings_requested.connect(func() -> void: _open_settings_window(0))
 	tray.open_shortcuts_requested.connect(func() -> void: _open_settings_window(3))
+	tray.open_mcp_config_requested.connect(func() -> void: _open_settings_window(4))
 	tray.toggle_roam_requested.connect(func(on: bool) -> void:
 		avatar.set_roam_enabled(on)
 		overlay.show_transient_status("桌面自由漫步: %s" % ("已开启" if on else "已暂停"), 1.8)

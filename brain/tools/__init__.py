@@ -19,6 +19,7 @@ from brain.tools.desktop_io import (
 from brain.tools.executor import ToolExecutor, ToolLoopResult
 from brain.tools.history_tool import WorkHistoryInspectTool
 from brain.tools.mcp_client import MCPClientManager, MCPServerStatus, MCPToolAdapter
+from brain.tools.mcp_oauth import FileTokenStorage, MCPOAuthCoordinator
 from brain.tools.registry import ToolRegistry
 from brain.tools.scheduler_tool import CancelTaskTool, ListTasksTool, ScheduleTaskTool
 from brain.tools.shell_tool import ShellTool
@@ -70,9 +71,11 @@ __all__ = [
     "ClipboardTool",
     "DeepSeekSearchProvider",
     "FinderGetSelectionTool",
+    "FileTokenStorage",
     "InboxScanTool",
     "ListTasksTool",
     "MCPClientManager",
+    "MCPOAuthCoordinator",
     "MCPServerStatus",
     "MCPToolAdapter",
     "ScheduleTaskTool",

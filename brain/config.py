@@ -229,6 +229,7 @@ class MCPServerConfig:
     url: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
     safe_tools: List[str] = field(default_factory=list)
+    auth_mode: Literal["none", "oauth"] = "none"
     timeout_sec: float = 30.0
     startup_timeout_sec: float = 15.0
 
@@ -554,6 +555,8 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         )
         raw_env = {str(k): _expand_env_vars(str(v)) for k, v in (item.get("env") or {}).items()}
         raw_headers = {str(k): _expand_env_vars(str(v)) for k, v in (item.get("headers") or {}).items()}
+        raw_auth = str(item.get("auth_mode", "none") or "none").strip().lower()
+        auth_mode: Literal["none", "oauth"] = "oauth" if raw_auth == "oauth" else "none"
         mcp_servers.append(
             MCPServerConfig(
                 name=srv_name,
@@ -565,6 +568,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
                 url=str(item.get("url", "") or ""),
                 headers=raw_headers,
                 safe_tools=[str(t) for t in (item.get("safe_tools") or [])],
+                auth_mode=auth_mode,
                 timeout_sec=float(item.get("timeout_sec", 30.0)),
                 startup_timeout_sec=float(item.get("startup_timeout_sec", 15.0)),
             )
@@ -771,6 +775,172 @@ def resolve_writable_config_path(explicit_path: Optional[Path] = None) -> Path:
     return _REPO_ROOT / "config.yaml"
 
 
+def _load_raw_yaml_for_edit(target: Path) -> Dict[str, Any]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    raw: Dict[str, Any] = {}
+    if target.exists():
+        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    elif (_REPO_ROOT / "config.example.yaml").exists():
+        raw = yaml.safe_load((_REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8")) or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_yaml_atomic_0600(raw: Dict[str, Any], target: Path) -> AppConfig:
+    tmp_path = target.with_suffix(".yaml.tmp")
+    dumped = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
+    tmp_path.write_text(dumped, encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp_path, target)
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    return load_config(target)
+
+
+def get_sanitized_mcp_servers(cfg: AppConfig) -> List[Dict[str, Any]]:
+    """Export configured MCP servers with header/env secrets masked cleanly."""
+    items: List[Dict[str, Any]] = []
+    for srv in cfg.mcp_servers:
+        items.append(
+            {
+                "name": srv.name,
+                "enabled": srv.enabled,
+                "transport": srv.transport,
+                "command": srv.command,
+                "args": list(srv.args),
+                "env": {k: mask_secret(v) for k, v in srv.env.items()},
+                "url": srv.url,
+                "headers": {k: mask_secret(v) for k, v in srv.headers.items()},
+                "safe_tools": list(srv.safe_tools),
+                "auth_mode": srv.auth_mode,
+                "timeout_sec": srv.timeout_sec,
+                "startup_timeout_sec": srv.startup_timeout_sec,
+            }
+        )
+    return items
+
+
+def upsert_mcp_server_in_yaml(
+    server_data: Dict[str, Any],
+    *,
+    config_path: Optional[Path] = None,
+) -> AppConfig:
+    """Create or update an MCP server definition in `config.yaml` (0600)."""
+    name = str(server_data.get("name") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", name):
+        raise ValueError("MCP 名称仅支持 1–48 位字母、数字、下划线或短横线")
+
+    transport = str(server_data.get("transport") or "streamable_http").strip().lower()
+    if transport not in ("stdio", "sse", "streamable_http"):
+        raise ValueError(f"不支持的 transport: {transport}")
+
+    auth_mode = str(server_data.get("auth_mode") or "none").strip().lower()
+    if auth_mode not in ("none", "oauth"):
+        raise ValueError(f"不支持的 auth_mode: {auth_mode}")
+
+    url = str(server_data.get("url") or "").strip()
+    command = str(server_data.get("command") or "").strip()
+    if transport in ("sse", "streamable_http"):
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise ValueError("远程 MCP 必须填写以 http:// 或 https:// 开头的 URL")
+    elif not command:
+        raise ValueError("stdio 模式必须填写本地启动命令 command")
+
+    raw_args = server_data.get("args")
+    if isinstance(raw_args, str):
+        args = [a for a in raw_args.split() if a]
+    elif isinstance(raw_args, list):
+        args = [str(a).strip() for a in raw_args if str(a).strip()]
+    else:
+        args = []
+
+    raw_safe = server_data.get("safe_tools")
+    if isinstance(raw_safe, str):
+        safe_tools = [t.strip() for t in re.split(r"[,;\s]+", raw_safe) if t.strip()]
+    elif isinstance(raw_safe, list):
+        safe_tools = [str(t).strip() for t in raw_safe if str(t).strip()]
+    else:
+        safe_tools = []
+
+    target = resolve_writable_config_path(config_path)
+    raw = _load_raw_yaml_for_edit(target)
+    servers_raw = raw.setdefault("mcp_servers", [])
+    if not isinstance(servers_raw, list):
+        servers_raw = []
+        raw["mcp_servers"] = servers_raw
+
+    existing: Dict[str, Any] = {}
+    existing_idx = -1
+    for idx, entry in enumerate(servers_raw):
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip() == name:
+            existing = entry
+            existing_idx = idx
+            break
+
+    def _merge_kv(incoming: Any, prev_map: Any) -> Dict[str, str]:
+        prev_dict = prev_map if isinstance(prev_map, dict) else {}
+        if not isinstance(incoming, dict):
+            return {str(k): str(v) for k, v in prev_dict.items()}
+        out: Dict[str, str] = {}
+        for k_raw, v_raw in incoming.items():
+            k = str(k_raw).strip()
+            v = str(v_raw or "").strip()
+            if not k:
+                continue
+            if _is_masked_placeholder(v):
+                if k in prev_dict and str(prev_dict[k]).strip():
+                    out[k] = str(prev_dict[k])
+            else:
+                out[k] = v
+        return out
+
+    new_entry: Dict[str, Any] = {
+        "name": name,
+        "enabled": bool(server_data.get("enabled", True)),
+        "transport": transport,
+        "auth_mode": auth_mode,
+        "url": url if transport in ("sse", "streamable_http") else "",
+        "command": command if transport == "stdio" else "",
+        "args": args if transport == "stdio" else [],
+        "safe_tools": safe_tools,
+        "headers": _merge_kv(server_data.get("headers"), existing.get("headers")),
+        "env": _merge_kv(server_data.get("env"), existing.get("env")),
+        "timeout_sec": float(server_data.get("timeout_sec") or existing.get("timeout_sec") or 30.0),
+        "startup_timeout_sec": float(
+            server_data.get("startup_timeout_sec") or existing.get("startup_timeout_sec") or 20.0
+        ),
+    }
+
+    if existing_idx >= 0:
+        servers_raw[existing_idx] = new_entry
+    else:
+        servers_raw.append(new_entry)
+    return _write_yaml_atomic_0600(raw, target)
+
+
+def delete_mcp_server_in_yaml(
+    server_name: str,
+    *,
+    config_path: Optional[Path] = None,
+) -> AppConfig:
+    """Remove an MCP server definition from `config.yaml` (0600)."""
+    target_name = str(server_name or "").strip()
+    target = resolve_writable_config_path(config_path)
+    raw = _load_raw_yaml_for_edit(target)
+    servers_raw = raw.get("mcp_servers")
+    if isinstance(servers_raw, list):
+        raw["mcp_servers"] = [
+            entry
+            for entry in servers_raw
+            if not (isinstance(entry, dict) and str(entry.get("name") or "").strip() == target_name)
+        ]
+    return _write_yaml_atomic_0600(raw, target)
+
+
 def save_settings_to_yaml(
     updates: Dict[str, Any],
     *,
@@ -778,16 +948,7 @@ def save_settings_to_yaml(
 ) -> AppConfig:
     """Safely update user config YAML (`config.yaml`) with 0600 permissions and reload AppConfig."""
     target = resolve_writable_config_path(config_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    raw: Dict[str, Any] = {}
-    if target.exists():
-        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-    elif (_REPO_ROOT / "config.example.yaml").exists():
-        raw = yaml.safe_load((_REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8")) or {}
-
-    if not isinstance(raw, dict):
-        raw = {}
+    raw = _load_raw_yaml_for_edit(target)
 
     profiles_raw = raw.setdefault("profiles", {})
     if not isinstance(profiles_raw, dict):
@@ -927,16 +1088,4 @@ def save_settings_to_yaml(
             if isinstance(sc_sec, dict):
                 sc_sec["ptt_hotkey"] = str(ptt_hk).strip().lower()
 
-    tmp_path = target.with_suffix(".yaml.tmp")
-    dumped = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)
-    tmp_path.write_text(dumped, encoding="utf-8")
-    try:
-        os.chmod(tmp_path, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp_path, target)
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
-    return load_config(target)
+    return _write_yaml_atomic_0600(raw, target)

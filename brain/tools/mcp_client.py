@@ -5,11 +5,12 @@ import logging
 import os
 import re
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from brain.config import AppConfig, MCPServerConfig
 from brain.tools.base import Tool, ToolExecutionContext, ToolResult
+from brain.tools.mcp_oauth import MCPOAuthCoordinator
 from brain.utils import truncate_head_tail
 from protocol.models import RiskLevel
 
@@ -179,9 +180,21 @@ class MCPServerStatus:
     name: str
     transport: str
     enabled: bool
-    status: str  # "disabled" | "connected" | "offline"
+    status: str  # "disabled" | "connected" | "offline" | "needs_auth"
     tools: List[str] = field(default_factory=list)
     error: str = ""
+    auth_mode: str = "none"
+    url: str = ""
+    has_oauth_token: bool = False
+
+
+def _format_exc_summary(exc: BaseException) -> str:
+    sub_excs = getattr(exc, "exceptions", None)
+    if sub_excs:
+        parts = [_format_exc_summary(sub) for sub in list(sub_excs)[:3]]
+        return "; ".join(p for p in parts if p)
+    msg = str(exc).strip()
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
 
 
 @dataclass
@@ -205,14 +218,22 @@ class MCPClientManager:
         config: AppConfig,
         *,
         transport_opener: Optional[TransportOpener] = None,
+        oauth_coordinator: Optional[MCPOAuthCoordinator] = None,
     ) -> None:
         self.config = config
         self._transport_opener = transport_opener
+        self.oauth_coordinator = oauth_coordinator
         self._registry: Any = None
         self._reload_lock = asyncio.Lock()
         self._runtimes: Dict[str, _ServerRuntime] = {}
         self._statuses: Dict[str, MCPServerStatus] = {}
+        self._auth_tasks: Dict[str, asyncio.Task[bool]] = {}
         self._sync_server_tables()
+
+    def _has_oauth_token(self, srv: MCPServerConfig) -> bool:
+        if srv.auth_mode != "oauth" or self.oauth_coordinator is None:
+            return False
+        return self.oauth_coordinator.has_saved_token(srv.name)
 
     def _sync_server_tables(self) -> None:
         new_runtimes: Dict[str, _ServerRuntime] = {}
@@ -227,11 +248,18 @@ class MCPClientManager:
                 generation=prev_rt.generation if prev_rt is not None else 0,
                 lock=prev_rt.lock if prev_rt is not None else asyncio.Lock(),
             )
+            has_tok = self._has_oauth_token(srv)
+            init_status = "disabled" if not srv.enabled else (
+                "needs_auth" if (srv.auth_mode == "oauth" and self.oauth_coordinator is not None and not has_tok) else "offline"
+            )
             new_statuses[srv.name] = MCPServerStatus(
                 name=srv.name,
                 transport=srv.transport,
                 enabled=srv.enabled,
-                status="disabled" if not srv.enabled else "offline",
+                status=init_status,
+                auth_mode=srv.auth_mode,
+                url=srv.url,
+                has_oauth_token=has_tok,
             )
         self._runtimes = new_runtimes
         self._statuses = new_statuses
@@ -249,9 +277,14 @@ class MCPClientManager:
         return self.list_statuses()
 
     async def _connect_server_locked(
-        self, runtime: _ServerRuntime, registry: Any
+        self,
+        runtime: _ServerRuntime,
+        registry: Any,
+        *,
+        interactive_auth: bool = False,
     ) -> bool:
         srv = runtime.config
+        has_tok = self._has_oauth_token(srv)
         st = self._statuses.setdefault(
             srv.name,
             MCPServerStatus(
@@ -259,19 +292,42 @@ class MCPClientManager:
                 transport=srv.transport,
                 enabled=srv.enabled,
                 status="disabled" if not srv.enabled else "offline",
+                auth_mode=srv.auth_mode,
+                url=srv.url,
+                has_oauth_token=has_tok,
             ),
         )
+        st.auth_mode = srv.auth_mode
+        st.url = srv.url
+        st.has_oauth_token = has_tok
         if not srv.enabled:
             st.status = "disabled"
             st.tools = []
             st.error = ""
             return False
 
+        if (
+            srv.auth_mode == "oauth"
+            and not interactive_auth
+            and self.oauth_coordinator is not None
+            and not has_tok
+        ):
+            st.status = "needs_auth"
+            st.tools = []
+            st.error = "需要点击「OAuth 授权」完成浏览器登录"
+            logger.info("MCP server '%s' awaiting interactive OAuth authorization", srv.name)
+            return False
+
         stack = AsyncExitStack()
+        connect_timeout = (
+            max(185.0, float(srv.startup_timeout_sec))
+            if interactive_auth
+            else max(2.0, float(srv.startup_timeout_sec))
+        )
         try:
             session, tools_registered = await asyncio.wait_for(
-                self._connect_one(srv, stack, registry),
-                timeout=max(2.0, float(srv.startup_timeout_sec)),
+                self._connect_one(srv, stack, registry, interactive_auth=interactive_auth),
+                timeout=connect_timeout,
             )
             runtime.stack = stack
             runtime.session = session
@@ -280,6 +336,7 @@ class MCPClientManager:
             st.status = "connected"
             st.tools = list(tools_registered)
             st.error = ""
+            st.has_oauth_token = self._has_oauth_token(srv)
             logger.info(
                 "Connected MCP server '%s' (%s): registered %d tool(s): %s",
                 srv.name,
@@ -289,13 +346,24 @@ class MCPClientManager:
             )
             return True
         except Exception as exc:
-            safe_err = self.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            safe_err = self.config.redact_secrets(_format_exc_summary(exc))
             runtime.stack = None
             runtime.session = None
             runtime.tool_names = []
-            st.status = "offline"
+            is_auth_err = (
+                srv.auth_mode == "oauth"
+                and (
+                    "oauth" in safe_err.lower()
+                    or "401" in safe_err
+                    or "unauthorized" in safe_err.lower()
+                    or "invalid_token" in safe_err.lower()
+                    or "未授权" in safe_err
+                )
+            )
+            st.status = "needs_auth" if is_auth_err else "offline"
             st.tools = []
             st.error = safe_err[:240]
+            st.has_oauth_token = self._has_oauth_token(srv)
             logger.warning(
                 "MCP server '%s' failed to start (isolated cleanly): %s",
                 srv.name,
@@ -308,7 +376,11 @@ class MCPClientManager:
             return False
 
     async def _open_session(
-        self, srv: MCPServerConfig, stack: AsyncExitStack
+        self,
+        srv: MCPServerConfig,
+        stack: AsyncExitStack,
+        *,
+        interactive_auth: bool = False,
     ) -> Any:
         if self._transport_opener is not None:
             return await self._transport_opener(srv, stack)
@@ -317,6 +389,14 @@ class MCPClientManager:
         from mcp.client.sse import sse_client
         from mcp.client.stdio import stdio_client
         from mcp.client.streamable_http import streamable_http_client
+
+        oauth_provider = None
+        if srv.auth_mode == "oauth" and self.oauth_coordinator is not None and srv.url:
+            oauth_provider = self.oauth_coordinator.build_provider(
+                srv.name,
+                srv.url,
+                interactive=interactive_auth,
+            )
 
         if srv.transport == "stdio":
             if not srv.command:
@@ -332,17 +412,21 @@ class MCPClientManager:
             if not srv.url:
                 raise ValueError(f"MCP sse server '{srv.name}' 缺少 url")
             read_stream, write_stream = await stack.enter_async_context(
-                sse_client(srv.url, headers=srv.headers or None)
+                sse_client(srv.url, headers=srv.headers or None, auth=oauth_provider)
             )
         elif srv.transport == "streamable_http":
             if not srv.url:
                 raise ValueError(f"MCP streamable_http server '{srv.name}' 缺少 url")
             http_client = None
-            if srv.headers:
+            if srv.headers or oauth_provider is not None:
                 import httpx2
 
                 http_client = await stack.enter_async_context(
-                    httpx2.AsyncClient(headers=srv.headers)
+                    httpx2.AsyncClient(
+                        headers=srv.headers or None,
+                        auth=oauth_provider,
+                        follow_redirects=True,
+                    )
                 )
             streams = await stack.enter_async_context(
                 streamable_http_client(srv.url, http_client=http_client)
@@ -360,8 +444,10 @@ class MCPClientManager:
         srv: MCPServerConfig,
         stack: AsyncExitStack,
         registry: Any,
+        *,
+        interactive_auth: bool = False,
     ) -> Tuple[Any, List[str]]:
-        session = await self._open_session(srv, stack)
+        session = await self._open_session(srv, stack, interactive_auth=interactive_auth)
         listed = await session.list_tools()
         raw_tools = getattr(listed, "tools", listed) or []
         safe_set = set(srv.safe_tools or [])
@@ -534,7 +620,95 @@ class MCPClientManager:
                 self.config.mcp_servers = list(servers)
             return await self.start_all(registry)
 
+    async def start_oauth_authorization(
+        self,
+        server_name: str,
+        registry: Any = None,
+        *,
+        discovery_timeout_sec: float = 12.0,
+    ) -> Dict[str, Any]:
+        """Start interactive OAuth 2.1 DCR + PKCE authorization for a configured remote MCP server."""
+        if self.oauth_coordinator is None:
+            return {"status": "error", "error": "OAuth coordinator 未初始化"}
+        runtime = self._runtimes.get(server_name)
+        if runtime is None:
+            return {"status": "error", "error": f"未找到 MCP server '{server_name}'"}
+        srv = runtime.config
+        if srv.transport not in ("streamable_http", "sse") or not srv.url:
+            return {"status": "error", "error": "仅远程 URL MCP（streamable_http / sse）支持 OAuth 授权"}
+
+        reg = registry if registry is not None else self._registry
+        prev_task = self._auth_tasks.pop(server_name, None)
+        if prev_task is not None and not prev_task.done():
+            prev_task.cancel()
+
+        auth_ev = self.oauth_coordinator.prepare_auth_session(server_name)
+
+        async def _interactive_runner() -> bool:
+            async with runtime.lock:
+                await self._close_server_runtime_locked(runtime, reg, unregister_tools=True)
+                return await self._connect_server_locked(runtime, reg, interactive_auth=True)
+
+        auth_task = asyncio.create_task(_interactive_runner())
+        self._auth_tasks[server_name] = auth_task
+        ev_wait = asyncio.create_task(auth_ev.wait())
+        try:
+            await asyncio.wait(
+                {auth_task, ev_wait},
+                timeout=max(2.0, discovery_timeout_sec),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not ev_wait.done():
+                ev_wait.cancel()
+
+        st = self._statuses.get(server_name)
+        if auth_task.done():
+            self._auth_tasks.pop(server_name, None)
+            try:
+                ok = bool(auth_task.result())
+            except Exception as exc:
+                safe_err = self.config.redact_secrets(_format_exc_summary(exc))
+                if st is not None:
+                    st.error = safe_err[:240]
+                return {
+                    "status": "error",
+                    "error": safe_err,
+                    "server": asdict(st) if st else None,
+                }
+            if ok:
+                return {
+                    "status": "connected",
+                    "auth_url": "",
+                    "server": asdict(st) if st else None,
+                }
+            return {
+                "status": "error",
+                "error": (st.error if st else "") or "OAuth 连接失败",
+                "server": asdict(st) if st else None,
+            }
+
+        auth_url = self.oauth_coordinator.pending_auth_url.get(server_name, "")
+        if auth_url:
+            return {
+                "status": "authorizing",
+                "auth_url": auth_url,
+                "server": asdict(st) if st else None,
+            }
+
+        auth_task.cancel()
+        self._auth_tasks.pop(server_name, None)
+        return {
+            "status": "error",
+            "error": "获取远程 OAuth 授权地址超时 (>12s)",
+            "server": asdict(st) if st else None,
+        }
+
     async def stop_all(self, registry: Any = None) -> None:
+        for task in list(self._auth_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._auth_tasks.clear()
         reg = registry if registry is not None else self._registry
         for runtime in reversed(list(self._runtimes.values())):
             async with runtime.lock:
