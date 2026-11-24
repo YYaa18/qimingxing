@@ -23,7 +23,9 @@ from brain.memory import MemoryBackend, create_memory_backend
 from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from brain.memory.extractor import MemoryExtractor
 from brain.memory.retrieval import MemoryRetriever
+from brain.scheduler import TaskScheduler
 from brain.screen_router import ScreenUnderstandingRouter
+from brain.tools.mcp_client import MCPClientManager
 from protocol.models import PROTOCOL_VERSION
 
 logging.basicConfig(
@@ -46,6 +48,8 @@ def create_app(
     embedding_provider: Optional[EmbeddingProvider] = None,
     intent_detector: Optional[ScreenIntentDetector] = None,
     screen_router: Optional[ScreenUnderstandingRouter] = None,
+    mcp_manager: Optional[MCPClientManager] = None,
+    scheduler: Optional[TaskScheduler] = None,
     capture_timeout_seconds: float = 3.5,
 ) -> FastAPI:
     cfg = config or load_config()
@@ -86,10 +90,20 @@ def create_app(
         skill_manager=skill_manager,
         capture_timeout_seconds=capture_timeout_seconds,
     )
+    active_mcp = mcp_manager or MCPClientManager(cfg)
+    active_scheduler = scheduler or TaskScheduler(
+        backend,
+        router,
+        cfg,
+        on_notice=hub.broadcast_proactive_notice,
+        on_soft_alert=hub.broadcast_soft_alert,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await backend.initialize()
+        await active_mcp.start_all(hub.tool_registry)
+        await active_scheduler.start()
 
         async def _ttl_reaper() -> None:
             while True:
@@ -100,6 +114,8 @@ def create_app(
         try:
             yield
         finally:
+            await active_scheduler.stop()
+            await active_mcp.stop_all(hub.tool_registry)
             reaper_task.cancel()
             try:
                 await reaper_task
@@ -119,6 +135,8 @@ def create_app(
     app.state.memory_retriever = retriever
     app.state.memory_extractor = extractor
     app.state.hub = hub
+    app.state.scheduler = active_scheduler
+    app.state.mcp_manager = active_mcp
 
     @app.get("/health")
     async def health() -> JSONResponse:
@@ -150,6 +168,7 @@ def create_app(
         hot_count, archived_count = await backend.count_messages()
         skills = await backend.list_skills(status="active", limit=30)
         work_logs = await backend.list_work_history(limit=10)
+        scheduled_tasks = await backend.list_scheduled_tasks(status="active", limit=100)
         import time as _time
         lt = _time.localtime()
         day_start = _time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
@@ -168,6 +187,8 @@ def create_app(
                 "archived_messages_count": archived_count,
                 "skills_count": len(skills),
                 "work_history_count": len(work_logs),
+                "scheduled_tasks_count": len(scheduled_tasks),
+                "mcp_servers": [asdict(s) for s in active_mcp.list_statuses()],
                 "today_usage": {
                     "calls": today_usage.calls,
                     "prompt_tokens": today_usage.prompt_tokens,
@@ -229,10 +250,20 @@ def create_app(
                 detail=f"Artifact exceeds maximum allowed size of {artifacts.max_bytes} bytes.",
             )
 
-        rec = artifacts.save(data, content_type=file.content_type or "image/jpeg")
+        try:
+            rec = artifacts.save(
+                data,
+                content_type=file.content_type or "application/octet-stream",
+                filename=file.filename or "",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(
             {
                 "artifact_id": rec.artifact_id,
+                "kind": rec.kind,
+                "filename": rec.filename,
+                "content_type": rec.content_type,
                 "expires_at": rec.expires_at,
                 "size_bytes": rec.size_bytes,
             }

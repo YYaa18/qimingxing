@@ -66,6 +66,9 @@
     "output.tool_status": {
       "$ref": "#/$defs/OutputToolStatusPayload"
     },
+    "output.proactive_notice": {
+      "$ref": "#/$defs/OutputProactiveNoticePayload"
+    },
     "output.card": {
       "$ref": "#/$defs/OutputCardPayload"
     },
@@ -435,6 +438,13 @@
         "text": {
           "title": "Text",
           "type": "string"
+        },
+        "attachments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
         }
       },
       "required": [
@@ -476,6 +486,48 @@
         "content_markdown"
       ],
       "title": "OutputCardPayload",
+      "type": "object"
+    },
+    "OutputProactiveNoticePayload": {
+      "properties": {
+        "notice_id": {
+          "title": "Notice Id",
+          "type": "string"
+        },
+        "task_id": {
+          "default": "",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "reminder",
+          "enum": [
+            "reminder",
+            "llm_summary"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "notice_id",
+        "title",
+        "content",
+        "created_at"
+      ],
+      "title": "OutputProactiveNoticePayload",
       "type": "object"
     },
     "OutputTextDeltaPayload": {

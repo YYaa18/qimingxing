@@ -156,6 +156,10 @@ class ContextStore:
     def get_snapshot(self) -> ContextSnapshot:
         return self._snapshot
 
+    def is_current_window_privacy_masked(self) -> bool:
+        w = self._snapshot.window_changed
+        return bool(w is not None and w.privacy_masked)
+
     def get_timeline(self) -> List[ActivityEntry]:
         self._prune_timeline(self._clock())
         return list(self._snapshot.timeline)

@@ -146,6 +146,7 @@ class SystemPrivacyStatePayload(ProtocolModel):
 
 class InputTextPayload(ProtocolModel):
     text: str
+    attachments: List[str] = Field(default_factory=list)
 
 
 class InputActionPayload(ProtocolModel):
@@ -234,6 +235,15 @@ class OutputToolStatusPayload(ProtocolModel):
     max_steps: Optional[int] = None
 
 
+class OutputProactiveNoticePayload(ProtocolModel):
+    notice_id: str
+    task_id: str = ""
+    kind: Literal["reminder", "llm_summary"] = "reminder"
+    title: str
+    content: str
+    created_at: str
+
+
 RiskLevel = Literal["safe", "confirm", "blocked"]
 
 
@@ -304,6 +314,7 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "output.turn_end": OutputTurnEndPayload,
     "output.text_delta": OutputTextDeltaPayload,
     "output.tool_status": OutputToolStatusPayload,
+    "output.proactive_notice": OutputProactiveNoticePayload,
     "output.card": OutputCardPayload,
     "tool.approval_request": ToolApprovalRequestPayload,
     "tool.approval_response": ToolApprovalResponsePayload,

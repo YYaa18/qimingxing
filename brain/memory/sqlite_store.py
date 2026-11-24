@@ -19,8 +19,12 @@ from brain.memory.models import (
     MemoryFact,
     MemorySkill,
     MessageRecord,
+    ScheduleKind,
+    ScheduledTaskRecord,
     SessionRecord,
     SkillStatus,
+    TaskStatus,
+    TaskType,
     UsageLedgerRecord,
     UsageSummary,
     WorkHistoryRecord,
@@ -161,6 +165,22 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_usage_created
     ON usage_ledger(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    task_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    task_type TEXT NOT NULL DEFAULT 'reminder',
+    schedule_kind TEXT NOT NULL DEFAULT 'once',
+    schedule_expr TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    next_run_at REAL NOT NULL,
+    last_run_at REAL NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_due
+    ON scheduled_tasks(status, next_run_at ASC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     item_id UNINDEXED,
@@ -1107,6 +1127,107 @@ class SQLiteMemoryStore(MemoryBackend):
                 cache_hit_rate=hit_rate,
             )
 
+    # --- M5: Scheduled Tasks ---
+
+    async def add_scheduled_task(self, task: ScheduledTaskRecord) -> ScheduledTaskRecord:
+        async with self._lock:
+            conn = self._ensure_conn()
+            conn.execute(
+                """
+                INSERT INTO scheduled_tasks (
+                    task_id, title, task_type, schedule_kind, schedule_expr,
+                    payload_json, next_run_at, last_run_at, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.task_id,
+                    task.title,
+                    task.task_type,
+                    task.schedule_kind,
+                    task.schedule_expr,
+                    task.payload_json,
+                    task.next_run_at,
+                    task.last_run_at,
+                    task.status,
+                    task.created_at,
+                ),
+            )
+            conn.commit()
+            return task
+
+    async def get_scheduled_task(self, task_id: str) -> Optional[ScheduledTaskRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return _row_to_scheduled_task(row) if row else None
+
+    async def list_scheduled_tasks(
+        self,
+        *,
+        status: Optional[TaskStatus] = "active",
+        limit: int = 50,
+    ) -> List[ScheduledTaskRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            if status is None:
+                rows = conn.execute(
+                    "SELECT * FROM scheduled_tasks ORDER BY next_run_at ASC, created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM scheduled_tasks WHERE status = ? ORDER BY next_run_at ASC, created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            return [_row_to_scheduled_task(r) for r in rows]
+
+    async def list_due_tasks(self, *, now: float) -> List[ScheduledTaskRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            rows = conn.execute(
+                """
+                SELECT * FROM scheduled_tasks
+                WHERE status = 'active' AND next_run_at <= ?
+                ORDER BY next_run_at ASC
+                """,
+                (now,),
+            ).fetchall()
+            return [_row_to_scheduled_task(r) for r in rows]
+
+    async def update_scheduled_task(
+        self,
+        task_id: str,
+        *,
+        status: Optional[TaskStatus] = None,
+        next_run_at: Optional[float] = None,
+        last_run_at: Optional[float] = None,
+    ) -> Optional[ScheduledTaskRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            new_status = status if status is not None else row["status"]
+            new_next = next_run_at if next_run_at is not None else float(row["next_run_at"])
+            new_last = last_run_at if last_run_at is not None else row["last_run_at"]
+            conn.execute(
+                """
+                UPDATE scheduled_tasks
+                SET status = ?, next_run_at = ?, last_run_at = ?
+                WHERE task_id = ?
+                """,
+                (new_status, new_next, new_last, task_id),
+            )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return _row_to_scheduled_task(updated) if updated else None
+
     # --- Lossless JSONL Snapshot Export / Import ---
 
     async def export_snapshot(self, output_path: Path) -> int:
@@ -1176,6 +1297,12 @@ class SQLiteMemoryStore(MemoryBackend):
                     count += 1
                 for r in conn.execute("SELECT * FROM usage_ledger ORDER BY ledger_id ASC"):
                     f.write(json.dumps({"_type": "usage", **dict(r)}, ensure_ascii=False) + "\n")
+                    count += 1
+                for r in conn.execute("SELECT * FROM scheduled_tasks ORDER BY created_at ASC"):
+                    f.write(
+                        json.dumps({"_type": "scheduled_task", **dict(r)}, ensure_ascii=False)
+                        + "\n"
+                    )
                     count += 1
             return count
 
@@ -1416,6 +1543,28 @@ class SQLiteMemoryStore(MemoryBackend):
                             ),
                         )
                         count += 1
+                    elif rtype == "scheduled_task":
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO scheduled_tasks (
+                                task_id, title, task_type, schedule_kind, schedule_expr,
+                                payload_json, next_run_at, last_run_at, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec["task_id"],
+                                rec["title"],
+                                rec.get("task_type", "reminder"),
+                                rec.get("schedule_kind", "once"),
+                                rec.get("schedule_expr", ""),
+                                rec.get("payload_json", "{}"),
+                                rec["next_run_at"],
+                                rec.get("last_run_at"),
+                                rec.get("status", "active"),
+                                rec["created_at"],
+                            ),
+                        )
+                        count += 1
             conn.commit()
             return count
 
@@ -1490,6 +1639,21 @@ def _row_to_work_history(row: sqlite3.Row) -> WorkHistoryRecord:
     )
 
 
+def _row_to_scheduled_task(row: sqlite3.Row) -> ScheduledTaskRecord:
+    return ScheduledTaskRecord(
+        task_id=str(row["task_id"]),
+        title=str(row["title"]),
+        task_type=row["task_type"],  # type: ignore[arg-type]
+        schedule_kind=row["schedule_kind"],  # type: ignore[arg-type]
+        schedule_expr=str(row["schedule_expr"] or ""),
+        payload_json=str(row["payload_json"] or "{}"),
+        next_run_at=float(row["next_run_at"]),
+        last_run_at=float(row["last_run_at"]) if row["last_run_at"] is not None else None,
+        status=row["status"],  # type: ignore[arg-type]
+        created_at=float(row["created_at"]),
+    )
+
+
 def _row_to_category(row: sqlite3.Row) -> MemoryCategory:
     return MemoryCategory(
         category_key=str(row["category_key"]),
@@ -1545,5 +1709,20 @@ def _row_to_work_history(row: sqlite3.Row) -> WorkHistoryRecord:
         trace_json=str(row["trace_json"] or "[]"),
         step_count=int(row["step_count"] or 0),
         status=str(row["status"] or "completed"),
+        created_at=float(row["created_at"]),
+    )
+
+
+def _row_to_scheduled_task(row: sqlite3.Row) -> ScheduledTaskRecord:
+    return ScheduledTaskRecord(
+        task_id=str(row["task_id"]),
+        title=str(row["title"]),
+        task_type=row["task_type"],  # type: ignore[arg-type]
+        schedule_kind=row["schedule_kind"],  # type: ignore[arg-type]
+        schedule_expr=str(row["schedule_expr"] or ""),
+        payload_json=str(row["payload_json"] or "{}"),
+        next_run_at=float(row["next_run_at"]),
+        last_run_at=float(row["last_run_at"]) if row["last_run_at"] is not None else None,
+        status=row["status"],  # type: ignore[arg-type]
         created_at=float(row["created_at"]),
     )

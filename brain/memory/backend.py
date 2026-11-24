@@ -13,14 +13,18 @@ from brain.memory.models import (
     MemoryFact,
     MemorySkill,
     MessageRecord,
+    ScheduleKind,
+    ScheduledTaskRecord,
     SessionRecord,
     SkillStatus,
+    TaskStatus,
+    TaskType,
     UsageLedgerRecord,
     UsageSummary,
     WorkHistoryRecord,
 )
 
-SNAPSHOT_SCHEMA_VERSION = "4.0"
+SNAPSHOT_SCHEMA_VERSION = "5.0"
 
 
 class MemoryBackend(ABC):
@@ -272,6 +276,40 @@ class MemoryBackend(ABC):
     @abstractmethod
     async def get_usage_summary(self, *, since_ts: float = 0.0) -> UsageSummary:
         """Aggregate token usage, cache hit rate, and estimated cost since `since_ts`."""
+
+    # --- M5: Scheduled Tasks ---
+
+    @abstractmethod
+    async def add_scheduled_task(self, task: ScheduledTaskRecord) -> ScheduledTaskRecord:
+        """Insert a scheduled task into SQLite."""
+
+    @abstractmethod
+    async def get_scheduled_task(self, task_id: str) -> Optional[ScheduledTaskRecord]:
+        """Fetch a scheduled task by ID."""
+
+    @abstractmethod
+    async def list_scheduled_tasks(
+        self,
+        *,
+        status: Optional[TaskStatus] = "active",
+        limit: int = 50,
+    ) -> List[ScheduledTaskRecord]:
+        """List scheduled tasks ordered by next_run_at ascending."""
+
+    @abstractmethod
+    async def list_due_tasks(self, *, now: float) -> List[ScheduledTaskRecord]:
+        """Return active tasks whose next_run_at <= now."""
+
+    @abstractmethod
+    async def update_scheduled_task(
+        self,
+        task_id: str,
+        *,
+        status: Optional[TaskStatus] = None,
+        next_run_at: Optional[float] = None,
+        last_run_at: Optional[float] = None,
+    ) -> Optional[ScheduledTaskRecord]:
+        """Update status and timestamps of a scheduled task."""
 
     # --- Lossless Migration Contract ---
 

@@ -643,3 +643,48 @@ main {
   color: var(--muted);
   font-weight: 600;
 }
+
+.proactive-banner {
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  color: #bae6fd;
+}
+
+.attachment-bar {
+  display: none;
+  padding: 8px 20px 0;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.attachment-bar.visible {
+  display: flex;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.16);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: #e0e7ff;
+}
+
+.attachment-chip button {
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.chat-panel.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -6px;
+  background: rgba(99, 102, 241, 0.05);
+}

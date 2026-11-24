@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 import yaml
 
@@ -212,6 +212,28 @@ class ToolsConfig:
 
 
 @dataclass
+class SchedulerConfig:
+    enabled: bool = True
+    poll_interval_sec: float = 5.0
+    summary_profile: str = "fast_deepseek"
+
+
+@dataclass
+class MCPServerConfig:
+    name: str
+    enabled: bool = True
+    transport: Literal["stdio", "sse", "streamable_http"] = "stdio"
+    command: str = ""
+    args: List[str] = field(default_factory=list)
+    env: Dict[str, str] = field(default_factory=dict)
+    url: str = ""
+    headers: Dict[str, str] = field(default_factory=dict)
+    safe_tools: List[str] = field(default_factory=list)
+    timeout_sec: float = 30.0
+    startup_timeout_sec: float = 15.0
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     default_profile: str = "mock_local"
@@ -221,6 +243,8 @@ class AppConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    mcp_servers: List[MCPServerConfig] = field(default_factory=list)
     _secrets: List[str] = field(default_factory=list, repr=False)
 
     def collect_secrets(self) -> List[str]:
@@ -231,6 +255,13 @@ class AppConfig:
             secrets.append(self.memory.embedding.api_key)
         if self.tools.web_search.api_key:
             secrets.append(self.tools.web_search.api_key)
+        for srv in self.mcp_servers:
+            for val in srv.env.values():
+                if val:
+                    secrets.append(val)
+            for val in srv.headers.values():
+                if val:
+                    secrets.append(val)
         secrets.extend(self._secrets)
         return sorted({s for s in secrets if len(s) >= 4}, key=len, reverse=True)
 
@@ -433,6 +464,45 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         ),
     )
 
+    sched_raw = raw.get("scheduler") or {}
+    summary_prof = str(sched_raw.get("summary_profile", ext_profile))
+    if summary_prof not in profiles and default_profile:
+        summary_prof = default_profile
+    scheduler = SchedulerConfig(
+        enabled=bool(sched_raw.get("enabled", True)),
+        poll_interval_sec=float(sched_raw.get("poll_interval_sec", 5.0)),
+        summary_profile=summary_prof,
+    )
+
+    mcp_servers: List[MCPServerConfig] = []
+    for item in raw.get("mcp_servers") or []:
+        if not isinstance(item, dict):
+            continue
+        srv_name = str(item.get("name") or "").strip()
+        if not srv_name:
+            continue
+        raw_trans = str(item.get("transport", "stdio")).strip().lower()
+        trans: Literal["stdio", "sse", "streamable_http"] = (
+            raw_trans if raw_trans in ("stdio", "sse", "streamable_http") else "stdio"  # type: ignore[assignment]
+        )
+        raw_env = {str(k): _expand_env_vars(str(v)) for k, v in (item.get("env") or {}).items()}
+        raw_headers = {str(k): _expand_env_vars(str(v)) for k, v in (item.get("headers") or {}).items()}
+        mcp_servers.append(
+            MCPServerConfig(
+                name=srv_name,
+                enabled=bool(item.get("enabled", True)),
+                transport=trans,
+                command=str(item.get("command", "") or ""),
+                args=[str(a) for a in (item.get("args") or [])],
+                env=raw_env,
+                url=str(item.get("url", "") or ""),
+                headers=raw_headers,
+                safe_tools=[str(t) for t in (item.get("safe_tools") or [])],
+                timeout_sec=float(item.get("timeout_sec", 30.0)),
+                startup_timeout_sec=float(item.get("startup_timeout_sec", 15.0)),
+            )
+        )
+
     return AppConfig(
         server=server,
         default_profile=default_profile,
@@ -442,4 +512,6 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         memory=memory,
         context_budget=context_budget,
         tools=tools,
+        scheduler=scheduler,
+        mcp_servers=mcp_servers,
     )

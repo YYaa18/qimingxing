@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>启明星 · Qimingxing MVP 4.0</title>
+  <title>启明星 · Qimingxing MVP 5.0</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -60,13 +60,20 @@
         <span id="usageAlertText"></span>
         <button id="dismissUsageBtn" class="btn-ghost" type="button">知道了</button>
       </div>
+      <div id="proactiveNoticeBanner" class="banner proactive-banner">
+        <span id="proactiveNoticeText"></span>
+        <button id="dismissNoticeBtn" class="btn-ghost" type="button">收到</button>
+      </div>
       <div id="errorBanner" class="banner error-banner">
         <span id="errorText"></span>
         <button id="dismissErrorBtn" class="btn-ghost" type="button">关闭</button>
       </div>
       <div id="messages" class="messages"></div>
+      <div id="attachmentBar" class="attachment-bar"></div>
       <form id="chatForm" class="composer">
-        <input id="chatInput" type="text" placeholder="和启明星聊聊，或问问当前屏幕内容（回车发送）..." autocomplete="off" />
+        <input id="fileInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.py,.js,.ts,.json,.yaml,.yml,.log,.csv,.sh,.sql,.html,.css,.xml" hidden />
+        <button id="attachBtn" class="btn btn-secondary" type="button" title="上传截图、代码或 PDF 附件（也支持 Cmd+V 粘贴或拖拽）">📎</button>
+        <input id="chatInput" type="text" placeholder="和启明星聊聊，或粘贴/拖拽截图、代码、PDF 直接提问（回车发送）..." autocomplete="off" />
         <button id="sendBtn" class="btn" type="submit">发送</button>
         <button id="askScreenBtn" class="btn btn-secondary" type="button">👁️ 附带屏幕提问</button>
         <button id="stopBtn" class="btn btn-danger" type="button" disabled>停止</button>

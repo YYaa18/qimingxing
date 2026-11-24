@@ -120,6 +120,7 @@ class ContextBuilder:
         context_store: ContextStore,
         categories: Optional[Dict[str, MemoryCategory]] = None,
         recalled_skills: Optional[List[MemorySkill]] = None,
+        extra_l3_sections: Optional[List[str]] = None,
         retrieval_ms: float = 0.0,
         system_base_prompt: str = BASE_SYSTEM_PROMPT,
     ) -> BuiltContext:
@@ -178,6 +179,10 @@ class ContextBuilder:
         skills_block = self._render_l3_skills(recalled_skills or [])
         if skills_block:
             l3_sections.append(skills_block)
+
+        for extra_sec in extra_l3_sections or []:
+            if extra_sec and extra_sec.strip():
+                l3_sections.append(extra_sec.strip())
 
         expand_tl = needs_full_timeline(user_text)
         stats.timeline_expanded = expand_tl

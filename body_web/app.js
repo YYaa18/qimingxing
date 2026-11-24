@@ -27,6 +27,13 @@
   const usageAlertBanner = document.getElementById("usageAlertBanner");
   const usageAlertText = document.getElementById("usageAlertText");
   const dismissUsageBtn = document.getElementById("dismissUsageBtn");
+  const proactiveNoticeBanner = document.getElementById("proactiveNoticeBanner");
+  const proactiveNoticeText = document.getElementById("proactiveNoticeText");
+  const dismissNoticeBtn = document.getElementById("dismissNoticeBtn");
+  const chatPanel = document.querySelector(".chat-panel");
+  const attachmentBar = document.getElementById("attachmentBar");
+  const fileInput = document.getElementById("fileInput");
+  const attachBtn = document.getElementById("attachBtn");
   const avatarFace = document.getElementById("avatarFace");
   const emotionBadge = document.getElementById("emotionBadge");
   const activityText = document.getElementById("activityText");
@@ -52,6 +59,80 @@
   let isGenerating = false;
   const bubbleByTurn = new Map();
   const pendingApprovalCleanups = new Map();
+  let pendingAttachments = [];
+
+  function renderAttachmentBar() {
+    if (!attachmentBar) return;
+    attachmentBar.innerHTML = "";
+    if (!pendingAttachments.length) {
+      attachmentBar.classList.remove("visible");
+      return;
+    }
+    attachmentBar.classList.add("visible");
+    for (const att of pendingAttachments) {
+      const chip = document.createElement("span");
+      chip.className = "attachment-chip";
+      const icon = att.kind === "image" ? "🖼️" : att.kind === "pdf" ? "📄" : "📝";
+      const label = document.createElement("span");
+      label.textContent = `${icon} ${att.filename || att.artifact_id}`;
+      const rmBtn = document.createElement("button");
+      rmBtn.type = "button";
+      rmBtn.title = "移除附件";
+      rmBtn.textContent = "×";
+      rmBtn.addEventListener("click", () => {
+        pendingAttachments = pendingAttachments.filter((item) => item.artifact_id !== att.artifact_id);
+        renderAttachmentBar();
+      });
+      chip.appendChild(label);
+      chip.appendChild(rmBtn);
+      attachmentBar.appendChild(chip);
+    }
+  }
+
+  async function uploadAttachment(file) {
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file, file.name || "pasted_file.png");
+    try {
+      const resp = await fetch("/api/artifacts", { method: "POST", body: form });
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try {
+          const errJson = await resp.json();
+          if (errJson && errJson.detail) detail = errJson.detail;
+        } catch (_ignored) {}
+        showError(`上传附件失败：${detail}`);
+        return;
+      }
+      const data = await resp.json();
+      pendingAttachments.push({
+        artifact_id: data.artifact_id,
+        kind: data.kind || "text",
+        filename: data.filename || file.name || "attachment"
+      });
+      renderAttachmentBar();
+      hideError();
+    } catch (err) {
+      showError(`上传附件异常：${err && err.message ? err.message : "网络错误"}`);
+    }
+  }
+
+  function showProactiveNotice(payload) {
+    if (!proactiveNoticeBanner) return;
+    const badge = payload.kind === "llm_summary" ? "📊 定时摘要" : "⏰ 定时提醒";
+    proactiveNoticeText.textContent = `${badge}【${payload.title || "启明星"}】${payload.content || ""}`;
+    proactiveNoticeBanner.classList.add("visible");
+    if ("Notification" in window && Notification.permission === "granted") {
+      try {
+        new Notification(payload.title || "启明星提醒", { body: payload.content || "" });
+      } catch (_ignored) {}
+    }
+  }
+
+  function hideProactiveNotice() {
+    if (!proactiveNoticeBanner) return;
+    proactiveNoticeBanner.classList.remove("visible");
+  }
 
   function initEmotionGrid() {
     emotionGrid.innerHTML = "";
@@ -188,9 +269,14 @@
     summaryEl.textContent = payload.summary || "请确认是否允许执行该操作";
 
     const detailsObj = payload.details || {};
-    const detailsText = detailsObj.command
-      ? `命令: ${detailsObj.command}\n目录: ${detailsObj.cwd || "~"}`
-      : JSON.stringify(detailsObj, null, 2);
+    let detailsText;
+    if (detailsObj.command) {
+      detailsText = `命令: ${detailsObj.command}\n目录: ${detailsObj.cwd || "~"}`;
+    } else if (detailsObj.server && detailsObj.tool) {
+      detailsText = `MCP 服务: ${detailsObj.server}\n工具: ${detailsObj.tool}\n参数: ${JSON.stringify(detailsObj.arguments || {}, null, 2)}`;
+    } else {
+      detailsText = JSON.stringify(detailsObj, null, 2);
+    }
     const detailsEl = document.createElement("div");
     detailsEl.className = "approval-details";
     detailsEl.textContent = detailsText;
@@ -600,6 +686,10 @@
       renderApprovalCard(payload, turnId);
       return;
     }
+    if (type === "output.proactive_notice") {
+      showProactiveNotice(payload);
+      return;
+    }
 
     console.debug("Ignoring unrecognized event type:", type, env);
   }
@@ -701,6 +791,48 @@
     dismissUsageBtn.addEventListener("click", hideUsageAlert);
   }
 
+  if (dismissNoticeBtn) {
+    dismissNoticeBtn.addEventListener("click", hideProactiveNotice);
+  }
+
+  if (attachBtn && fileInput) {
+    attachBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+      for (const f of Array.from(fileInput.files || [])) {
+        uploadAttachment(f);
+      }
+      fileInput.value = "";
+    });
+  }
+
+  if (chatPanel) {
+    chatPanel.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      chatPanel.classList.add("drag-over");
+    });
+    chatPanel.addEventListener("dragleave", () => {
+      chatPanel.classList.remove("drag-over");
+    });
+    chatPanel.addEventListener("drop", (e) => {
+      e.preventDefault();
+      chatPanel.classList.remove("drag-over");
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      for (const f of files) uploadAttachment(f);
+    });
+  }
+
+  chatInput.addEventListener("paste", (e) => {
+    const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+    const fileItems = items.filter((it) => it.kind === "file");
+    if (fileItems.length > 0) {
+      e.preventDefault();
+      for (const it of fileItems) {
+        const f = it.getAsFile();
+        if (f) uploadAttachment(f);
+      }
+    }
+  });
+
   clearChatBtn.addEventListener("click", () => {
     if (isGenerating && activeTurnId) {
       cancelActiveTurn("cleared_history");
@@ -741,8 +873,8 @@
 
   chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
-    const text = chatInput.value.trim();
-    if (!text) return;
+    const rawText = chatInput.value.trim();
+    if (!rawText && pendingAttachments.length === 0) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       showError("尚未连接到 Brain WebSocket 服务，请等待自动重连。");
       return;
@@ -750,12 +882,21 @@
     if (isGenerating && activeTurnId) {
       cancelActiveTurn("superseded_by_new_input");
     }
+    const text = rawText || "请分析并总结我发送的附件内容。";
+    const attIds = pendingAttachments.map((a) => a.artifact_id);
+    const attNames = pendingAttachments.map((a) => `[附件:${a.filename}]`).join(" ");
+    const displayBubble = attNames ? `${attNames}\n${text}` : text;
+
     chatInput.value = "";
-    appendUserBubble(text);
+    pendingAttachments = [];
+    renderAttachmentBar();
+    appendUserBubble(displayBubble);
+
     const turnId = makeId("turn");
     activeTurnId = turnId;
     setGenerating(true);
-    sendEnvelope("input.text", { text }, turnId);
+    const payload = attIds.length ? { text, attachments: attIds } : { text };
+    sendEnvelope("input.text", payload, turnId);
   });
 
   initEmotionGrid();

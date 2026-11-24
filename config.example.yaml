@@ -180,3 +180,20 @@ tools:
     daily_warn_cny: 5.0
     turn_warn_tokens: 50000
     hard_block: false  # 仅做软额度提醒与查账，严禁硬性截断正在执行的任务
+
+scheduler:
+  enabled: true
+  poll_interval_sec: 5.0
+  summary_profile: "fast_deepseek"
+
+# 标准 MCP Server 客户端挂载（支持 stdio / sse / streamable_http，第三方工具默认强制 CONFIRM 审批）
+mcp_servers:
+  # - name: "filesystem"
+  #   enabled: true
+  #   transport: "stdio"
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/qimingxing_sandbox"]
+  #   safe_tools: ["list_directory", "read_text_file", "get_file_info"]
+  #   timeout_sec: 30
+  #   startup_timeout_sec: 15
+  []

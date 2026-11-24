@@ -13,6 +13,8 @@ from brain.memory import MemoryCategory, create_memory_backend, normalize_catego
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import create_embedding_provider, pack_embedding
 from brain.memory.retrieval import MemoryRetriever
+from brain.tools.mcp_client import MCPClientManager
+from brain.tools.registry import ToolRegistry
 
 
 async def cmd_list(backend: MemoryBackend, item_type: str, status: Optional[str], limit: int) -> None:
@@ -336,6 +338,48 @@ async def run_cli(args: argparse.Namespace) -> int:
                 f"est_cost_cny=¥{summary.total_cost_cny:.4f}"
             )
             return 0
+        if args.command == "tasks":
+            if args.cancel:
+                updated = await backend.update_scheduled_task(args.cancel, status="cancelled")
+                if updated is None:
+                    print(f"Task not found: {args.cancel}", file=sys.stderr)
+                    return 1
+                print(f"Cancelled task {updated.task_id} ({updated.title})")
+                return 0
+            tasks = await backend.list_scheduled_tasks(
+                status=None if args.status == "all" else args.status,
+                limit=args.limit,
+            )
+            if not tasks:
+                print("No scheduled tasks stored.")
+            for t in tasks:
+                print(
+                    f"{t.task_id} | {t.status} | {t.task_type} | {t.schedule_kind}({t.schedule_expr}) | {t.title}"
+                )
+            return 0
+        if args.command == "mcp":
+            if not cfg.mcp_servers:
+                print("No MCP servers configured.")
+                return 0
+            if args.probe:
+                reg = ToolRegistry()
+                mgr = MCPClientManager(cfg)
+                try:
+                    statuses = await mgr.start_all(reg)
+                    for st in statuses:
+                        tools_str = ", ".join(st.tools) if st.tools else "-"
+                        err_str = f" | err={st.error}" if st.error else ""
+                        print(f"{st.name} | {st.transport} | {st.status} | tools=[{tools_str}]{err_str}")
+                finally:
+                    await mgr.stop_all(reg)
+                return 0
+            for srv in cfg.mcp_servers:
+                state = "enabled" if srv.enabled else "disabled"
+                target = srv.command if srv.transport == "stdio" else srv.url
+                print(
+                    f"{srv.name} | {srv.transport} | {state} | safe={srv.safe_tools} | target={target}"
+                )
+            return 0
         return 1
     finally:
         await backend.close()
@@ -395,6 +439,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_usage = sub.add_parser("usage", help="Show LLM usage ledger summary and cache hit rate")
     p_usage.add_argument("--days", type=int, default=1, help="Window in days (0 = all time)")
+
+    p_tasks = sub.add_parser("tasks", help="List or cancel scheduled tasks")
+    p_tasks.add_argument("--status", choices=["active", "completed", "cancelled", "all"], default="all")
+    p_tasks.add_argument("--cancel", default=None, help="Cancel scheduled task by ID")
+    p_tasks.add_argument("--limit", type=int, default=50)
+
+    p_mcp = sub.add_parser("mcp", help="Inspect configured MCP servers and optionally probe live tools")
+    p_mcp.add_argument("--probe", action="store_true", help="Connect to enabled MCP servers and list discovered tools")
     return parser
 
 

@@ -13,6 +13,9 @@ SessionStatus = Literal["active", "archived"]
 MutationOp = Literal["ADD", "UPDATE", "DELETE", "NONE"]
 CategoryTier = Literal["core", "episodic", "chitchat"]
 SkillStatus = Literal["active", "deprecated"]
+TaskType = Literal["reminder", "llm_summary"]
+ScheduleKind = Literal["once", "daily", "interval"]
+TaskStatus = Literal["active", "paused", "completed", "cancelled"]
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
@@ -36,6 +39,14 @@ def new_skill_id() -> str:
 
 def new_work_id() -> str:
     return f"work_{uuid.uuid4().hex[:12]}"
+
+
+def new_task_id() -> str:
+    return f"task_{uuid.uuid4().hex[:12]}"
+
+
+def new_notice_id() -> str:
+    return f"notice_{uuid.uuid4().hex[:12]}"
 
 
 def tokenize_for_fts(text: str) -> str:
@@ -336,3 +347,17 @@ class UsageSummary:
     completion_tokens: int = 0
     total_cost_cny: float = 0.0
     cache_hit_rate: float = 0.0
+
+
+@dataclass
+class ScheduledTaskRecord:
+    task_id: str
+    title: str
+    task_type: TaskType = "reminder"
+    schedule_kind: ScheduleKind = "once"
+    schedule_expr: str = ""
+    payload_json: str = "{}"
+    next_run_at: float = 0.0
+    last_run_at: Optional[float] = None
+    status: TaskStatus = "active"
+    created_at: float = field(default_factory=time.time)

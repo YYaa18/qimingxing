@@ -46,6 +46,7 @@ from protocol.models import (
     InputCancelPayload,
     InputTextPayload,
     OutputCardPayload,
+    OutputProactiveNoticePayload,
     OutputTextDeltaPayload,
     OutputToolStatusPayload,
     OutputTurnEndPayload,
@@ -73,7 +74,7 @@ from protocol.models import (
 
 logger = logging.getLogger("qimingxing.hub")
 
-SERVER_VERSION = "0.4.0-mvp4"
+SERVER_VERSION = "0.5.0-mvp5"
 CAPTURE_TIMEOUT_SECONDS = 3.5
 
 
@@ -345,7 +346,13 @@ class Hub:
 
         if isinstance(payload, InputTextPayload):
             turn_id = env.turn_id or new_turn_id()
-            await self._start_turn(conn, turn_id, payload.text, force_screen=False)
+            await self._start_turn(
+                conn,
+                turn_id,
+                payload.text,
+                force_screen=False,
+                attachments=list(payload.attachments or []),
+            )
             return
 
         if isinstance(payload, InputActionPayload):
@@ -489,6 +496,30 @@ class Hub:
                 )
             )
 
+    async def broadcast_proactive_notice(
+        self, notice: OutputProactiveNoticePayload
+    ) -> None:
+        env = make_envelope("brain", "output.proactive_notice", notice)
+        for client in list(self.clients.values()):
+            if client.role in ("body", None):
+                try:
+                    await client.send_envelope(env)
+                except Exception:
+                    logger.debug("Failed broadcasting proactive_notice to %s", client.client_id)
+
+    async def broadcast_soft_alert(self, message: str) -> None:
+        env = make_envelope(
+            "brain",
+            "system.error",
+            SystemErrorPayload(code="USAGE_SOFT_ALERT", message=message, recoverable=True),
+        )
+        for client in list(self.clients.values()):
+            if client.role in ("body", None):
+                try:
+                    await client.send_envelope(env)
+                except Exception:
+                    logger.debug("Failed broadcasting soft_alert to %s", client.client_id)
+
     async def _start_turn(
         self,
         conn: ClientConnection,
@@ -496,11 +527,18 @@ class Hub:
         user_text: str,
         *,
         force_screen: bool,
+        attachments: Optional[List[str]] = None,
     ) -> None:
         await self._cancel_active_turn(conn, notify=True)
         conn.active_turn_id = turn_id
         task = asyncio.create_task(
-            self._run_turn(conn, turn_id, user_text, force_screen=force_screen)
+            self._run_turn(
+                conn,
+                turn_id,
+                user_text,
+                force_screen=force_screen,
+                attachments=attachments,
+            )
         )
         conn.active_task = task
 
@@ -709,6 +747,7 @@ class Hub:
         user_text: str,
         *,
         force_screen: bool = False,
+        attachments: Optional[List[str]] = None,
     ) -> None:
         started = time.perf_counter()
         profile = self.llm_router.get_profile()
@@ -716,6 +755,8 @@ class Hub:
         seq = 0
         collected_spoken: List[str] = []
         artifact_id_to_burn = ""
+        artifacts_to_burn: List[str] = list(attachments or [])
+        extra_l3_sections: List[str] = []
         cancel_event = asyncio.Event()
         self._turn_cancel_events[turn_id] = cancel_event
 
@@ -741,7 +782,9 @@ class Hub:
                 )
             )
 
-            wants_screen = self.intent_detector.detect(user_text, explicit_action=force_screen)
+            wants_screen = force_screen or (
+                not attachments and self.intent_detector.detect(user_text)
+            )
             user_content: Any = user_text
 
             if wants_screen:
@@ -827,6 +870,73 @@ class Hub:
                     screen_ref=screen_ref,
                 )
 
+            if attachments:
+                extra_image_parts: List[Dict[str, Any]] = []
+                for aid in attachments:
+                    rec = self.artifact_store.get_record(aid)
+                    if rec is None:
+                        extra_l3_sections.append(f"【附件提醒】临时附件 {aid} 不存在或已过期清理。")
+                        continue
+                    if rec.kind == "image":
+                        loaded_att = self.artifact_store.read_bytes(aid)
+                        if loaded_att is None:
+                            continue
+                        att_bytes, att_ctype = loaded_att
+                        if not profile.supports_vision:
+                            await conn.send_envelope(
+                                make_envelope(
+                                    "brain",
+                                    "output.tool_status",
+                                    OutputToolStatusPayload(
+                                        status="running",
+                                        tool="deepseek_ocr",
+                                        label=f"正在用云端 OCR 解析图片附件 {rec.filename}…",
+                                    ),
+                                    turn_id=turn_id,
+                                )
+                            )
+                        prepared_att, _ = await self.screen_router.prepare_user_message(
+                            user_text="",
+                            image_bytes=att_bytes,
+                            content_type=att_ctype,
+                            profile=profile,
+                            screen_ref=ContextScreenRefPayload(
+                                request_id=aid,
+                                turn_id=turn_id,
+                                status="ok",
+                                artifact_id=aid,
+                                target_app="用户直投图片",
+                                target_title=rec.filename,
+                            ),
+                        )
+                        if isinstance(prepared_att, list):
+                            for part in prepared_att:
+                                if part.get("type") == "image_url":
+                                    extra_image_parts.append(part)
+                            extra_l3_sections.append(f"【用户直投图片附件】{rec.filename}（已附带在多模态输入中）")
+                        else:
+                            extra_l3_sections.append(
+                                f"【用户直投图片 OCR 识别 ({rec.filename})】\n{prepared_att}"
+                            )
+                    else:
+                        extracted, err_msg = self.artifact_store.extract_text(
+                            aid, max_chars=8000, redact_fn=self.config.redact_secrets
+                        )
+                        if err_msg:
+                            extra_l3_sections.append(
+                                f"【附件解析失败 ({rec.filename})】\n{err_msg}"
+                            )
+                        else:
+                            extra_l3_sections.append(
+                                f"【用户直投附件 ({rec.kind}: {rec.filename})】\n{extracted}"
+                            )
+
+                if extra_image_parts:
+                    if isinstance(user_content, list):
+                        user_content = list(user_content) + extra_image_parts
+                    else:
+                        user_content = [{"type": "text", "text": str(user_content)}] + extra_image_parts
+
             active_session_id = ""
             rolling_summary = ""
             core_facts: List[MemoryFact] = []
@@ -878,6 +988,7 @@ class Hub:
                 context_store=self.context_store,
                 categories=categories_map if self.memory_backend is not None else None,
                 recalled_skills=recalled_skills,
+                extra_l3_sections=extra_l3_sections,
                 retrieval_ms=retrieval_ms,
             )
             self.last_build_stats = built.stats
@@ -961,6 +1072,7 @@ class Hub:
                     config=self.config,
                     llm_router=self.llm_router,
                     memory_backend=self.memory_backend,
+                    context_store=self.context_store,
                     cancel_event=cancel_event,
                     session_approved_tools=self._session_approved_tools,
                     on_status=_on_status,
@@ -1179,6 +1291,8 @@ class Hub:
             self._turn_cancel_events.pop(turn_id, None)
             if artifact_id_to_burn:
                 self.artifact_store.delete(artifact_id_to_burn)
+            for aid in artifacts_to_burn:
+                self.artifact_store.delete(aid)
             if conn.active_turn_id == turn_id:
                 conn.active_turn_id = None
                 conn.active_task = None

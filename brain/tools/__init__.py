@@ -3,10 +3,13 @@ from __future__ import annotations
 from typing import Optional
 
 from brain.config import AppConfig
-from brain.tools.base import Tool, ToolExecutionContext, ToolResult, ToolTraceStep, truncate_head_tail
+from brain.tools.base import Tool, ToolExecutionContext, ToolResult, ToolTraceStep
+from brain.tools.clipboard_tool import ClipboardTool
 from brain.tools.executor import ToolExecutor, ToolLoopResult
 from brain.tools.history_tool import WorkHistoryInspectTool
+from brain.tools.mcp_client import MCPClientManager, MCPServerStatus, MCPToolAdapter
 from brain.tools.registry import ToolRegistry
+from brain.tools.scheduler_tool import CancelTaskTool, ListTasksTool, ScheduleTaskTool
 from brain.tools.shell_tool import ShellTool
 from brain.tools.web_search import (
     DeepSeekSearchProvider,
@@ -14,6 +17,7 @@ from brain.tools.web_search import (
     WebFetchTool,
     WebSearchTool,
 )
+from brain.utils import truncate_head_tail
 
 
 def build_default_tool_registry(
@@ -21,7 +25,7 @@ def build_default_tool_registry(
     *,
     search_provider: Optional[SearchProvider] = None,
 ) -> ToolRegistry:
-    """Build the default Stage 4 ToolRegistry according to AppConfig.tools."""
+    """Build the default Stage 5 ToolRegistry according to AppConfig.tools."""
     registry = ToolRegistry()
     if not config.tools.enabled:
         return registry
@@ -34,12 +38,23 @@ def build_default_tool_registry(
     if config.tools.shell.enabled:
         registry.register(ShellTool(config.tools.shell))
 
+    registry.register(ClipboardTool())
     registry.register(WorkHistoryInspectTool())
+    registry.register(ScheduleTaskTool())
+    registry.register(ListTasksTool())
+    registry.register(CancelTaskTool())
     return registry
 
 
 __all__ = [
+    "CancelTaskTool",
+    "ClipboardTool",
     "DeepSeekSearchProvider",
+    "ListTasksTool",
+    "MCPClientManager",
+    "MCPServerStatus",
+    "MCPToolAdapter",
+    "ScheduleTaskTool",
     "SearchProvider",
     "ShellTool",
     "Tool",

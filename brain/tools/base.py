@@ -8,21 +8,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from brain.config import AppConfig
 from brain.llm_router import LLMRouter, LLMUsage
 from brain.memory.backend import MemoryBackend
+from brain.utils import truncate_head_tail
 from protocol.models import RiskLevel
-
-
-def truncate_head_tail(text: str, max_chars: int, *, notice: str = "中间输出已按预算截断") -> str:
-    """Keep 60% head and 40% tail when tool output exceeds max_chars."""
-    if not text or max_chars <= 0 or len(text) <= max_chars:
-        return text
-    head_len = max(40, int(max_chars * 0.6))
-    tail_len = max(40, max_chars - head_len - 32)
-    omitted = len(text) - head_len - tail_len
-    return (
-        f"{text[:head_len].rstrip()}\n"
-        f"...[{notice}，省略 {omitted} 字符]...\n"
-        f"{text[-tail_len:].lstrip()}"
-    )
 
 
 @dataclass
@@ -65,6 +52,7 @@ class ToolExecutionContext:
         config: AppConfig,
         llm_router: Optional[LLMRouter] = None,
         memory_backend: Optional[MemoryBackend] = None,
+        context_store: Any = None,
         cancel_event: Optional[asyncio.Event] = None,
         session_approved_tools: Optional[Set[str]] = None,
         on_status: Optional[StatusEmitter] = None,
@@ -76,6 +64,7 @@ class ToolExecutionContext:
         self.config = config
         self.llm_router = llm_router
         self.memory_backend = memory_backend
+        self.context_store = context_store
         self.cancel_event = cancel_event or asyncio.Event()
         self.session_approved_tools: Set[str] = (
             session_approved_tools if session_approved_tools is not None else set()
