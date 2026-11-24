@@ -200,7 +200,8 @@ find_godot_bin() {
     "$(command -v godot 2>/dev/null || true)" \
     "$(command -v godot4 2>/dev/null || true)" \
     "/Applications/Godot.app/Contents/MacOS/Godot" \
-    "${HOME}/Applications/Godot.app/Contents/MacOS/Godot"; do
+    "${HOME}/Applications/Godot.app/Contents/MacOS/Godot" \
+    "${HOME}/Downloads/Godot.app/Contents/MacOS/Godot"; do
     if [[ -n "${cand}" ]] && [[ -x "${cand}" ]]; then
       echo "${cand}"
       return 0

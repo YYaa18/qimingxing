@@ -1,9 +1,9 @@
 extends Control
 
-@onready var ws: QimingxingWSClient = $WSClient
-@onready var audio: QimingxingAudioPlayer = $AudioPlayer
-@onready var avatar: QimingxingAvatarController = $AvatarController
-@onready var overlay: QimingxingUIOverlay = $UIOverlay
+@onready var ws: Node = $WSClient
+@onready var audio: Node = $AudioPlayer
+@onready var avatar: Control = $AvatarController
+@onready var overlay: Control = $UIOverlay
 
 var _http: HTTPRequest
 var _pending_http_label: String = ""

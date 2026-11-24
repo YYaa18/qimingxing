@@ -46,9 +46,19 @@ var _ui_interactive_rects: Array[Rect2] = []
 
 func _ready() -> void:
 	for k in SPRITE_PATHS.keys():
-		var res := load(SPRITE_PATHS[k])
-		if res is Texture2D:
-			_textures[k] = res
+		var path: String = SPRITE_PATHS[k]
+		var tex: Texture2D = null
+		var abs_path := ProjectSettings.globalize_path(path)
+		if FileAccess.file_exists(abs_path):
+			var img := Image.load_from_file(abs_path)
+			if img != null and not img.is_empty():
+				tex = ImageTexture.create_from_image(img)
+		if tex == null and ResourceLoader.exists(path):
+			var res := load(path)
+			if res is Texture2D:
+				tex = res
+		if tex != null:
+			_textures[k] = tex
 
 	_sprite_rect = TextureRect.new()
 	_sprite_rect.name = "SpriteRect"
@@ -63,7 +73,17 @@ func _ready() -> void:
 
 	var win := get_window()
 	if win != null:
+		win.borderless = true
+		win.transparent = true
+		win.transparent_bg = true
+		win.always_on_top = true
 		win.files_dropped.connect(_on_window_files_dropped)
+		var usable := DisplayServer.screen_get_usable_rect()
+		if usable.size.x > win.size.x and usable.size.y > win.size.y:
+			win.position = Vector2i(
+				usable.position.x + usable.size.x - win.size.x - 36,
+				usable.position.y + usable.size.y - win.size.y - 36
+			)
 
 	_apply_sprite("idle")
 	call_deferred("refresh_mouse_passthrough")
@@ -231,7 +251,8 @@ func set_capture_hidden(hidden: bool, failsafe_sec: float = 2.0) -> void:
 
 
 func refresh_mouse_passthrough() -> void:
-	if not DisplayServer.has_feature(DisplayServer.FEATURE_MOUSE_PASSTHROUGH):
+	var win := get_window()
+	if win == null:
 		return
 	# Compute convex bounding region covering character body + any active UI overlays
 	var avatar_rect := Rect2(position + Vector2(36.0, 20.0), size - Vector2(72.0, 24.0))
@@ -245,4 +266,4 @@ func refresh_mouse_passthrough() -> void:
 		Vector2(combined.end.x, combined.end.y),
 		Vector2(combined.position.x, combined.end.y),
 	])
-	DisplayServer.window_set_mouse_passthrough(poly)
+	win.mouse_passthrough_polygon = poly

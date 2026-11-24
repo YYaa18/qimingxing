@@ -330,11 +330,11 @@ func show_artifact_capsule(title: String, path: String, media_type: String, acti
 
 
 func open_pin_image_window(abs_path: String) -> void:
-	var win := PIN_WINDOW_SCENE.instantiate() as QimingxingPinImageWindow
+	var win := PIN_WINDOW_SCENE.instantiate() as Window
 	if win == null:
 		return
 	get_tree().root.add_child(win)
-	win.load_image_from_path(abs_path)
+	win.call("load_image_from_path", abs_path)
 
 
 func _emit_rects() -> void:
