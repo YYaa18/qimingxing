@@ -30,8 +30,20 @@ func _ready() -> void:
 		audio.play_earcon("done")
 		overlay.show_transient_status("我在呢～随时听候吩咐 ✨", 2.0)
 	)
+	avatar.scale_changed.connect(func(sc: float) -> void:
+		overlay.show_transient_status("当前大小: %d%%（滚轮或 ± 随时调节）" % int(round(sc * 100.0)), 1.8)
+	)
+	avatar.dock_state_changed.connect(func(edge: String, tucked: bool) -> void:
+		overlay.set_dock_tucked(tucked)
+		if edge != "" and tucked:
+			overlay.show_transient_status("已贴边隐藏（悬停边缘即可呼出）", 1.8)
+	)
 	avatar.files_dropped_queued.connect(overlay.queue_dropped_files)
+	overlay.set_roam_button_state(avatar.is_roam_enabled())
 	overlay.passthrough_rects_changed.connect(avatar.set_ui_interactive_rects)
+	overlay.interaction_active_changed.connect(avatar.set_interaction_active)
+	overlay.scale_step_requested.connect(avatar.adjust_avatar_scale)
+	overlay.roam_toggled.connect(avatar.set_roam_enabled)
 	overlay.approval_decided.connect(_on_approval_decided)
 	overlay.cancel_requested.connect(_on_cancel_requested)
 	overlay.drop_queue_submitted.connect(_on_drop_submitted)

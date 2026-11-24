@@ -41,6 +41,13 @@ var _ambient_on: bool = false
 
 signal earcons_toggled(enabled: bool)
 signal ambient_toggled(enabled: bool)
+signal scale_step_requested(delta: float)
+signal roam_toggled(enabled: bool)
+signal interaction_active_changed(active: bool)
+
+var _roam_btn: Button
+var _roam_on: bool = true
+var _dock_tucked: bool = false
 
 
 func _ready() -> void:
@@ -176,20 +183,46 @@ func _build_ui() -> void:
 	_artifact_buttons_box.add_theme_constant_override("separation", 4)
 	art_col.add_child(_artifact_buttons_box)
 
-	# 5. Lightweight status & audio toggles bar
+	# 5. Lightweight status & quick controls bar
 	_controls_bar = HBoxContainer.new()
 	_controls_bar.alignment = BoxContainer.ALIGNMENT_CENTER
-	_controls_bar.add_theme_constant_override("separation", 6)
+	_controls_bar.add_theme_constant_override("separation", 4)
 	stack.add_child(_controls_bar)
 
 	_stop_btn = Button.new()
 	_stop_btn.text = "■ 急停"
+	_stop_btn.add_theme_font_size_override("font_size", 11)
 	_stop_btn.visible = false
 	_stop_btn.pressed.connect(func() -> void: cancel_requested.emit(_current_turn_id))
 	_controls_bar.add_child(_stop_btn)
 
+	var shrink_btn := Button.new()
+	shrink_btn.text = "−"
+	shrink_btn.tooltip_text = "缩小助手（也可用滚轮）"
+	shrink_btn.add_theme_font_size_override("font_size", 11)
+	shrink_btn.pressed.connect(func() -> void: scale_step_requested.emit(-0.08))
+	_controls_bar.add_child(shrink_btn)
+
+	var grow_btn := Button.new()
+	grow_btn.text = "+"
+	grow_btn.tooltip_text = "放大助手（也可用滚轮）"
+	grow_btn.add_theme_font_size_override("font_size", 11)
+	grow_btn.pressed.connect(func() -> void: scale_step_requested.emit(0.08))
+	_controls_bar.add_child(grow_btn)
+
+	_roam_btn = Button.new()
+	_roam_btn.text = "漫步:开"
+	_roam_btn.add_theme_font_size_override("font_size", 11)
+	_roam_btn.pressed.connect(func() -> void:
+		_roam_on = not _roam_on
+		_roam_btn.text = "漫步:开" if _roam_on else "漫步:关"
+		roam_toggled.emit(_roam_on)
+	)
+	_controls_bar.add_child(_roam_btn)
+
 	_earcon_btn = Button.new()
 	_earcon_btn.text = "音效:开"
+	_earcon_btn.add_theme_font_size_override("font_size", 11)
 	_earcon_btn.pressed.connect(func() -> void:
 		_earcons_on = not _earcons_on
 		_earcon_btn.text = "音效:开" if _earcons_on else "音效:关"
@@ -198,10 +231,11 @@ func _build_ui() -> void:
 	_controls_bar.add_child(_earcon_btn)
 
 	_ambient_btn = Button.new()
-	_ambient_btn.text = "氛围音:关"
+	_ambient_btn.text = "氛围:关"
+	_ambient_btn.add_theme_font_size_override("font_size", 11)
 	_ambient_btn.pressed.connect(func() -> void:
 		_ambient_on = not _ambient_on
-		_ambient_btn.text = "氛围音:开" if _ambient_on else "氛围音:关"
+		_ambient_btn.text = "氛围:开" if _ambient_on else "氛围:关"
 		ambient_toggled.emit(_ambient_on)
 	)
 	_controls_bar.add_child(_ambient_btn)
@@ -341,9 +375,29 @@ func _emit_rects() -> void:
 	call_deferred("_collect_and_emit_rects")
 
 
+func set_roam_button_state(enabled: bool) -> void:
+	_roam_on = enabled
+	if _roam_btn != null:
+		_roam_btn.text = "漫步:开" if _roam_on else "漫步:关"
+
+
+func set_dock_tucked(tucked: bool) -> void:
+	_dock_tucked = tucked
+	if _controls_bar != null:
+		_controls_bar.visible = not tucked
+	_emit_rects()
+
+
 func _collect_and_emit_rects() -> void:
 	var rects: Array[Rect2] = []
 	for ctrl in [_bubble_panel, _approval_panel, _drop_panel, _artifact_panel, _controls_bar]:
 		if ctrl != null and ctrl.visible:
 			rects.append(ctrl.get_global_rect())
+	var active := (
+		_in_turn
+		or (_approval_panel != null and _approval_panel.visible)
+		or (_drop_panel != null and _drop_panel.visible)
+		or (_artifact_panel != null and _artifact_panel.visible)
+	)
+	interaction_active_changed.emit(active)
 	passthrough_rects_changed.emit(rects)
