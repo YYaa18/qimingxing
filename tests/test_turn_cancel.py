@@ -383,3 +383,68 @@ def test_upstream_error_redacts_secret_and_recovers() -> None:
                 e["type"] == "output.turn_end" and e["payload"]["finish_reason"] == "error"
                 for e in events
             )
+
+
+async def test_openai_compatible_ignores_reasoning_content(monkeypatch) -> None:
+    cfg = AppConfig(
+        default_profile="reasoner_test",
+        profiles={
+            "reasoner_test": ProfileConfig(
+                name="reasoner_test",
+                label="Reasoner Test",
+                provider="openai_compatible",
+                model="deepseek-reasoner",
+                base_url="https://api.deepseek.com/v1",
+                api_key="sk-test-dummy-key-1234",
+            )
+        },
+    )
+    router = LLMRouter(cfg)
+
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning_content":"内部思考过程不应该输出"}}]}',
+        'data: {"choices":[{"delta":{"reasoning_content":"继续思考"}}]}',
+        'data: {"choices":[{"delta":{"content":"[EMOTION:happy]\\n"}}]}',
+        'data: {"choices":[{"delta":{"content":"最终回答在这里。"}}]}',
+        "data: [DONE]",
+    ]
+
+    class FakeResp:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_lines(self):
+            for ln in sse_lines:
+                yield ln
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return FakeResp()
+
+    import brain.llm_router as llm_router_mod
+
+    monkeypatch.setattr(llm_router_mod.httpx, "AsyncClient", FakeClient)
+
+    tokens: List[str] = []
+    async for tok in router.stream_chat([{"role": "user", "content": "hi"}]):
+        tokens.append(tok)
+
+    joined = "".join(tokens)
+    assert "内部思考过程" not in joined
+    assert "继续思考" not in joined
+    assert "最终回答在这里。" in joined
+

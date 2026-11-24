@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "qimingxing"
 version = "0.1.0"
 description = "启明星（Qimingxing）通用 AI 桌面数字人助手 — MVP 1.0"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",

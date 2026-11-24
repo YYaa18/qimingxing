@@ -25,6 +25,15 @@ profiles:
     temperature: 0.7
     timeout_seconds: 30
 
+  reasoner_deepseek:
+    label: "DeepSeek Reasoner (深度推理)"
+    provider: "openai_compatible"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-reasoner"
+    api_key: "${DEEPSEEK_API_KEY}"
+    temperature: 0.7
+    timeout_seconds: 60
+
   smart_openai:
     label: "OpenAI GPT-4o (强推理)"
     provider: "openai_compatible"

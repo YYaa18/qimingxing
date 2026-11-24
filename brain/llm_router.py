@@ -81,8 +81,12 @@ class LLMRouter:
             else:
                 raise LLMError("UNSUPPORTED_PROVIDER", f"不支持的 provider: {profile.provider}")
 
-            async for token in gen:
-                yield token
+            try:
+                async for token in gen:
+                    yield token
+            finally:
+                if hasattr(gen, "aclose"):
+                    await gen.aclose()
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             logger.info(
@@ -140,6 +144,7 @@ class LLMRouter:
         }
 
         timeout = httpx.Timeout(profile.timeout_seconds, connect=10.0)
+        logged_reasoning = False
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code >= 400:
@@ -163,6 +168,13 @@ class LLMRouter:
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
+                    if delta.get("reasoning_content") and not logged_reasoning:
+                        logged_reasoning = True
+                        logger.debug(
+                            "Ignoring reasoning_content stream from profile=%s model=%s",
+                            profile.name,
+                            profile.model,
+                        )
                     content = delta.get("content")
                     if content:
                         yield str(content)

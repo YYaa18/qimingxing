@@ -115,3 +115,58 @@ def test_double_bracket_false_positive_followed_by_real_tag() -> None:
     assert spoken == "[你好<x"
     assert len(cards) == 1
     assert cards[0].content_markdown == "body"
+
+
+def test_case_insensitive_whitespace_emotion_and_chinese_quotes() -> None:
+    sample = (
+        "[emotion : Happy ]\n"
+        "口语先讲两句。\n"
+        "<<<CARD type=‘spoiler_steps’ title=“Boss 提示”>>>\n"
+        "- 第 1 步\n"
+        "<<<end_card>>>"
+    )
+    parser = StreamParser()
+    events = _collect(parser, [sample[i : i + 3] for i in range(0, len(sample), 3)])
+    emotions = [e for e in events if isinstance(e, EmotionEvent)]
+    cards = [e for e in events if isinstance(e, CardEvent)]
+    spoken = _joined_text(events)
+
+    assert [e.emotion for e in emotions] == ["happy"]
+    assert spoken.strip() == "口语先讲两句。"
+    assert len(cards) == 1
+    assert cards[0].title == "Boss 提示"
+    assert cards[0].card_type == "spoiler_steps"
+    assert "- 第 1 步" in cards[0].content_markdown
+
+
+def test_fenced_card_block_does_not_leak_stray_backticks() -> None:
+    sample = (
+        "[EMOTION:thinking]\n"
+        "我看一下配置：\n"
+        "```markdown\n"
+        '<<<CARD title="配置表" type="markdown">>>\n'
+        "| 字段 | 值 |\n"
+        "<<<END_CARD>>>\n"
+        "```\n"
+        "正常普通代码：\n"
+        "```python\nprint('ok')\n```"
+    )
+    parser = StreamParser()
+    events = _collect(parser, list(sample))
+    cards = [e for e in events if isinstance(e, CardEvent)]
+    spoken = _joined_text(events)
+
+    assert len(cards) == 1
+    assert cards[0].title == "配置表"
+    assert "| 字段 | 值 |" in cards[0].content_markdown
+    assert "```markdown" not in spoken
+    assert "print('ok')" in spoken
+    assert spoken.count("```") == 2
+
+
+def test_leading_space_after_emotion_tag_is_trimmed() -> None:
+    parser = StreamParser()
+    events = _collect(parser, ["[EMOTION:happy] ", "你好呀！"])
+    spoken = _joined_text(events)
+    assert spoken == "你好呀！"
+
