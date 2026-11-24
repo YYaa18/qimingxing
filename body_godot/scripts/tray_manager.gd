@@ -1,5 +1,6 @@
 extends Node
 
+signal open_chat_input_requested
 signal open_settings_requested
 signal toggle_roam_requested(enabled: bool)
 signal toggle_earcons_requested(enabled: bool)
@@ -18,6 +19,7 @@ const ID_AMBIENT := 4
 const ID_RESET_POS := 5
 const ID_RELOAD_MCP := 6
 const ID_OPEN_WEB := 7
+const ID_CHAT_INPUT := 8
 const ID_QUIT := 99
 
 var _indicator: StatusIndicator
@@ -29,6 +31,7 @@ func _ready() -> void:
 	_menu.name = "TrayMenu"
 	add_child(_menu)
 
+	_menu.add_item("💬 文字对话输入框", ID_CHAT_INPUT)
 	_menu.add_item("⚙️ 设置与 API Key…", ID_SETTINGS)
 	_menu.add_separator()
 	_menu.add_check_item("屏幕自由漫步", ID_ROAM)
@@ -88,6 +91,8 @@ func sync_toggles(roam_on: bool, earcons_on: bool, ambient_on: bool) -> void:
 
 func _on_menu_id_pressed(id: int) -> void:
 	match id:
+		ID_CHAT_INPUT:
+			open_chat_input_requested.emit()
 		ID_SETTINGS:
 			open_settings_requested.emit()
 		ID_ROAM:

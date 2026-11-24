@@ -98,6 +98,10 @@ func _handle_text_packet(raw_text: String) -> void:
 	envelope_received.emit(ev_type, turn_id, payload)
 
 
+func is_connected_open() -> bool:
+	return _is_open
+
+
 func send_event(event_type: String, payload: Dictionary = {}, turn_id: String = "") -> void:
 	if not _is_open:
 		return

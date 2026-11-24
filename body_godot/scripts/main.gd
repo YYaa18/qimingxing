@@ -37,7 +37,9 @@ func _ready() -> void:
 
 	avatar.avatar_clicked.connect(func() -> void:
 		audio.play_earcon("done")
-		overlay.show_transient_status("我在呢～右键或菜单栏图标可打开设置 ✨", 2.4)
+		var opened := bool(overlay.call("toggle_chat_input"))
+		if opened:
+			overlay.show_transient_status("直接打字和我聊吧～（Enter 发送 / Esc 收起）", 2.2)
 	)
 	avatar.context_menu_requested.connect(func() -> void:
 		tray.call("popup_at_cursor")
@@ -59,7 +61,9 @@ func _ready() -> void:
 	overlay.cancel_requested.connect(_on_cancel_requested)
 	overlay.drop_queue_submitted.connect(_on_drop_submitted)
 	overlay.desktop_action_requested.connect(_on_desktop_action)
+	overlay.text_submitted.connect(_on_text_submitted)
 
+	tray.open_chat_input_requested.connect(_open_chat_input)
 	tray.open_settings_requested.connect(_open_settings_window)
 	tray.toggle_roam_requested.connect(func(on: bool) -> void:
 		avatar.set_roam_enabled(on)
@@ -230,6 +234,22 @@ func _on_approval_decided(approval_id: String, turn_id: String, approved: bool) 
 func _on_cancel_requested(turn_id: String) -> void:
 	audio.stop_tts_immediately()
 	ws.send_event("input.cancel", {"reason": "godot_emergency_stop"}, turn_id)
+
+
+func _open_chat_input() -> void:
+	if bool(avatar.call("is_docked_tucked")):
+		avatar.call("reset_to_default_position")
+	overlay.call("set_chat_input_visible", true)
+
+
+func _on_text_submitted(text: String) -> void:
+	if not bool(ws.call("is_connected_open")):
+		overlay.show_transient_status("尚未连接到启明星大脑，正在重连…", 3.0)
+		return
+	audio.stop_tts_immediately()
+	var turn_id := "turn_godot_%d" % Time.get_ticks_msec()
+	avatar.set_avatar_state("thinking", "thinking")
+	ws.send_event("input.text", {"text": text}, turn_id)
 
 
 func _on_drop_submitted(paths: Array[String]) -> void:
