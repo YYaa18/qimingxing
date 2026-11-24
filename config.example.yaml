@@ -1,4 +1,4 @@
-# 启明星 (Qimingxing) MVP 1.0 示例配置
+# 启明星 (Qimingxing) MVP 2.0 示例配置
 # 复制为 config.yaml 并配置环境变量（如 DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY）。
 # 密钥绝不会通过 WebSocket 发送给客户端。
 
@@ -15,15 +15,27 @@ profiles:
     model: "qimingxing-mock-v1"
     temperature: 0.3
     timeout_seconds: 30
+    supports_vision: false
+
+  deepseek_flash:
+    label: "DeepSeek Flash (视觉直看)"
+    provider: "openai_compatible"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-flash"
+    api_key: "${DEEPSEEK_API_KEY}"
+    temperature: 0.7
+    timeout_seconds: 30
+    supports_vision: true
 
   fast_deepseek:
-    label: "DeepSeek Chat (快响应)"
+    label: "DeepSeek Chat (纯文本 + OCR)"
     provider: "openai_compatible"
     base_url: "https://api.deepseek.com/v1"
     model: "deepseek-chat"
     api_key: "${DEEPSEEK_API_KEY}"
     temperature: 0.7
     timeout_seconds: 30
+    supports_vision: false
 
   reasoner_deepseek:
     label: "DeepSeek Reasoner (深度推理)"
@@ -33,15 +45,17 @@ profiles:
     api_key: "${DEEPSEEK_API_KEY}"
     temperature: 0.7
     timeout_seconds: 60
+    supports_vision: false
 
   smart_openai:
-    label: "OpenAI GPT-4o (强推理)"
+    label: "OpenAI GPT-4o (强推理/视觉)"
     provider: "openai_compatible"
     base_url: "https://api.openai.com/v1"
     model: "gpt-4o"
     api_key: "${OPENAI_API_KEY}"
     temperature: 0.7
     timeout_seconds: 45
+    supports_vision: true
 
   claude_sonnet:
     label: "Anthropic Claude 3.5 Sonnet"
@@ -51,3 +65,33 @@ profiles:
     api_key: "${ANTHROPIC_API_KEY}"
     temperature: 0.7
     timeout_seconds: 45
+    supports_vision: true
+
+ocr:
+  provider: "deepseek_ocr"
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "${DEEPSEEK_API_KEY}"
+  mode: "text_recognition"
+  timeout_seconds: 20
+
+privacy:
+  default_mode: "meta_only"
+  blocked_apps:
+    - "1Password"
+    - "Bitwarden"
+    - "KeePass"
+    - "Keychain Access"
+    - "钥匙串访问"
+    - "微信"
+    - "WeChat"
+  blocked_title_keywords:
+    - "Incognito"
+    - "InPrivate"
+    - "Private Browsing"
+    - "无痕"
+    - "网银"
+    - "支付宝"
+    - "Alipay"
+    - "Bank"
+    - "Password"
+    - "密码"

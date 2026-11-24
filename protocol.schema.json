@@ -24,6 +24,12 @@
     "system.error": {
       "$ref": "#/$defs/SystemErrorPayload"
     },
+    "system.privacy_set": {
+      "$ref": "#/$defs/SystemPrivacySetPayload"
+    },
+    "system.privacy_state": {
+      "$ref": "#/$defs/SystemPrivacyStatePayload"
+    },
     "input.text": {
       "$ref": "#/$defs/InputTextPayload"
     },
@@ -41,6 +47,12 @@
     },
     "context.ocr_snippet": {
       "$ref": "#/$defs/ContextOcrSnippetPayload"
+    },
+    "context.screen_ref": {
+      "$ref": "#/$defs/ContextScreenRefPayload"
+    },
+    "senses.capture_request": {
+      "$ref": "#/$defs/SensesCaptureRequestPayload"
     },
     "output.turn_start": {
       "$ref": "#/$defs/OutputTurnStartPayload"
@@ -213,6 +225,65 @@
       "title": "ContextOcrSnippetPayload",
       "type": "object"
     },
+    "ContextScreenRefPayload": {
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "privacy_blocked",
+            "permission_denied",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "artifact_id": {
+          "default": "",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "width": {
+          "default": 0,
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "default": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "target_app": {
+          "default": "",
+          "title": "Target App",
+          "type": "string"
+        },
+        "target_title": {
+          "default": "",
+          "title": "Target Title",
+          "type": "string"
+        },
+        "error_message": {
+          "default": "",
+          "title": "Error Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "turn_id",
+        "status"
+      ],
+      "title": "ContextScreenRefPayload",
+      "type": "object"
+    },
     "ContextWindowChangedPayload": {
       "properties": {
         "app_name": {
@@ -233,6 +304,16 @@
           "default": "general",
           "title": "Scene",
           "type": "string"
+        },
+        "privacy_masked": {
+          "default": false,
+          "title": "Privacy Masked",
+          "type": "boolean"
+        },
+        "is_self_window": {
+          "default": false,
+          "title": "Is Self Window",
+          "type": "boolean"
         }
       },
       "required": [
@@ -493,6 +574,22 @@
       "title": "OutputTurnStartPayload",
       "type": "object"
     },
+    "PermissionStatus": {
+      "properties": {
+        "window_meta": {
+          "default": true,
+          "title": "Window Meta",
+          "type": "boolean"
+        },
+        "screen_capture": {
+          "default": true,
+          "title": "Screen Capture",
+          "type": "boolean"
+        }
+      },
+      "title": "PermissionStatus",
+      "type": "object"
+    },
     "ProfileInfo": {
       "description": "Public profile metadata exposed to clients (strictly excludes api_key).",
       "properties": {
@@ -511,6 +608,11 @@
         "model": {
           "title": "Model",
           "type": "string"
+        },
+        "supports_vision": {
+          "default": false,
+          "title": "Supports Vision",
+          "type": "boolean"
         }
       },
       "required": [
@@ -520,6 +622,38 @@
         "model"
       ],
       "title": "ProfileInfo",
+      "type": "object"
+    },
+    "SensesCaptureRequestPayload": {
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "reason": {
+          "default": "intent_triggered",
+          "enum": [
+            "intent_triggered",
+            "user_action"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "max_edge": {
+          "default": 1280,
+          "title": "Max Edge",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_id",
+        "turn_id"
+      ],
+      "title": "SensesCaptureRequestPayload",
       "type": "object"
     },
     "SystemConfigSetPayload": {
@@ -622,6 +756,65 @@
         }
       },
       "title": "SystemPongPayload",
+      "type": "object"
+    },
+    "SystemPrivacySetPayload": {
+      "properties": {
+        "mode": {
+          "enum": [
+            "off",
+            "meta_only",
+            "full_on_demand"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "SystemPrivacySetPayload",
+      "type": "object"
+    },
+    "SystemPrivacyStatePayload": {
+      "properties": {
+        "mode": {
+          "enum": [
+            "off",
+            "meta_only",
+            "full_on_demand"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "senses_connected": {
+          "default": false,
+          "title": "Senses Connected",
+          "type": "boolean"
+        },
+        "platform": {
+          "default": "unknown",
+          "title": "Platform",
+          "type": "string"
+        },
+        "permissions": {
+          "$ref": "#/$defs/PermissionStatus"
+        },
+        "permission_hint": {
+          "default": "",
+          "title": "Permission Hint",
+          "type": "string"
+        },
+        "active_window_summary": {
+          "default": "",
+          "title": "Active Window Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "SystemPrivacyStatePayload",
       "type": "object"
     },
     "SystemWelcomePayload": {

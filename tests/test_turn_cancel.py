@@ -83,6 +83,14 @@ def _make_test_app():
     return app, router
 
 
+def _recv_until_type(ws, target_type: str) -> Dict[str, Any]:
+    """Read WebSocket events skipping asynchronous system.privacy_state notifications."""
+    while True:
+        msg = json.loads(ws.receive_text())
+        if msg["type"] == target_type:
+            return msg
+
+
 def test_handshake_no_key_leak_and_unknown_event_ignored() -> None:
     app, _ = _make_test_app()
     with TestClient(app) as client:
@@ -131,7 +139,7 @@ def test_handshake_no_key_leak_and_unknown_event_ignored() -> None:
                     }
                 )
             )
-            pong = json.loads(ws.receive_text())
+            pong = _recv_until_type(ws, "system.pong")
             assert pong["type"] == "system.pong"
             assert pong["payload"]["client_ts"] == 42
 
@@ -186,7 +194,7 @@ def test_senses_context_injection_profile_hotswitch_and_cards() -> None:
                     }
                 )
             )
-            assert json.loads(body_ws.receive_text())["type"] == "system.welcome"
+            assert _recv_until_type(body_ws, "system.welcome")["type"] == "system.welcome"
 
             # Ask about current game state without restarting Brain
             body_ws.send_text(
@@ -232,7 +240,7 @@ def test_senses_context_injection_profile_hotswitch_and_cards() -> None:
                     }
                 )
             )
-            updated_welcome = json.loads(body_ws.receive_text())
+            updated_welcome = _recv_until_type(body_ws, "system.welcome")
             assert updated_welcome["type"] == "system.welcome"
             assert updated_welcome["payload"]["active_profile"] == "smart_mock"
 

@@ -29,6 +29,8 @@ Emotion = Literal[
 
 SourceRole = Literal["body", "brain", "senses"]
 
+PrivacyMode = Literal["off", "meta_only", "full_on_demand"]
+
 
 def new_event_id() -> str:
     """Generate a unique event ID."""
@@ -90,6 +92,7 @@ class ProfileInfo(ProtocolModel):
     label: str
     provider: str
     model: str
+    supports_vision: bool = False
 
 
 class SystemWelcomePayload(ProtocolModel):
@@ -116,6 +119,24 @@ class SystemErrorPayload(ProtocolModel):
     code: str
     message: str
     recoverable: bool = True
+
+
+class SystemPrivacySetPayload(ProtocolModel):
+    mode: PrivacyMode
+
+
+class PermissionStatus(ProtocolModel):
+    window_meta: bool = True
+    screen_capture: bool = True
+
+
+class SystemPrivacyStatePayload(ProtocolModel):
+    mode: PrivacyMode
+    senses_connected: bool = False
+    platform: str = "unknown"
+    permissions: PermissionStatus = Field(default_factory=PermissionStatus)
+    permission_hint: str = ""
+    active_window_summary: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +168,8 @@ class ContextWindowChangedPayload(ProtocolModel):
     process_name: str = ""
     window_title: str = ""
     scene: str = "general"
+    privacy_masked: bool = False
+    is_self_window: bool = False
 
 
 class ContextGameStatePayload(ProtocolModel):
@@ -160,6 +183,25 @@ class ContextOcrSnippetPayload(ProtocolModel):
     text: str
     region: str = "unknown"
     confidence: float = 1.0
+
+
+class SensesCaptureRequestPayload(ProtocolModel):
+    request_id: str
+    turn_id: str
+    reason: Literal["intent_triggered", "user_action"] = "intent_triggered"
+    max_edge: int = 1280
+
+
+class ContextScreenRefPayload(ProtocolModel):
+    request_id: str
+    turn_id: str
+    status: Literal["ok", "privacy_blocked", "permission_denied", "error"]
+    artifact_id: str = ""
+    width: int = 0
+    height: int = 0
+    target_app: str = ""
+    target_title: str = ""
+    error_message: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -226,12 +268,16 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "system.pong": SystemPongPayload,
     "system.config_set": SystemConfigSetPayload,
     "system.error": SystemErrorPayload,
+    "system.privacy_set": SystemPrivacySetPayload,
+    "system.privacy_state": SystemPrivacyStatePayload,
     "input.text": InputTextPayload,
     "input.action": InputActionPayload,
     "input.cancel": InputCancelPayload,
     "context.window_changed": ContextWindowChangedPayload,
     "context.game_state": ContextGameStatePayload,
     "context.ocr_snippet": ContextOcrSnippetPayload,
+    "context.screen_ref": ContextScreenRefPayload,
+    "senses.capture_request": SensesCaptureRequestPayload,
     "output.turn_start": OutputTurnStartPayload,
     "output.turn_end": OutputTurnEndPayload,
     "output.text_delta": OutputTextDeltaPayload,

@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 
@@ -59,7 +59,7 @@ class LLMRouter:
 
     async def stream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         profile_name: Optional[str] = None,
     ) -> AsyncIterator[str]:
         profile = self.get_profile(profile_name)
@@ -120,7 +120,7 @@ class LLMRouter:
 
     async def _stream_openai_compatible(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         profile: ProfileConfig,
     ) -> AsyncIterator[str]:
         if not profile.api_key:
@@ -181,7 +181,7 @@ class LLMRouter:
 
     async def _stream_anthropic(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         profile: ProfileConfig,
     ) -> AsyncIterator[str]:
         if not profile.api_key:
@@ -193,14 +193,37 @@ class LLMRouter:
         url = f"{base_url}/v1/messages"
 
         system_parts: List[str] = []
-        chat_messages: List[Dict[str, str]] = []
+        chat_messages: List[Dict[str, Any]] = []
         for msg in messages:
             if msg.get("role") == "system":
-                system_parts.append(msg.get("content", ""))
+                system_parts.append(str(msg.get("content", "")))
             else:
-                chat_messages.append(
-                    {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-                )
+                raw_content = msg.get("content", "")
+                if isinstance(raw_content, list):
+                    blocks: List[Dict[str, Any]] = []
+                    for part in raw_content:
+                        if part.get("type") == "text":
+                            blocks.append({"type": "text", "text": str(part.get("text", ""))})
+                        elif part.get("type") == "image_url":
+                            url_val = str((part.get("image_url") or {}).get("url", ""))
+                            if url_val.startswith("data:") and ";base64," in url_val:
+                                header_part, b64_data = url_val.split(";base64,", 1)
+                                media_type = header_part[5:] or "image/jpeg"
+                                blocks.append(
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": b64_data,
+                                        },
+                                    }
+                                )
+                    chat_messages.append({"role": msg.get("role", "user"), "content": blocks})
+                else:
+                    chat_messages.append(
+                        {"role": msg.get("role", "user"), "content": str(raw_content)}
+                    )
 
         headers = {
             "x-api-key": profile.api_key,
@@ -243,15 +266,33 @@ class LLMRouter:
 
     async def _stream_mock(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         profile: ProfileConfig,
     ) -> AsyncIterator[str]:
         """Local deterministic mock stream for offline testing and demos."""
-        sys_msg = next((m["content"] for m in messages if m.get("role") == "system"), "")
-        user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+        sys_msg = str(next((m["content"] for m in messages if m.get("role") == "system"), ""))
+        raw_user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+        has_image = False
+        if isinstance(raw_user_msg, list):
+            text_parts = []
+            for item in raw_user_msg:
+                if item.get("type") == "text":
+                    text_parts.append(str(item.get("text", "")))
+                elif item.get("type") == "image_url":
+                    has_image = True
+            user_msg = "\n".join(text_parts)
+        else:
+            user_msg = str(raw_user_msg)
         lower_q = user_msg.lower()
 
-        if any(k in user_msg for k in ("长文", "500字", "打断", "压测")) or "long" in lower_q:
+        if has_image:
+            text = (
+                f"[EMOTION:happy]\n"
+                f"我看到你发来的桌面截图啦（通过 `{profile.model}` 视觉直看通道），正在帮你看画面里的内容。"
+            )
+            step = 8
+            delay = 0.015
+        elif any(k in user_msg for k in ("长文", "500字", "打断", "压测")) or "long" in lower_q:
             text = (
                 "[EMOTION:thinking]\n"
                 "好的，下面是一段用于测试流式打断与并发控制的较长说明文字。"
@@ -280,7 +321,8 @@ class LLMRouter:
         elif any(k in user_msg for k in ("状态", "角色", "位置", "装备", "窗口", "感官")) or any(
             k in lower_q for k in ("state", "status", "game", "window", "level")
         ):
-            context_section = sys_msg.split("【当前感官上下文】")[-1].strip()
+            marker = "【当前桌面感官上下文】" if "【当前桌面感官上下文】" in sys_msg else "【当前感官上下文】"
+            context_section = sys_msg.split(marker)[-1].strip()
             if "暂无外部感官上下文" in context_section or not context_section:
                 text = (
                     "[EMOTION:confused]\n"
