@@ -8,13 +8,14 @@ from brain.memory.models import (
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
+    MemoryCategory,
     MemoryEpisode,
     MemoryFact,
     MessageRecord,
     SessionRecord,
 )
 
-SNAPSHOT_SCHEMA_VERSION = "3.0"
+SNAPSHOT_SCHEMA_VERSION = "3.1"
 
 
 class MemoryBackend(ABC):
@@ -90,6 +91,37 @@ class MemoryBackend(ABC):
     @abstractmethod
     async def count_unsummarized_messages(self, session_id: str) -> int:
         """Return the number of messages added after last_summarized_msg_id."""
+
+    @abstractmethod
+    async def get_message(self, msg_id: int) -> Optional[MessageRecord]:
+        """Retrieve a hot message record by ID."""
+
+    @abstractmethod
+    async def count_messages(self) -> Tuple[int, int]:
+        """Return (hot_messages_count, archived_messages_count)."""
+
+    @abstractmethod
+    async def archive_old_messages(
+        self,
+        *,
+        keep_latest: int = 10000,
+        batch_size: int = 2000,
+    ) -> int:
+        """Move oldest messages beyond `keep_latest` from hot table into cold archive table."""
+
+    # --- Dynamic Category Registry ---
+
+    @abstractmethod
+    async def register_category(self, category: MemoryCategory) -> MemoryCategory:
+        """Register or update a dynamic memory category definition."""
+
+    @abstractmethod
+    async def get_category(self, category_key: str) -> Optional[MemoryCategory]:
+        """Retrieve a dynamic memory category definition by key."""
+
+    @abstractmethod
+    async def list_categories(self) -> List[MemoryCategory]:
+        """List all registered memory categories."""
 
     # --- L2: Long-term Facts ---
 

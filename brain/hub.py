@@ -125,6 +125,8 @@ class Hub:
                 llm_router,
                 NullEmbeddingProvider(),
                 self.config.memory.extraction,
+                hot_message_limit=self.config.memory.hot_message_limit,
+                archive_batch_size=self.config.memory.archive_batch_size,
             )
         else:
             self.memory_extractor = None
@@ -695,8 +697,15 @@ class Hub:
                 )
                 recent_messages = [{"role": m.role, "content": m.content} for m in raw_msgs]
                 core_facts = await self.memory_backend.list_facts(status="active", limit=30)
+                categories_map = {
+                    c.category_key: c for c in await self.memory_backend.list_categories()
+                }
                 if self.memory_retriever is not None:
-                    selected_l1_ids = {f.fact_id for f in core_facts}
+                    selected_l1_ids = {
+                        f.fact_id
+                        for f in core_facts
+                        if (categories_map[f.category].inject_to_l1 if f.category in categories_map else f.category != "chitchat")
+                    }
                     recalled_memories, retrieval_ms = await self.memory_retriever.search(
                         user_text,
                         top_k=5,
@@ -706,6 +715,7 @@ class Hub:
                         if item.item_type == "fact":
                             await self.memory_backend.touch_fact(item.item_id)
             else:
+                categories_map = {}
                 recent_messages = self.memory_store.get_messages(conn.client_id, limit=16)
 
             built = self.context_builder.build(
@@ -716,6 +726,7 @@ class Hub:
                 recent_messages=recent_messages,
                 recalled_memories=recalled_memories,
                 context_store=self.context_store,
+                categories=categories_map if self.memory_backend is not None else None,
                 retrieval_ms=retrieval_ms,
             )
             self.last_build_stats = built.stats

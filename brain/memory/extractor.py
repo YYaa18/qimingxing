@@ -13,41 +13,55 @@ from brain.llm_router import LLMRouter
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import EmbeddingProvider, NullEmbeddingProvider, pack_embedding
 from brain.memory.models import (
+    CategoryTier,
+    MemoryCategory,
     MemoryEpisode,
     MemoryFact,
     MemoryMutation,
     MessageRecord,
     new_episode_id,
     new_fact_id,
+    normalize_category_key,
 )
 
 logger = logging.getLogger("qimingxing.memory.extractor")
 
 _EXPLICIT_CMD_RE = re.compile(
-    r"(记住|帮我记|记一下|以后回答|以后回复|忘掉|忘记|删掉关于|删除关于|别再提|remember that|forget )"
+    r"(记住|帮我记|记一下|以后回答|以后回复|忘掉|忘记|删掉关于|删除关于|别再提|新建分类|建一个分类|建个分类|remember that|forget )"
 )
 
-_EXTRACTION_SYSTEM_PROMPT = """你是一个严谨的长期记忆提炼与冲突消解器。你的任务是从对话片段中提取有长期价值的事实（偏好、技术栈、正在做的项目、长期设定、习惯）或值得跨天记住的重要事件，并与已有长期事实做冲突消解。
+_EXTRACTION_SYSTEM_PROMPT = """你是一个严谨的长期记忆分类、提炼与冲突消解器。你的任务是将对话按当前动态分类表进行分类整理，并提取值得留存的长期事实、工作情景或日常趣事/闲聊，同时与已有长期事实做冲突消解。
 
 请严格只输出一个合法 JSON 对象，格式如下（不要输出任何 Markdown 代码块包裹外的解释文字）：
 {
+  "new_categories": [
+    {
+      "category_key": "英文小写下划线标识如 fitness_log",
+      "display_name": "中文展示名如 健身记录",
+      "description": "一句话描述适用内容",
+      "tier": "core | episodic | chitchat",
+      "inject_to_l1": false
+    }
+  ],
   "mutations": [
     {
       "op": "ADD | UPDATE | DELETE | NONE",
-      "category": "preference | project | tech_stack | habit | fact",
+      "category": "优先使用【当前已有记忆分类】中的 category_key，或上面刚创建的 key",
       "content": "清晰完整的一句长期事实描述",
       "importance": 0.8,
       "target_fact_id": "仅当 op 为 UPDATE 或 DELETE 时填入对应的已有 fact_id，否则为 null"
     }
   ],
-  "episode_summary": "如果本段对话包含值得跨天记忆的关键里程碑/重要问题复盘，用1句话总结；否则为 null"
+  "episode_summary": "如果本段对话包含值得跨天记忆的关键工作复盘/重要事件，用1句话总结；否则为 null",
+  "chitchat_summary": "如果本段对话包含有记忆价值的日常闲聊/讲过的笑话/吐槽/生活趣事（非纯‘你好/谢谢/哦’），用1句话概括；否则为 null"
 }
 
 规则：
-1. 如果只是普通寒暄（如“你好”、“谢谢”、“好的”）、一次性查询天气或无长期价值内容，只输出 `{"mutations": [{"op": "NONE"}], "episode_summary": null}`。
-2. 当新对话修正或升级了已有事实（例如 Python 版本升级、项目变更、偏好改变），**必须**使用 `op: "UPDATE"` 并准确填入旧事实的 `target_fact_id`，严禁重复 `ADD` 造成矛盾事实共存。
-3. 当用户明确要求“忘掉/忘记/删除”某信息时，**必须**输出 `op: "DELETE"` 并匹配对应 `target_fact_id`。
-4. 绝对禁止编造不存在的信息，也禁止写入任何隐私占位（如 `[隐私窗口已隐藏]`）。"""
+1. **分类优先复用**：尽量复用【当前已有记忆分类】中的 `category_key`。只有当用户明确要求“新建分类”，或出现持续性全新主题且现有分类无法覆盖时，才可在 `new_categories` 中注册（每次最多 2 个），严禁为单次闲聊乱建分类。
+2. **闲聊分级沉淀**：讲过的笑话、有趣梗或生活趣事不要丢弃，优先记录到 `chitchat_summary`（归类为闲聊情景记忆，平时不干扰正事，被问到时能精准捞出）；纯单字寒暄（如“你好”“谢谢”“好的”）填 `NONE` 且 `chitchat_summary: null`。
+3. **冲突消解**：当新对话修正或升级了已有事实（如 Python 版本升级、项目变更、偏好改变），**必须**使用 `op: "UPDATE"` 并准确填入旧事实的 `target_fact_id`，严禁重复 `ADD` 造成矛盾事实共存。
+4. **主动遗忘**：当用户明确要求“忘掉/忘记/删除”某信息时，**必须**输出 `op: "DELETE"` 并匹配对应 `target_fact_id`。
+5. 绝对禁止编造不存在的信息，也禁止写入任何隐私占位（如 `[隐私窗口已隐藏]`）。"""
 
 _COMPRESS_SYSTEM_PROMPT = """请将下面的历史对话压缩合并成不超过 220 字的简明中文滚动摘要。保留：用户提出的关键前提、已确定的技术方案/结论、待跟进事项；省略寒暄与重复细节。直接输出摘要正文。"""
 
@@ -58,27 +72,55 @@ def has_explicit_memory_command(text: str) -> bool:
     return bool(_EXPLICIT_CMD_RE.search(text.lower()))
 
 
-def parse_extraction_json(raw: str) -> tuple[List[MemoryMutation], Optional[str]]:
-    """Parse structured mutations + optional episode summary from LLM output."""
+def parse_extraction_json(
+    raw: str,
+) -> tuple[List[MemoryCategory], List[MemoryMutation], Optional[str], Optional[str]]:
+    """Parse dynamic new_categories, mutations, episode_summary, and chitchat_summary."""
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
-    # Locate outer JSON object defensively
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        return [], None
+        return [], [], None, None
     data = json.loads(cleaned[start : end + 1])
+
+    new_categories: List[MemoryCategory] = []
+    for item in (data.get("new_categories") or [])[:2]:
+        key = normalize_category_key(str(item.get("category_key") or ""))
+        if not key:
+            continue
+        raw_tier = str(item.get("tier") or "episodic").lower().strip()
+        tier: CategoryTier = (
+            raw_tier if raw_tier in ("core", "episodic", "chitchat") else "episodic"
+        )  # type: ignore[assignment]
+        inject_l1 = bool(item.get("inject_to_l1", tier == "core"))
+        default_w = 1.0 if tier == "core" else (0.55 if tier == "chitchat" else 0.90)
+        default_d = 0.015 if tier == "core" else (0.15 if tier == "chitchat" else 0.04)
+        new_categories.append(
+            MemoryCategory(
+                category_key=key,
+                display_name=str(item.get("display_name") or key)[:40],
+                description=str(item.get("description") or "")[:120],
+                tier=tier,
+                retrieval_weight=max(0.2, min(1.5, float(item.get("retrieval_weight", default_w)))),
+                decay_rate=max(0.005, min(0.5, float(item.get("decay_rate", default_d)))),
+                inject_to_l1=inject_l1,
+                created_by="llm",
+            )
+        )
+
     mutations: List[MemoryMutation] = []
     for item in data.get("mutations") or []:
         op = str(item.get("op", "NONE")).upper().strip()
         if op not in ("ADD", "UPDATE", "DELETE", "NONE"):
             continue
+        cat_key = normalize_category_key(str(item.get("category") or "fact")) or "fact"
         mutations.append(
             MemoryMutation(
                 op=op,  # type: ignore[arg-type]
-                category=str(item.get("category") or "fact"),
+                category=cat_key,
                 content=str(item.get("content") or "").strip(),
                 importance=max(0.1, min(1.0, float(item.get("importance", 0.7)))),
                 confidence=max(0.1, min(1.0, float(item.get("confidence", 0.9)))),
@@ -89,7 +131,9 @@ def parse_extraction_json(raw: str) -> tuple[List[MemoryMutation], Optional[str]
         )
     ep = data.get("episode_summary")
     ep_str = str(ep).strip() if ep else None
-    return mutations, ep_str
+    chitchat = data.get("chitchat_summary")
+    chitchat_str = str(chitchat).strip() if chitchat else None
+    return new_categories, mutations, ep_str, chitchat_str
 
 
 class MemoryExtractor:
@@ -101,11 +145,16 @@ class MemoryExtractor:
         llm_router: LLMRouter,
         embedding_provider: Optional[EmbeddingProvider] = None,
         config: Optional[MemoryExtractionConfig] = None,
+        *,
+        hot_message_limit: int = 10000,
+        archive_batch_size: int = 2000,
     ) -> None:
         self.backend = backend
         self.llm_router = llm_router
         self.embedding_provider = embedding_provider or NullEmbeddingProvider()
         self.config = config or MemoryExtractionConfig()
+        self.hot_message_limit = hot_message_limit
+        self.archive_batch_size = archive_batch_size
 
         self._pending_turns: Dict[str, int] = {}
         self._unextracted_msgs: Dict[str, List[MessageRecord]] = {}
@@ -175,13 +224,16 @@ class MemoryExtractor:
         ):
             self._spawn(self.persist_desktop_footprint(context_store))
 
+        # Trigger non-blocking hot/cold message archiving when hot count exceeds limit
+        self._spawn(self._safe_archive())
+
     def schedule_session_archive(
         self,
         *,
         session_id: str,
         context_store: ContextStore,
     ) -> None:
-        """Flush buffered messages & sanitized desktop footprint when archiving a session."""
+        """Flush buffered messages, sanitized desktop footprint & cold archive when archiving a session."""
         if not self.config.enabled:
             return
         old_idle = self._idle_tasks.pop(session_id, None)
@@ -192,6 +244,19 @@ class MemoryExtractor:
             self._spawn(self._safe_extract(session_id, msgs))
         if self.config.persist_desktop_footprints:
             self._spawn(self.persist_desktop_footprint(context_store))
+        self._spawn(self._safe_archive())
+
+    async def _safe_archive(self) -> None:
+        async with self._get_lock("__archive__"):
+            try:
+                moved = await self.backend.archive_old_messages(
+                    keep_latest=self.hot_message_limit,
+                    batch_size=self.archive_batch_size,
+                )
+                if moved > 0:
+                    logger.info("Archived %d cold messages into messages_archive", moved)
+            except Exception as exc:
+                logger.warning("Background hot/cold archive check failed (isolated): %s", exc)
 
     def _drain_buffer(self, session_id: str) -> List[MessageRecord]:
         self._pending_turns[session_id] = 0
@@ -240,6 +305,12 @@ class MemoryExtractor:
             return []
 
         existing_facts = await self.backend.list_facts(status="active", limit=40)
+        categories = await self.backend.list_categories()
+        cat_keys = {c.category_key for c in categories}
+        cat_block = "\n".join(
+            f"- {c.category_key}（{c.display_name} / tier={c.tier}）: {c.description}"
+            for c in categories
+        )
         facts_block = (
             "\n".join(
                 f"- id={f.fact_id} [{f.category}] {f.content}" for f in existing_facts
@@ -250,9 +321,10 @@ class MemoryExtractor:
         convo_block = "\n".join(f"{m.role}: {m.content}" for m in msgs)
 
         prompt = (
+            f"【当前已有记忆分类】\n{cat_block}\n\n"
             f"【已有活跃长期事实】\n{facts_block}\n\n"
             f"【本批新增对话】\n{convo_block}\n\n"
-            "请判断需要执行哪些记忆变更（ADD / UPDATE / DELETE / NONE）。"
+            "请判断需要新建哪些分类（如有）、执行哪些记忆变更（ADD / UPDATE / DELETE / NONE），以及是否需要记录工作情景或日常趣事。"
         )
         raw = await self._call_fast_llm(
             [
@@ -260,7 +332,19 @@ class MemoryExtractor:
                 {"role": "user", "content": prompt},
             ]
         )
-        mutations, episode_summary = parse_extraction_json(raw)
+        new_categories, mutations, episode_summary, chitchat_summary = parse_extraction_json(raw)
+
+        for cat in new_categories:
+            if cat.category_key not in cat_keys:
+                await self.backend.register_category(cat)
+                cat_keys.add(cat.category_key)
+                logger.info(
+                    "Dynamically registered new memory category key=%s (%s, tier=%s)",
+                    cat.category_key,
+                    cat.display_name,
+                    cat.tier,
+                )
+
         valid_ids = {f.fact_id for f in existing_facts}
         now = time.time()
 
@@ -268,12 +352,12 @@ class MemoryExtractor:
         for mut in mutations:
             if mut.op == "NONE":
                 continue
+            target_cat = mut.category if mut.category in cat_keys else "fact"
             if mut.op == "DELETE":
                 if mut.target_fact_id and mut.target_fact_id in valid_ids:
                     await self.backend.update_fact_status(mut.target_fact_id, "deleted")
                     applied.append(mut)
                 elif mut.content:
-                    # Fallback fuzzy match if model returned content without target_fact_id
                     for f in existing_facts:
                         if mut.content in f.content or f.content in mut.content:
                             await self.backend.update_fact_status(f.fact_id, "deleted")
@@ -284,7 +368,7 @@ class MemoryExtractor:
                 if mut.content:
                     fact = MemoryFact(
                         fact_id=new_fact_id(),
-                        category=mut.category,
+                        category=target_cat,
                         content=mut.content,
                         importance=mut.importance,
                         confidence=mut.confidence,
@@ -298,12 +382,11 @@ class MemoryExtractor:
                     await self._maybe_embed_fact(fact)
                     applied.append(mut)
             elif mut.op == "ADD" and mut.content:
-                # Avoid inserting exact duplicates
                 if any(f.content == mut.content for f in existing_facts):
                     continue
                 fact = MemoryFact(
                     fact_id=new_fact_id(),
-                    category=mut.category,
+                    category=target_cat,
                     content=mut.content,
                     importance=mut.importance,
                     confidence=mut.confidence,
@@ -330,11 +413,25 @@ class MemoryExtractor:
             await self.backend.add_episode(ep)
             await self._maybe_embed_episode(ep)
 
+        if chitchat_summary:
+            ep_chat = MemoryEpisode(
+                episode_id=new_episode_id(),
+                kind="chitchat",
+                summary=chitchat_summary,
+                keywords="chitchat",
+                importance=0.45,
+                time_start=msgs[0].created_at,
+                time_end=msgs[-1].created_at,
+            )
+            await self.backend.add_episode(ep_chat)
+            await self._maybe_embed_episode(ep_chat)
+
         logger.info(
-            "Memory extraction completed for session=%s applied=%d episode=%s",
+            "Memory extraction completed for session=%s applied=%d episode=%s chitchat=%s",
             session_id,
             len(applied),
             bool(episode_summary),
+            bool(chitchat_summary),
         )
         return applied
 

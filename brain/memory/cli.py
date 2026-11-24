@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from brain.config import load_config
-from brain.memory import create_memory_backend
+from brain.memory import MemoryCategory, create_memory_backend, normalize_category_key
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import create_embedding_provider, pack_embedding
 from brain.memory.retrieval import MemoryRetriever
@@ -200,6 +200,44 @@ async def run_cli(args: argparse.Namespace) -> int:
             return 0
         if args.command == "reindex":
             return await cmd_reindex(backend, args.config)
+        if args.command == "categories":
+            if args.add:
+                key = normalize_category_key(args.add)
+                if not key:
+                    print("Invalid category key", file=sys.stderr)
+                    return 1
+                cat = MemoryCategory(
+                    category_key=key,
+                    display_name=args.name or key,
+                    description=args.desc or "",
+                    tier=args.tier,
+                    retrieval_weight=args.weight,
+                    decay_rate=args.decay,
+                    inject_to_l1=args.l1,
+                    created_by="cli",
+                )
+                await backend.register_category(cat)
+                print(f"Registered category: {cat.category_key} ({cat.display_name}, tier={cat.tier})")
+                return 0
+            cats = await backend.list_categories()
+            for c in cats:
+                print(
+                    f"{c.category_key} | {c.display_name} | tier={c.tier} | "
+                    f"w={c.retrieval_weight:.2f} | decay={c.decay_rate:.3f} | "
+                    f"l1={c.inject_to_l1} | by={c.created_by}"
+                )
+            return 0
+        if args.command == "archive":
+            hot_before, cold_before = await backend.count_messages()
+            moved = await backend.archive_old_messages(
+                keep_latest=args.keep, batch_size=args.batch
+            )
+            hot_after, cold_after = await backend.count_messages()
+            print(
+                f"Archived {moved} message(s): hot={hot_before}->{hot_after}, "
+                f"archived={cold_before}->{cold_after}"
+            )
+            return 0
         return 1
     finally:
         await backend.close()
@@ -233,6 +271,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_import.add_argument("path", type=Path)
 
     sub.add_parser("reindex", help="Backfill embeddings for active records")
+
+    p_cats = sub.add_parser("categories", help="List or register dynamic memory categories")
+    p_cats.add_argument("--add", default=None, help="Category key to register/update (e.g. fitness_log)")
+    p_cats.add_argument("--name", default=None, help="Display name (e.g. 健身记录)")
+    p_cats.add_argument("--desc", default="", help="Category description")
+    p_cats.add_argument("--tier", choices=["core", "episodic", "chitchat"], default="episodic")
+    p_cats.add_argument("--weight", type=float, default=0.90)
+    p_cats.add_argument("--decay", type=float, default=0.04)
+    p_cats.add_argument("--l1", action="store_true", help="Inject into L1 static profile")
+
+    p_arch = sub.add_parser("archive", help="Archive old hot messages into messages_archive")
+    p_arch.add_argument("--keep", type=int, default=10000, help="Hot message retention count")
+    p_arch.add_argument("--batch", type=int, default=2000, help="Max messages to move per run")
     return parser
 
 

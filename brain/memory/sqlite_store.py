@@ -10,9 +10,11 @@ from typing import List, Optional, Tuple
 
 from brain.memory.backend import SNAPSHOT_SCHEMA_VERSION, MemoryBackend
 from brain.memory.models import (
+    DEFAULT_MEMORY_CATEGORIES,
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
+    MemoryCategory,
     MemoryEpisode,
     MemoryFact,
     MessageRecord,
@@ -81,6 +83,33 @@ CREATE TABLE IF NOT EXISTS memory_episodes (
 CREATE INDEX IF NOT EXISTS idx_episodes_status_time
     ON memory_episodes(status, time_end DESC);
 
+CREATE TABLE IF NOT EXISTS memory_categories (
+    category_key TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    tier TEXT NOT NULL DEFAULT 'episodic',
+    retrieval_weight REAL NOT NULL DEFAULT 0.85,
+    decay_rate REAL NOT NULL DEFAULT 0.05,
+    inject_to_l1 INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL DEFAULT 'system',
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages_archive (
+    msg_id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    emotion TEXT NOT NULL DEFAULT 'neutral',
+    desktop_context_summary TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    archived_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_archive_session
+    ON messages_archive(session_id, msg_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     item_id UNINDEXED,
     item_type UNINDEXED,
@@ -108,6 +137,26 @@ class SQLiteMemoryStore(MemoryBackend):
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA foreign_keys=ON;")
             conn.executescript(_SCHEMA_SQL)
+            for cat in DEFAULT_MEMORY_CATEGORIES:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO memory_categories (
+                        category_key, display_name, description, tier,
+                        retrieval_weight, decay_rate, inject_to_l1, created_by, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cat.category_key,
+                        cat.display_name,
+                        cat.description,
+                        cat.tier,
+                        cat.retrieval_weight,
+                        cat.decay_rate,
+                        1 if cat.inject_to_l1 else 0,
+                        cat.created_by,
+                        cat.created_at,
+                    ),
+                )
             conn.commit()
             self._conn = conn
         return self._conn
@@ -231,9 +280,12 @@ class SQLiteMemoryStore(MemoryBackend):
                 "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
                 (now, session_id),
             )
+            msg_id = int(cur.lastrowid)
+            if len(content.strip()) >= 6:
+                self._sync_fts_entry(conn, str(msg_id), "message", content)
             conn.commit()
             return MessageRecord(
-                msg_id=int(cur.lastrowid),
+                msg_id=msg_id,
                 session_id=session_id,
                 turn_id=turn_id,
                 role=role,
@@ -290,6 +342,129 @@ class SQLiteMemoryStore(MemoryBackend):
                 (session_id, watermark),
             ).fetchone()
             return int(row["cnt"]) if row else 0
+
+    async def get_message(self, msg_id: int) -> Optional[MessageRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM messages WHERE msg_id = ?", (msg_id,)
+            ).fetchone()
+            return _row_to_message(row) if row else None
+
+    async def count_messages(self) -> Tuple[int, int]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            hot_cnt = int(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+            cold_cnt = int(conn.execute("SELECT COUNT(*) FROM messages_archive").fetchone()[0])
+            return hot_cnt, cold_cnt
+
+    async def archive_old_messages(
+        self,
+        *,
+        keep_latest: int = 10000,
+        batch_size: int = 2000,
+    ) -> int:
+        async with self._lock:
+            conn = self._ensure_conn()
+            hot_cnt = int(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+            excess = hot_cnt - max(0, keep_latest)
+            if excess <= 0:
+                return 0
+            to_move = min(excess, max(1, batch_size))
+            # Prefer moving oldest messages from archived sessions first, then oldest overall
+            rows = conn.execute(
+                """
+                SELECT m.* FROM messages m
+                LEFT JOIN sessions s ON m.session_id = s.session_id
+                ORDER BY CASE WHEN s.status = 'archived' THEN 0 ELSE 1 END ASC, m.msg_id ASC
+                LIMIT ?
+                """,
+                (to_move,),
+            ).fetchall()
+            if not rows:
+                return 0
+            now = time.time()
+            msg_ids = [int(r["msg_id"]) for r in rows]
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO messages_archive (
+                    msg_id, session_id, turn_id, role, content,
+                    emotion, desktop_context_summary, created_at, archived_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r["msg_id"],
+                        r["session_id"],
+                        r["turn_id"],
+                        r["role"],
+                        r["content"],
+                        r["emotion"],
+                        r["desktop_context_summary"],
+                        r["created_at"],
+                        now,
+                    )
+                    for r in rows
+                ],
+            )
+            placeholders = ",".join("?" for _ in msg_ids)
+            conn.execute(f"DELETE FROM messages WHERE msg_id IN ({placeholders})", msg_ids)
+            conn.executemany(
+                "DELETE FROM memory_fts WHERE item_id = ? AND item_type = 'message'",
+                [(str(mid),) for mid in msg_ids],
+            )
+            conn.commit()
+            return len(msg_ids)
+
+    # --- Dynamic Category Registry ---
+
+    async def register_category(self, category: MemoryCategory) -> MemoryCategory:
+        async with self._lock:
+            conn = self._ensure_conn()
+            conn.execute(
+                """
+                INSERT INTO memory_categories (
+                    category_key, display_name, description, tier,
+                    retrieval_weight, decay_rate, inject_to_l1, created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(category_key) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    description = excluded.description,
+                    tier = excluded.tier,
+                    retrieval_weight = excluded.retrieval_weight,
+                    decay_rate = excluded.decay_rate,
+                    inject_to_l1 = excluded.inject_to_l1
+                """,
+                (
+                    category.category_key,
+                    category.display_name,
+                    category.description,
+                    category.tier,
+                    category.retrieval_weight,
+                    category.decay_rate,
+                    1 if category.inject_to_l1 else 0,
+                    category.created_by,
+                    category.created_at,
+                ),
+            )
+            conn.commit()
+            return category
+
+    async def get_category(self, category_key: str) -> Optional[MemoryCategory]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM memory_categories WHERE category_key = ?", (category_key,)
+            ).fetchone()
+            return _row_to_category(row) if row else None
+
+    async def list_categories(self) -> List[MemoryCategory]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            rows = conn.execute(
+                "SELECT * FROM memory_categories ORDER BY retrieval_weight DESC, created_at ASC"
+            ).fetchall()
+            return [_row_to_category(r) for r in rows]
 
     # --- L2: Facts ---
 
@@ -605,6 +780,11 @@ class SQLiteMemoryStore(MemoryBackend):
                     )
                     + "\n"
                 )
+                for r in conn.execute("SELECT * FROM memory_categories ORDER BY created_at ASC"):
+                    f.write(
+                        json.dumps({"_type": "category", **dict(r)}, ensure_ascii=False) + "\n"
+                    )
+                    count += 1
                 for r in conn.execute("SELECT * FROM sessions ORDER BY started_at ASC"):
                     f.write(
                         json.dumps({"_type": "session", **dict(r)}, ensure_ascii=False) + "\n"
@@ -613,6 +793,12 @@ class SQLiteMemoryStore(MemoryBackend):
                 for r in conn.execute("SELECT * FROM messages ORDER BY msg_id ASC"):
                     f.write(
                         json.dumps({"_type": "message", **dict(r)}, ensure_ascii=False) + "\n"
+                    )
+                    count += 1
+                for r in conn.execute("SELECT * FROM messages_archive ORDER BY msg_id ASC"):
+                    f.write(
+                        json.dumps({"_type": "message_archive", **dict(r)}, ensure_ascii=False)
+                        + "\n"
                     )
                     count += 1
                 for r in conn.execute("SELECT * FROM memory_facts ORDER BY created_at ASC"):
@@ -648,6 +834,27 @@ class SQLiteMemoryStore(MemoryBackend):
                     rtype = rec.get("_type")
                     if rtype == "meta":
                         continue
+                    elif rtype == "category":
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO memory_categories (
+                                category_key, display_name, description, tier,
+                                retrieval_weight, decay_rate, inject_to_l1, created_by, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec["category_key"],
+                                rec["display_name"],
+                                rec.get("description", ""),
+                                rec.get("tier", "episodic"),
+                                rec.get("retrieval_weight", 0.85),
+                                rec.get("decay_rate", 0.05),
+                                int(rec.get("inject_to_l1", 0)),
+                                rec.get("created_by", "system"),
+                                rec["created_at"],
+                            ),
+                        )
+                        count += 1
                     elif rtype == "session":
                         conn.execute(
                             """
@@ -683,6 +890,31 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec.get("emotion", "neutral"),
                                 rec.get("desktop_context_summary", ""),
                                 rec["created_at"],
+                            ),
+                        )
+                        if len(str(rec["content"]).strip()) >= 6:
+                            self._sync_fts_entry(
+                                conn, str(rec["msg_id"]), "message", str(rec["content"])
+                            )
+                        count += 1
+                    elif rtype == "message_archive":
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO messages_archive (
+                                msg_id, session_id, turn_id, role, content,
+                                emotion, desktop_context_summary, created_at, archived_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec["msg_id"],
+                                rec["session_id"],
+                                rec.get("turn_id", ""),
+                                rec["role"],
+                                rec["content"],
+                                rec.get("emotion", "neutral"),
+                                rec.get("desktop_context_summary", ""),
+                                rec["created_at"],
+                                rec.get("archived_at", rec["created_at"]),
                             ),
                         )
                         count += 1
@@ -795,6 +1027,20 @@ def _row_to_fact(row: sqlite3.Row) -> MemoryFact:
         last_accessed_at=float(row["last_accessed_at"]),
         embedding=bytes(row["embedding"]) if row["embedding"] is not None else None,
         embedding_model=str(row["embedding_model"]) if row["embedding_model"] else None,
+    )
+
+
+def _row_to_category(row: sqlite3.Row) -> MemoryCategory:
+    return MemoryCategory(
+        category_key=str(row["category_key"]),
+        display_name=str(row["display_name"]),
+        description=str(row["description"] or ""),
+        tier=row["tier"],  # type: ignore[arg-type]
+        retrieval_weight=float(row["retrieval_weight"]),
+        decay_rate=float(row["decay_rate"]),
+        inject_to_l1=bool(row["inject_to_l1"]),
+        created_by=str(row["created_by"] or "system"),
+        created_at=float(row["created_at"]),
     )
 
 

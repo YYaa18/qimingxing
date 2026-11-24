@@ -99,6 +99,8 @@ privacy:
 memory:
   backend: "sqlite"  # 预留 "postgres" 容器级扩展槽位
   sqlite_path: "data/qimingxing_memory.db"
+  hot_message_limit: 10000
+  archive_batch_size: 2000
   extraction:
     enabled: true
     profile: "fast_deepseek"

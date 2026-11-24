@@ -9,12 +9,12 @@
 - `protocol/`：Pydantic v2 通信协议与信封模型（Single Source of Truth），支持一键导出 `protocol.schema.json`。
 - `brain/`：FastAPI WebSocket 大脑服务：
   - `context_builder.py`：Prefix-Cache 友好 4 层静动分层 Prompt 拼装（`L0 静态人设` → `L1 稳定画像` → `L2 滚动摘要/近期原文` → `L3 召回记忆/焦点/OCR`）、硬性 Token 预算分配与超长 OCR 头尾保留截断。
-  - `memory/`：后端无关的三层长期记忆子包（`MemoryBackend` + 默认 `SQLiteMemoryStore` WAL/FTS5、`NullEmbeddingProvider` + `OpenAICompatibleEmbeddingProvider` RRF 混合留槽、`MemoryExtractor` 异步批量/口令提炼与 `ADD/UPDATE/DELETE/NONE` 冲突消解、会话滚动压缩、脱敏桌面足迹沉淀、运维 `cli.py`）。
+  - `memory/`：后端无关的三层长期记忆子包（`MemoryBackend` + 默认 `SQLiteMemoryStore` WAL/FTS5 + 动态分类注册表 `memory_categories` + 热/冷消息分离 `messages_archive`、`NullEmbeddingProvider` + `OpenAICompatibleEmbeddingProvider` RRF 混合留槽、`MemoryExtractor` 异步批量/口令提炼与 `ADD/UPDATE/DELETE/NONE` 冲突消解、日常闲聊分级沉淀、会话滚动压缩、脱敏桌面足迹沉淀、运维 `cli.py`）。
   - `hub.py`、`artifact_store.py`、`context_store.py`、`intent_detector.py`、`screen_router.py`、`stream_parser.py`、`llm_router.py`。
 - `senses/`：跨平台真实桌面感官客户端（macOS / Windows 双平台 `WindowProvider` 极薄隔离 + `PrivacyGuard` 三档隐私模式与敏感黑名单 + `ScreenCapture` 跨平台截屏压缩上传）。
 - `mock_senses/`：离线模拟感官客户端（供无桌面环境或单测使用）。
 - `body_web/`：零构建三文件前端（`index.html`、`app.js`、`styles.css`），阶段三零前端改动。
-- `tests/`：全量自动化测试集（41 项用例，覆盖阶段一至阶段三及 5,000 条 FTS5 性能基准）。
+- `tests/`：全量自动化测试集（45 项用例，覆盖阶段一至阶段三、动态分类与冷热分离及 5,000 条 FTS5 性能基准）。
 
 ## 快速开始
 
@@ -78,6 +78,8 @@ python -m brain.memory.cli delete <id>
 python -m brain.memory.cli export backup.jsonl
 python -m brain.memory.cli import backup.jsonl
 python -m brain.memory.cli reindex
+python -m brain.memory.cli categories
+python -m brain.memory.cli archive --keep 10000 --batch 2000
 
 # 回环只读调试接口
 curl http://127.0.0.1:18790/api/memory/debug

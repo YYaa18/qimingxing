@@ -64,6 +64,8 @@ def create_app(
         router,
         emb_provider,
         cfg.memory.extraction,
+        hot_message_limit=cfg.memory.hot_message_limit,
+        archive_batch_size=cfg.memory.archive_batch_size,
     )
 
     hub = Hub(
@@ -139,6 +141,8 @@ def create_app(
         facts = await backend.list_facts(status="active", limit=50)
         episodes = await backend.list_episodes(status="active", limit=20)
         recent_msgs = await backend.get_messages(session.session_id, limit=12)
+        categories = await backend.list_categories()
+        hot_count, archived_count = await backend.count_messages()
 
         return JSONResponse(
             {
@@ -149,6 +153,20 @@ def create_app(
                     "last_summarized_msg_id": session.last_summarized_msg_id,
                     "recent_message_count": len(recent_msgs),
                 },
+                "hot_messages_count": hot_count,
+                "archived_messages_count": archived_count,
+                "categories": [
+                    {
+                        "category_key": c.category_key,
+                        "display_name": c.display_name,
+                        "tier": c.tier,
+                        "retrieval_weight": c.retrieval_weight,
+                        "decay_rate": c.decay_rate,
+                        "inject_to_l1": c.inject_to_l1,
+                        "created_by": c.created_by,
+                    }
+                    for c in categories
+                ],
                 "active_facts_count": len(facts),
                 "active_facts": [
                     {

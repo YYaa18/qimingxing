@@ -108,6 +108,8 @@ class EmbeddingConfig:
 class MemoryConfig:
     backend: str = "sqlite"
     sqlite_path: str = "data/qimingxing_memory.db"
+    hot_message_limit: int = 10000
+    archive_batch_size: int = 2000
     extraction: MemoryExtractionConfig = field(default_factory=MemoryExtractionConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
@@ -259,6 +261,8 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     memory = MemoryConfig(
         backend=str(mem_raw.get("backend", "sqlite")),
         sqlite_path=str(mem_raw.get("sqlite_path", "data/qimingxing_memory.db")),
+        hot_message_limit=int(mem_raw.get("hot_message_limit", 10000)),
+        archive_batch_size=int(mem_raw.get("archive_batch_size", 2000)),
         extraction=MemoryExtractionConfig(
             enabled=bool(ext_raw.get("enabled", True)),
             profile=ext_profile,

@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 FactStatus = Literal["active", "superseded", "deleted"]
-EpisodeKind = Literal["conversation", "desktop_footprint"]
+EpisodeKind = Literal["conversation", "desktop_footprint", "chitchat"]
 EpisodeStatus = Literal["active", "deleted"]
 SessionStatus = Literal["active", "archived"]
 MutationOp = Literal["ADD", "UPDATE", "DELETE", "NONE"]
+CategoryTier = Literal["core", "episodic", "chitchat"]
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
@@ -168,10 +169,108 @@ class MemoryMutation:
     target_fact_id: Optional[str] = None
 
 
+def normalize_category_key(raw: str) -> str:
+    """Normalize a dynamic category identifier to lowercase [a-z0-9_] (2-32 chars)."""
+    if not raw:
+        return ""
+    cleaned = re.sub(r"[^a-z0-9_]+", "_", raw.strip().lower()).strip("_")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    if len(cleaned) < 2:
+        return ""
+    return cleaned[:32]
+
+
+@dataclass
+class MemoryCategory:
+    category_key: str
+    display_name: str
+    description: str = ""
+    tier: CategoryTier = "episodic"
+    retrieval_weight: float = 0.85
+    decay_rate: float = 0.05
+    inject_to_l1: bool = False
+    created_by: str = "system"
+    created_at: float = field(default_factory=time.time)
+
+
+DEFAULT_MEMORY_CATEGORIES: list[MemoryCategory] = [
+    MemoryCategory(
+        category_key="preference",
+        display_name="偏好习惯",
+        description="用户的交流偏好、回答风格与工具习惯",
+        tier="core",
+        retrieval_weight=1.15,
+        decay_rate=0.01,
+        inject_to_l1=True,
+        created_by="system",
+    ),
+    MemoryCategory(
+        category_key="project",
+        display_name="在研项目",
+        description="用户当前负责或长期推进的项目信息",
+        tier="core",
+        retrieval_weight=1.10,
+        decay_rate=0.015,
+        inject_to_l1=True,
+        created_by="system",
+    ),
+    MemoryCategory(
+        category_key="tech_stack",
+        display_name="技术栈",
+        description="编程语言、框架、硬件与运行环境设定",
+        tier="core",
+        retrieval_weight=1.10,
+        decay_rate=0.015,
+        inject_to_l1=True,
+        created_by="system",
+    ),
+    MemoryCategory(
+        category_key="habit",
+        display_name="日常作息与习惯",
+        description="用户的长期行为习惯与固定日程特点",
+        tier="core",
+        retrieval_weight=1.05,
+        decay_rate=0.02,
+        inject_to_l1=True,
+        created_by="system",
+    ),
+    MemoryCategory(
+        category_key="fact",
+        display_name="基础事实",
+        description="个人背景、称呼及其他稳定的长期事实",
+        tier="core",
+        retrieval_weight=1.00,
+        decay_rate=0.015,
+        inject_to_l1=True,
+        created_by="system",
+    ),
+    MemoryCategory(
+        category_key="work_log",
+        display_name="工作情景与足迹",
+        description="阶段性问题排查复盘、桌面工作足迹与任务脉络",
+        tier="episodic",
+        retrieval_weight=0.95,
+        decay_rate=0.04,
+        inject_to_l1=False,
+        created_by="system",
+    ),
+    MemoryCategory(
+        category_key="chitchat",
+        display_name="日常闲聊与趣事",
+        description="讲过的笑话、随口吐槽、日常趣事与生活闲谈",
+        tier="chitchat",
+        retrieval_weight=0.55,
+        decay_rate=0.15,
+        inject_to_l1=False,
+        created_by="system",
+    ),
+]
+
+
 @dataclass
 class RetrievedMemory:
     item_id: str
-    item_type: Literal["fact", "episode"]
+    item_type: Literal["fact", "episode", "message"]
     content: str
     category: str
     importance: float

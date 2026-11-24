@@ -75,7 +75,7 @@ async def test_sqlite_schema_wal_slots_and_lossless_jsonl_roundtrip(tmp_path: Pa
 
     snapshot_path = tmp_path / "snapshot.jsonl"
     exported_count = await store1.export_snapshot(snapshot_path)
-    assert exported_count == 4
+    assert exported_count >= 11
     await store1.close()
 
     # Import into a brand new empty DB
@@ -83,7 +83,7 @@ async def test_sqlite_schema_wal_slots_and_lossless_jsonl_roundtrip(tmp_path: Pa
     store2 = SQLiteMemoryStore(db2_path)
     await store2.initialize()
     imported_count = await store2.import_snapshot(snapshot_path)
-    assert imported_count == 4
+    assert imported_count == exported_count
 
     restored_sess = await store2.get_session(sess.session_id)
     assert restored_sess is not None

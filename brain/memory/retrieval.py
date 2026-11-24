@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -13,15 +14,22 @@ from brain.memory.embeddings import (
     cosine_similarity,
     unpack_embedding,
 )
-from brain.memory.models import RetrievedMemory, tokenize_query_for_fts
+from brain.memory.models import MemoryCategory, RetrievedMemory, tokenize_query_for_fts
 
 logger = logging.getLogger("qimingxing.memory.retrieval")
 
 _RRF_K = 60
+_CHITCHAT_RECALL_RE = re.compile(
+    r"(笑话|段子|闲聊|聊天|上次聊|之前聊|之前说|前几天|那个梗|聊过)"
+)
+
+
+def is_chitchat_recall_query(query: str) -> bool:
+    return bool(query and _CHITCHAT_RECALL_RE.search(query))
 
 
 class MemoryRetriever:
-    """Fast local FTS5 + recency + importance retriever with optional RRF vector fusion."""
+    """Fast local FTS5 + dynamic category weighting + recency + importance retriever with RRF slot."""
 
     def __init__(
         self,
@@ -49,6 +57,9 @@ class MemoryRetriever:
         fts_expr = tokenize_query_for_fts(query)
         fts_hits = await self.backend.fts_search(fts_expr, limit=40) if fts_expr else []
 
+        categories = {c.category_key: c for c in await self.backend.list_categories()}
+        recall_chitchat = is_chitchat_recall_query(query)
+
         now = time.time()
         candidate_meta: Dict[Tuple[str, str], RetrievedMemory] = {}
         fts_ranks: Dict[Tuple[str, str], int] = {}
@@ -56,7 +67,14 @@ class MemoryRetriever:
         for rank_idx, (item_id, item_type, fts_norm) in enumerate(fts_hits, start=1):
             if item_type == "fact" and item_id in excluded:
                 continue
-            mem = await self._load_active_item(item_id, item_type, fts_norm=fts_norm, now=now)
+            mem = await self._load_active_item(
+                item_id,
+                item_type,
+                fts_norm=fts_norm,
+                now=now,
+                categories=categories,
+                recall_chitchat=recall_chitchat,
+            )
             if mem is None:
                 continue
             key = (item_type, item_id)
@@ -91,7 +109,12 @@ class MemoryRetriever:
                         vector_ranks[key] = rank_idx
                         if key not in candidate_meta:
                             mem = await self._load_active_item(
-                                item_id, item_type, fts_norm=0.0, now=now
+                                item_id,
+                                item_type,
+                                fts_norm=0.0,
+                                now=now,
+                                categories=categories,
+                                recall_chitchat=recall_chitchat,
                             )
                             if mem is not None:
                                 candidate_meta[key] = mem
@@ -111,7 +134,6 @@ class MemoryRetriever:
                     rrf_score += 1.0 / (_RRF_K + fts_ranks[key])
                 if key in vector_ranks:
                     rrf_score += 1.0 / (_RRF_K + vector_ranks[key])
-                # Blend slight recency/importance tie-breaker
                 mem.score = rrf_score + 0.002 * mem.score
                 results.append(mem)
         else:
@@ -121,6 +143,20 @@ class MemoryRetriever:
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         return results[:top_k], elapsed_ms
 
+    def _category_params(
+        self,
+        category_key: str,
+        categories: Dict[str, MemoryCategory],
+        *,
+        recall_chitchat: bool,
+    ) -> Tuple[float, float]:
+        cat = categories.get(category_key)
+        weight = cat.retrieval_weight if cat else 0.85
+        decay = cat.decay_rate if cat else 0.05
+        if category_key == "chitchat" and recall_chitchat:
+            weight = max(weight, 1.05)
+        return weight, decay
+
     async def _load_active_item(
         self,
         item_id: str,
@@ -128,36 +164,70 @@ class MemoryRetriever:
         *,
         fts_norm: float,
         now: float,
+        categories: Dict[str, MemoryCategory],
+        recall_chitchat: bool,
     ) -> Optional[RetrievedMemory]:
         if item_type == "fact":
             fact = await self.backend.get_fact(item_id)
             if fact is None or fact.status != "active":
                 return None
+            weight, decay = self._category_params(
+                fact.category, categories, recall_chitchat=recall_chitchat
+            )
             days_ago = max(0.0, (now - fact.updated_at) / 86400.0)
-            recency = math.exp(-0.05 * days_ago)
-            score = 0.55 * fts_norm + 0.25 * recency + 0.20 * fact.importance
+            recency = math.exp(-decay * days_ago)
+            base_score = 0.55 * fts_norm + 0.25 * recency + 0.20 * fact.importance
             return RetrievedMemory(
                 item_id=fact.fact_id,
                 item_type="fact",
                 content=fact.content,
                 category=fact.category,
                 importance=fact.importance,
-                score=score,
+                score=base_score * weight,
                 updated_at=fact.updated_at,
             )
 
-        ep = await self.backend.get_episode(item_id)
-        if ep is None or ep.status != "active":
-            return None
-        days_ago = max(0.0, (now - ep.time_end) / 86400.0)
-        recency = math.exp(-0.05 * days_ago)
-        score = 0.55 * fts_norm + 0.25 * recency + 0.20 * ep.importance
-        return RetrievedMemory(
-            item_id=ep.episode_id,
-            item_type="episode",
-            content=ep.summary,
-            category=ep.kind,
-            importance=ep.importance,
-            score=score,
-            updated_at=ep.time_end,
-        )
+        if item_type == "episode":
+            ep = await self.backend.get_episode(item_id)
+            if ep is None or ep.status != "active":
+                return None
+            cat_key = "chitchat" if ep.kind == "chitchat" else "work_log"
+            weight, decay = self._category_params(
+                cat_key, categories, recall_chitchat=recall_chitchat
+            )
+            days_ago = max(0.0, (now - ep.time_end) / 86400.0)
+            recency = math.exp(-decay * days_ago)
+            base_score = 0.55 * fts_norm + 0.25 * recency + 0.20 * ep.importance
+            return RetrievedMemory(
+                item_id=ep.episode_id,
+                item_type="episode",
+                content=ep.summary,
+                category=cat_key,
+                importance=ep.importance,
+                score=base_score * weight,
+                updated_at=ep.time_end,
+            )
+
+        if item_type == "message":
+            msg = await self.backend.get_message(int(item_id))
+            if msg is None:
+                return None
+            weight, decay = self._category_params(
+                "chitchat", categories, recall_chitchat=recall_chitchat
+            )
+            days_ago = max(0.0, (now - msg.created_at) / 86400.0)
+            recency = math.exp(-decay * days_ago)
+            # Keep hot message raw hits slightly below curated facts/episodes unless recalled explicitly
+            msg_boost = 0.95 if recall_chitchat else 0.75
+            base_score = 0.60 * fts_norm + 0.25 * recency + 0.15 * 0.5
+            return RetrievedMemory(
+                item_id=str(msg.msg_id),
+                item_type="message",
+                content=f"[历史对话/{msg.role}] {msg.content}",
+                category="chitchat",
+                importance=0.5,
+                score=base_score * weight * msg_boost,
+                updated_at=msg.created_at,
+            )
+
+        return None

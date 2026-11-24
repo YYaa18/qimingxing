@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from brain.config import ContextBudgetConfig
 from brain.context_store import ContextStore
-from brain.memory.models import MemoryFact, RetrievedMemory
+from brain.memory.models import MemoryCategory, MemoryFact, RetrievedMemory
 from brain.prompts import BASE_SYSTEM_PROMPT
 
 _ACTIVITY_INTENT_RE = re.compile(
@@ -117,6 +117,7 @@ class ContextBuilder:
         recent_messages: List[Dict[str, str]],
         recalled_memories: List[RetrievedMemory],
         context_store: ContextStore,
+        categories: Optional[Dict[str, MemoryCategory]] = None,
         retrieval_ms: float = 0.0,
         system_base_prompt: str = BASE_SYSTEM_PROMPT,
     ) -> BuiltContext:
@@ -126,7 +127,7 @@ class ContextBuilder:
         l0_text = system_base_prompt.strip()
         stats.l0_tokens = estimate_tokens(l0_text)
 
-        l1_block = self._render_l1_profile(core_facts)
+        l1_block = self._render_l1_profile(core_facts, categories=categories)
         stats.l1_tokens = estimate_tokens(l1_block)
 
         static_system_parts = [l0_text]
@@ -222,13 +223,30 @@ class ContextBuilder:
 
         return BuiltContext(messages=messages, stats=stats)
 
-    def _render_l1_profile(self, core_facts: List[MemoryFact]) -> str:
+    def _render_l1_profile(
+        self,
+        core_facts: List[MemoryFact],
+        *,
+        categories: Optional[Dict[str, MemoryCategory]] = None,
+    ) -> str:
         if not core_facts:
             return ""
+        # Filter by category registry when provided (skip non-L1 categories such as chitchat).
+        eligible = []
+        for fact in core_facts:
+            if fact.status != "active":
+                continue
+            if categories is not None and fact.category in categories:
+                if not categories[fact.category].inject_to_l1:
+                    continue
+            elif fact.category == "chitchat":
+                continue
+            eligible.append(fact)
+
         # Select highest-importance recent facts within budget, then sort deterministically by fact_id
         # so consecutive turns produce byte-identical static prefixes for KV Prefix Cache hits.
         ranked = sorted(
-            [f for f in core_facts if f.status == "active"],
+            eligible,
             key=lambda f: (f.importance, f.updated_at),
             reverse=True,
         )
@@ -256,7 +274,12 @@ class ContextBuilder:
         lines: List[str] = []
         used = 0
         for item in recalled:
-            tag = "事实" if item.item_type == "fact" else "情景"
+            if item.item_type == "fact":
+                tag = "事实"
+            elif item.item_type == "message":
+                tag = "历史对话"
+            else:
+                tag = "情景"
             line = f"- ({tag}/{item.category}) {item.content}"
             cost = estimate_tokens(line)
             if lines and used + cost > self.budget.l3_recall_tokens:

@@ -3,9 +3,12 @@ from __future__ import annotations
 from brain.config import MemoryConfig
 from brain.memory.backend import MemoryBackend
 from brain.memory.models import (
+    DEFAULT_MEMORY_CATEGORIES,
+    CategoryTier,
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
+    MemoryCategory,
     MemoryEpisode,
     MemoryFact,
     MemoryMutation,
@@ -15,6 +18,7 @@ from brain.memory.models import (
     new_episode_id,
     new_fact_id,
     new_session_id,
+    normalize_category_key,
     tokenize_for_fts,
     tokenize_query_for_fts,
 )
@@ -33,10 +37,13 @@ def create_memory_backend(config: MemoryConfig) -> MemoryBackend:
 
 
 __all__ = [
+    "CategoryTier",
+    "DEFAULT_MEMORY_CATEGORIES",
     "EpisodeKind",
     "EpisodeStatus",
     "FactStatus",
     "MemoryBackend",
+    "MemoryCategory",
     "MemoryEpisode",
     "MemoryFact",
     "MemoryMutation",
@@ -48,6 +55,7 @@ __all__ = [
     "new_episode_id",
     "new_fact_id",
     "new_session_id",
+    "normalize_category_key",
     "tokenize_for_fts",
     "tokenize_query_for_fts",
 ]
