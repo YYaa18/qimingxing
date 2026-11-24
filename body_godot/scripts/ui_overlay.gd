@@ -6,7 +6,6 @@ signal approval_decided(approval_id: String, turn_id: String, approved: bool)
 signal cancel_requested(turn_id: String)
 signal drop_queue_submitted(paths: Array[String])
 signal desktop_action_requested(action: String, path: String, media_type: String)
-signal text_submitted(text: String)
 
 const PIN_WINDOW_SCENE := preload("res://scenes/PinImageWindow.tscn")
 const VIEWPORT_WIDTH := 420.0
@@ -43,10 +42,6 @@ var _artifact_media_type: String = "file"
 
 var _controls_bar: HBoxContainer
 var _stop_btn: Button
-
-var _input_panel: PanelContainer
-var _input_edit: LineEdit
-var _send_btn: Button
 
 signal interaction_active_changed(active: bool)
 
@@ -187,42 +182,6 @@ func _build_ui() -> void:
 	_artifact_buttons_box = HBoxContainer.new()
 	_artifact_buttons_box.add_theme_constant_override("separation", 4)
 	art_col.add_child(_artifact_buttons_box)
-
-	# 4.5 Inline desktop text input capsule (toggled on click or tray menu)
-	_input_panel = PanelContainer.new()
-	_input_panel.add_theme_stylebox_override(
-		"panel", _make_card_style(Color(0.08, 0.12, 0.19, 0.94), Color(0.32, 0.84, 1.0, 0.80))
-	)
-	_input_panel.visible = false
-	_stack.add_child(_input_panel)
-
-	var input_row := HBoxContainer.new()
-	input_row.add_theme_constant_override("separation", 5)
-	_input_panel.add_child(input_row)
-
-	_input_edit = LineEdit.new()
-	_input_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_input_edit.placeholder_text = "输入想说的话… (Enter发送)"
-	_input_edit.add_theme_font_size_override("font_size", 12)
-	_input_edit.text_submitted.connect(func(_t: String) -> void: _submit_chat_input())
-	_input_edit.gui_input.connect(func(ev: InputEvent) -> void:
-		if ev is InputEventKey and ev.pressed and not ev.echo and (ev as InputEventKey).keycode == KEY_ESCAPE:
-			set_chat_input_visible(false)
-			_input_edit.accept_event()
-	)
-	input_row.add_child(_input_edit)
-
-	_send_btn = Button.new()
-	_send_btn.text = "发送"
-	_send_btn.add_theme_font_size_override("font_size", 12)
-	_send_btn.pressed.connect(_submit_chat_input)
-	input_row.add_child(_send_btn)
-
-	var close_input := Button.new()
-	close_input.text = "×"
-	close_input.add_theme_font_size_override("font_size", 12)
-	close_input.pressed.connect(func() -> void: set_chat_input_visible(false))
-	input_row.add_child(close_input)
 
 	# 5. Minimal emergency-stop capsule (hidden cleanly whenever idle)
 	_controls_bar = HBoxContainer.new()
@@ -441,51 +400,16 @@ func set_dock_tucked(tucked: bool) -> void:
 	_dock_tucked = tucked
 	if _controls_bar != null:
 		_controls_bar.visible = (not tucked) and _in_turn
-	if tucked and _input_panel != null:
-		_input_panel.visible = false
 	_emit_rects()
-
-
-func set_chat_input_visible(should_show: bool) -> void:
-	if _input_panel == null:
-		return
-	_input_panel.visible = should_show
-	if should_show:
-		if get_window() != null:
-			get_window().grab_focus()
-		if _input_edit != null:
-			_input_edit.call_deferred("grab_focus")
-	_emit_rects()
-
-
-func toggle_chat_input() -> bool:
-	set_chat_input_visible(not is_chat_input_visible())
-	return is_chat_input_visible()
-
-
-func is_chat_input_visible() -> bool:
-	return _input_panel != null and _input_panel.visible
-
-
-func _submit_chat_input() -> void:
-	if _input_edit == null:
-		return
-	var cleaned := _input_edit.text.strip_edges()
-	if cleaned == "":
-		return
-	_input_edit.text = ""
-	text_submitted.emit(cleaned)
-	_input_edit.call_deferred("grab_focus")
 
 
 func _collect_and_emit_rects() -> void:
 	var rects: Array[Rect2] = []
-	for ctrl in [_bubble_panel, _input_panel, _approval_panel, _drop_panel, _artifact_panel, _controls_bar]:
+	for ctrl in [_bubble_panel, _approval_panel, _drop_panel, _artifact_panel, _controls_bar]:
 		if ctrl != null and ctrl.visible:
 			rects.append(ctrl.get_global_rect())
 	var active := (
 		_in_turn
-		or (_input_panel != null and _input_panel.visible)
 		or (_approval_panel != null and _approval_panel.visible)
 		or (_drop_panel != null and _drop_panel.visible)
 		or (_artifact_panel != null and _artifact_panel.visible)

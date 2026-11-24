@@ -1,6 +1,7 @@
 extends Control
 
 const SETTINGS_SCENE := preload("res://scenes/SettingsWindow.tscn")
+const QUICK_ENTRY_SCENE := preload("res://scenes/QuickEntryWindow.tscn")
 const PREFS_PATH := "user://qimingxing_body_prefs.cfg"
 
 @onready var ws: Node = $WSClient
@@ -12,6 +13,9 @@ const PREFS_PATH := "user://qimingxing_body_prefs.cfg"
 var _http: HTTPRequest
 var _pending_http_label: String = ""
 var _settings_win: Window
+var _quick_entry_win: Window
+var _cached_active_profile: String = ""
+var _cached_profiles: Array = []
 var _shortcuts: Dictionary = {
 	"ptt_hotkey": "right_option",
 	"chat_input_hotkey": "option+space",
@@ -46,9 +50,7 @@ func _ready() -> void:
 
 	avatar.avatar_clicked.connect(func() -> void:
 		audio.play_earcon("done")
-		var opened := bool(overlay.call("toggle_chat_input"))
-		if opened:
-			overlay.show_transient_status("直接打字和我聊吧～（Enter 发送 / Esc 收起）", 2.2)
+		_toggle_quick_entry()
 	)
 	avatar.context_menu_requested.connect(func() -> void:
 		tray.call("popup_at_cursor")
@@ -70,7 +72,6 @@ func _ready() -> void:
 	overlay.cancel_requested.connect(_on_cancel_requested)
 	overlay.drop_queue_submitted.connect(_on_drop_submitted)
 	overlay.desktop_action_requested.connect(_on_desktop_action)
-	overlay.text_submitted.connect(_on_text_submitted)
 
 	tray.open_chat_input_requested.connect(_open_chat_input)
 	tray.open_settings_requested.connect(func() -> void: _open_settings_window(0))
@@ -100,6 +101,7 @@ func _ready() -> void:
 	)
 
 	call_deferred("_ensure_settings_window")
+	call_deferred("_ensure_quick_entry_window")
 
 
 func _load_audio_prefs() -> void:
@@ -176,7 +178,13 @@ func _on_envelope(event_type: String, turn_id: String, payload: Dictionary) -> v
 		"system.welcome":
 			var prof := str(payload.get("active_profile", ""))
 			if prof != "":
+				_cached_active_profile = prof
 				overlay.show_transient_status("启明星已上线 (%s)" % prof, 2.2)
+			var profs: Variant = payload.get("profiles", [])
+			if typeof(profs) == TYPE_ARRAY:
+				_cached_profiles = profs
+			if _quick_entry_win != null:
+				_quick_entry_win.call("sync_profiles", _cached_active_profile, _cached_profiles)
 			var welcome_sc: Variant = payload.get("shortcuts", {})
 			if typeof(welcome_sc) == TYPE_DICTIONARY:
 				_apply_shortcuts_payload(welcome_sc)
@@ -265,10 +273,26 @@ func _apply_shortcuts_payload(payload: Dictionary) -> void:
 	)
 
 
+func _ensure_quick_entry_window() -> Window:
+	if _quick_entry_win == null:
+		_quick_entry_win = QUICK_ENTRY_SCENE.instantiate() as Window
+		get_tree().root.add_child(_quick_entry_win)
+		_quick_entry_win.prompt_submitted.connect(_on_quick_entry_submitted)
+		_quick_entry_win.profile_selected.connect(_on_quick_entry_profile_selected)
+		_quick_entry_win.new_chat_requested.connect(_on_quick_entry_new_chat)
+		if not _cached_profiles.is_empty():
+			_quick_entry_win.call("sync_profiles", _cached_active_profile, _cached_profiles)
+	return _quick_entry_win
+
+
 func _open_chat_input() -> void:
-	if bool(avatar.call("is_docked_tucked")):
-		avatar.call("reset_to_default_position")
-	overlay.call("set_chat_input_visible", true)
+	var qe := _ensure_quick_entry_window()
+	qe.call("open_quick_entry")
+
+
+func _toggle_quick_entry() -> void:
+	var qe := _ensure_quick_entry_window()
+	qe.call("toggle_quick_entry")
 
 
 func _handle_shortcut_action(action: String) -> void:
@@ -282,11 +306,7 @@ func _handle_shortcut_action(action: String) -> void:
 
 	match action:
 		"chat_input":
-			if bool(avatar.call("is_docked_tucked")):
-				avatar.call("reset_to_default_position")
-			var opened := bool(overlay.call("toggle_chat_input"))
-			if opened:
-				overlay.show_transient_status("直接打字和我聊吧～（Enter 发送 / Esc 收起）", 2.0)
+			_toggle_quick_entry()
 		"cancel":
 			audio.stop_tts_immediately()
 			ws.send_event("input.cancel", {"reason": "godot_hotkey_cancel"})
@@ -395,14 +415,36 @@ func _key_name_to_keycode(key_name: String) -> int:
 	return KEY_NONE
 
 
-func _on_text_submitted(text: String) -> void:
+func _on_quick_entry_submitted(text: String, with_screen: bool, attached_paths: Array[String]) -> void:
 	if not bool(ws.call("is_connected_open")):
 		overlay.show_transient_status("尚未连接到启明星大脑，正在重连…", 3.0)
+		return
+	if not attached_paths.is_empty():
+		_on_drop_submitted(attached_paths)
+		await _http.request_completed
+	if not bool(ws.call("is_connected_open")):
 		return
 	audio.stop_tts_immediately()
 	var turn_id := "turn_godot_%d" % Time.get_ticks_msec()
 	avatar.set_avatar_state("thinking", "thinking")
-	ws.send_event("input.text", {"text": text}, turn_id)
+	if with_screen:
+		ws.send_event("input.action", {"action": "ask_with_screen", "data": {"text": text}}, turn_id)
+	else:
+		var final_text := text if text != "" else "请分析并总结我挂载的文件内容。"
+		ws.send_event("input.text", {"text": final_text}, turn_id)
+
+
+func _on_quick_entry_profile_selected(profile_name: String) -> void:
+	if profile_name == "" or not bool(ws.call("is_connected_open")):
+		return
+	ws.send_event("system.config_set", {"profile": profile_name})
+
+
+func _on_quick_entry_new_chat() -> void:
+	if not bool(ws.call("is_connected_open")):
+		return
+	ws.send_event("input.action", {"action": "clear_history"})
+	overlay.show_transient_status("已开启新对话", 1.8)
 
 
 func _on_drop_submitted(paths: Array[String]) -> void:
