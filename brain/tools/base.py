@@ -136,6 +136,10 @@ class Tool(ABC):
     def classify_risk(self, arguments: Dict[str, Any]) -> RiskLevel:
         return self.default_risk
 
+    def approval_scope_key(self, arguments: Dict[str, Any]) -> Optional[str]:
+        """Return session approval cache key for remember_for_session, or None to forbid caching."""
+        return self.name
+
     def format_status_label(self, arguments: Dict[str, Any]) -> str:
         return f"正在执行 {self.name}…"
 

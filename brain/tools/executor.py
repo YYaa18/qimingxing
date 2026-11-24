@@ -159,7 +159,10 @@ class ToolExecutor:
                         stopped_reason = "circuit_breaker"
                     continue
 
-                if risk == "confirm" and not ctx.is_session_approved(tc.name):
+                scope_key = tool.approval_scope_key(args)
+                if risk == "confirm" and not (
+                    scope_key is not None and ctx.is_session_approved(scope_key)
+                ):
                     summary = tool.format_approval_summary(args)
                     details = tool.format_approval_details(args)
                     await ctx.emit_status(
@@ -177,8 +180,8 @@ class ToolExecutor:
                     )
                     if ctx.is_cancelled():
                         raise asyncio.CancelledError("Turn cancelled during approval wait")
-                    if approved and remember:
-                        ctx.mark_session_approved(tc.name)
+                    if approved and remember and scope_key is not None:
+                        ctx.mark_session_approved(scope_key)
                     if not approved:
                         await ctx.emit_status(
                             "error",

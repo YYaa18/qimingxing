@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import signal
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,41 @@ logger = logging.getLogger("qimingxing.tools.shell")
 
 _CHAIN_OR_REDIRECT_TOKENS = (";", "&&", "||", "|", ">", "<", "`", "$(", "\n", "\r")
 _SENSITIVE_PATH_RE = re.compile(r"(\.ssh/|id_rsa|id_ed25519|config\.yaml|\.env\b)", re.IGNORECASE)
+_MUTATING_BINARIES = {
+    "rm",
+    "rmdir",
+    "mv",
+    "cp",
+    "chmod",
+    "chown",
+    "chgrp",
+    "kill",
+    "pkill",
+    "killall",
+    "tee",
+    "curl",
+    "wget",
+    "dd",
+    "truncate",
+    "unlink",
+    "ln",
+    "sh",
+    "bash",
+    "zsh",
+    "osascript",
+}
+_MUTATING_GIT_SUBCMDS = {
+    "push",
+    "reset",
+    "checkout",
+    "switch",
+    "clean",
+    "commit",
+    "rebase",
+    "merge",
+    "cherry-pick",
+    "restore",
+}
 
 
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
@@ -86,6 +122,38 @@ class ShellTool(Tool):
                 return "safe"
         return "confirm"
 
+    def approval_scope_key(self, arguments: Dict[str, Any]) -> Optional[str]:
+        """Bind remember_for_session to a narrow non-mutating command prefix; disable for mutating ops."""
+        cmd = str(arguments.get("command") or "").strip()
+        if not cmd or self.classify_risk(arguments) == "blocked":
+            return None
+        if any(tok in cmd for tok in _CHAIN_OR_REDIRECT_TOKENS):
+            return None
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError:
+            return None
+        if not tokens:
+            return None
+
+        prog = os.path.basename(tokens[0]).lower()
+        if prog in _MUTATING_BINARIES:
+            return None
+        sub = tokens[1].lower() if len(tokens) >= 2 else ""
+        if prog == "git" and sub in _MUTATING_GIT_SUBCMDS:
+            return None
+        if prog in ("sed",) and any("-i" in t for t in tokens[1:]):
+            return None
+        if prog in ("pip", "pip3", "npm", "pnpm", "yarn") and sub in ("install", "uninstall", "add", "remove"):
+            return None
+        if prog == "uv" and sub in ("add", "remove", "sync", "pip"):
+            return None
+        if prog in ("python", "python3", "node", "ruby", "perl") and sub in ("-c", "-e"):
+            return None
+
+        prefix_part = f"{tokens[0]} {tokens[1]}" if len(tokens) >= 2 and not tokens[1].startswith("/") else tokens[0]
+        return f"{self.name}:{prefix_part}"
+
     def format_status_label(self, arguments: Dict[str, Any]) -> str:
         cmd = str(arguments.get("command") or "").strip()[:36]
         return f"正在执行命令：{cmd}"
@@ -99,6 +167,7 @@ class ShellTool(Tool):
             "command": str(arguments.get("command") or "").strip(),
             "cwd": self._resolve_cwd(arguments.get("cwd")),
             "timeout_sec": self.config.timeout_sec,
+            "allow_remember": self.approval_scope_key(arguments) is not None,
         }
 
     async def execute(

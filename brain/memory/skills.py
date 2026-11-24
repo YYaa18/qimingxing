@@ -22,6 +22,7 @@ logger = logging.getLogger("qimingxing.memory.skills")
 _EXPLICIT_LEARN_RE = re.compile(
     r"(记住这个(操作|流程|步骤|技能)|保存为技能|以后就这样做|learn this skill)"
 )
+_NON_SKILL_SEARCH_TOOLS = {"web_search", "web_fetch", "work_history_inspect"}
 
 _SKILL_DISTILL_PROMPT = """你是一个严谨的「过程性技能（Procedural Skill）提炼器」。你的任务是从启明星刚刚成功完成的一次多步工具调用轨迹中，去噪并提炼出可跨会话复用的标准化操作经验。
 
@@ -113,9 +114,11 @@ class SkillManager:
             return False
         if _EXPLICIT_LEARN_RE.search(user_text or ""):
             return True
-        if len(ok_steps) >= 2:
+        # P4-03: Avoid polluting memory_skills with plain web_search/web_fetch queries unless user explicitly instructs
+        action_steps = [s for s in ok_steps if s.tool_name not in _NON_SKILL_SEARCH_TOOLS]
+        if len(action_steps) >= 2:
             return True
-        if any(s.tool_name == "shell_exec" for s in ok_steps):
+        if len(action_steps) >= 1 and len(ok_steps) >= 2:
             return True
         return False
 

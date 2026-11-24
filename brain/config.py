@@ -48,6 +48,9 @@ class ProfileConfig:
     temperature: float = 0.7
     timeout_seconds: float = 30.0
     supports_vision: bool = False
+    input_cny_per_1m: Optional[float] = None
+    cache_hit_cny_per_1m: Optional[float] = None
+    output_cny_per_1m: Optional[float] = None
 
     def to_public(self) -> ProfileInfo:
         """Return safe public metadata without secret api_key."""
@@ -183,15 +186,6 @@ class ShellToolConfig:
 
 
 @dataclass
-class ComputerUseToolConfig:
-    enabled: bool = False
-    max_steps: int = 15
-    require_session_approval: bool = True
-    corner_kill_switch: bool = True
-    action_delay_ms: int = 350
-
-
-@dataclass
 class SkillsConfig:
     auto_learn: bool = True
     max_recalled_skills: int = 2
@@ -213,7 +207,6 @@ class ToolsConfig:
     approval_timeout_sec: int = 60
     web_search: WebSearchToolConfig = field(default_factory=WebSearchToolConfig)
     shell: ShellToolConfig = field(default_factory=ShellToolConfig)
-    computer_use: ComputerUseToolConfig = field(default_factory=ComputerUseToolConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     usage_alert: UsageAlertConfig = field(default_factory=UsageAlertConfig)
 
@@ -300,6 +293,9 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     for name, item in (raw.get("profiles") or {}).items():
         raw_key = str(item.get("api_key", "") or "")
         expanded_key = _expand_env_vars(raw_key)
+        raw_in = item.get("input_cny_per_1m")
+        raw_hit = item.get("cache_hit_cny_per_1m")
+        raw_out = item.get("output_cny_per_1m")
         profiles[name] = ProfileConfig(
             name=name,
             label=str(item.get("label", name)),
@@ -310,6 +306,9 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
             temperature=float(item.get("temperature", 0.7)),
             timeout_seconds=float(item.get("timeout_seconds", 30.0)),
             supports_vision=bool(item.get("supports_vision", False)),
+            input_cny_per_1m=float(raw_in) if raw_in is not None else None,
+            cache_hit_cny_per_1m=float(raw_hit) if raw_hit is not None else None,
+            output_cny_per_1m=float(raw_out) if raw_out is not None else None,
         )
 
     default_profile = str(raw.get("default_profile", ""))
@@ -392,7 +391,6 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     ws_raw = tools_raw.get("web_search") or {}
     ws_key = _expand_env_vars(str(ws_raw.get("api_key", "") or "")) or ocr_key
     shell_raw = tools_raw.get("shell") or {}
-    cu_raw = tools_raw.get("computer_use") or {}
     skills_raw = tools_raw.get("skills") or {}
     usage_raw = tools_raw.get("usage_alert") or {}
     learn_prof = str(skills_raw.get("learn_profile", ext_profile))
@@ -421,13 +419,6 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
             timeout_sec=int(shell_raw.get("timeout_sec", 30)),
             default_cwd=str(shell_raw.get("default_cwd", "~")),
             max_output_chars=int(shell_raw.get("max_output_chars", 4000)),
-        ),
-        computer_use=ComputerUseToolConfig(
-            enabled=bool(cu_raw.get("enabled", False)),
-            max_steps=int(cu_raw.get("max_steps", 15)),
-            require_session_approval=bool(cu_raw.get("require_session_approval", True)),
-            corner_kill_switch=bool(cu_raw.get("corner_kill_switch", True)),
-            action_delay_ms=int(cu_raw.get("action_delay_ms", 350)),
         ),
         skills=SkillsConfig(
             auto_learn=bool(skills_raw.get("auto_learn", True)),

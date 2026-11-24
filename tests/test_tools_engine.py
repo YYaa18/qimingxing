@@ -367,3 +367,72 @@ def test_hub_approval_allow_deny_remember_and_turn_cancel() -> None:
             ended = _recv_until(ws, "output.turn_end")
             assert ended["payload"]["finish_reason"] == "cancelled"
             assert len(confirm_tool.calls) == 2
+
+
+async def test_p4_01_shell_remember_for_session_is_scoped_and_blocks_mutating(tmp_path) -> None:
+    from brain.config import ShellToolConfig
+    from brain.tools.shell_tool import ShellTool
+
+    shell = ShellTool(ShellToolConfig(default_cwd=str(tmp_path)))
+
+    # Read-only / benign commands get a narrow command-prefix scope key
+    assert shell.approval_scope_key({"command": "python3 --version"}) == "shell_exec:python3 --version"
+    assert shell.format_approval_details({"command": "python3 --version"})["allow_remember"] is True
+
+    # Mutating / chained / arbitrary code commands cannot be cached in session
+    assert shell.approval_scope_key({"command": "rm -f tmp.txt"}) is None
+    assert shell.approval_scope_key({"command": "echo hi > a.txt"}) is None
+    assert shell.approval_scope_key({"command": "git push origin main"}) is None
+    assert shell.approval_scope_key({"command": "python3 -c 'print(1)'"}) is None
+    assert shell.format_approval_details({"command": "rm -f tmp.txt"})["allow_remember"] is False
+
+    # Verify ToolExecutor enforces scoped cache: approving python3 --version does NOT auto-approve other commands
+    cfg = AppConfig()
+    cfg.tools.shell = ShellToolConfig(default_cwd=str(tmp_path))
+    reg = ToolRegistry([shell])
+    router = ScriptedToolRouter(
+        cfg,
+        [
+            LLMCompletionResult(
+                tool_calls=[ToolCallRequest(id="s1", name="shell_exec", arguments_json='{"command":"python3 --version"}')]
+            ),
+            LLMCompletionResult(
+                tool_calls=[ToolCallRequest(id="s2", name="shell_exec", arguments_json='{"command":"python3 --version"}')]
+            ),
+            LLMCompletionResult(
+                tool_calls=[ToolCallRequest(id="s3", name="shell_exec", arguments_json='{"command":"echo hi > out.txt"}')]
+            ),
+            LLMCompletionResult(
+                tool_calls=[ToolCallRequest(id="s4", name="shell_exec", arguments_json='{"command":"echo hi > out.txt"}')]
+            ),
+            LLMCompletionResult(content="done"),
+        ],
+    )
+    approval_prompts: List[str] = []
+
+    async def fake_approval(tool_name, risk_level, summary, details, timeout_sec):
+        approval_prompts.append(str(details.get("command")))
+        # Client even tries sending remember=True for every prompt
+        return True, True
+
+    ctx = ToolExecutionContext(
+        turn_id="t_scope",
+        session_id="s1",
+        config=cfg,
+        on_approval=fake_approval,
+    )
+    res = await ToolExecutor(router).run(
+        messages=[{"role": "user", "content": "test scoped approval"}],
+        registry=reg,
+        ctx=ctx,
+        max_steps=8,
+    )
+    assert res.stopped_reason == "completed"
+    # 1 prompt for python3 --version (2nd skipped due to narrow scope match),
+    # then BOTH echo hi > out.txt calls must prompt even if client claimed remember=True!
+    assert approval_prompts == [
+        "python3 --version",
+        "echo hi > out.txt",
+        "echo hi > out.txt",
+    ]
+    assert (tmp_path / "out.txt").exists()

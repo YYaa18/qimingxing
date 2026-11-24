@@ -20,19 +20,34 @@ def estimate_cny_cost(
     prompt_tokens: int,
     cache_hit_tokens: int,
     completion_tokens: int,
+    profile: Optional[ProfileConfig] = None,
 ) -> float:
     """Estimate RMB (CNY) API cost for soft usage alerts (does not enforce hard caps)."""
     miss_tokens = max(0, prompt_tokens - max(0, cache_hit_tokens))
     hit_tokens = max(0, min(prompt_tokens, cache_hit_tokens))
     out_tokens = max(0, completion_tokens)
     lower = (model or "").lower()
-    if "reasoner" in lower:
-        # DeepSeek reasoner reference rates
-        return (miss_tokens * 2.0 + hit_tokens * 0.2 + out_tokens * 8.0) / 1_000_000.0
     if "gpt-4o" in lower or "claude" in lower:
-        return (miss_tokens * 18.0 + hit_tokens * 9.0 + out_tokens * 72.0) / 1_000_000.0
-    # Default DeepSeek Chat/Flash rates (approx CNY per 1M tokens)
-    return (miss_tokens * 2.0 + hit_tokens * 0.2 + out_tokens * 8.0) / 1_000_000.0
+        default_in, default_hit, default_out = 18.0, 9.0, 72.0
+    else:
+        default_in, default_hit, default_out = 2.0, 0.2, 8.0
+
+    in_rate = (
+        profile.input_cny_per_1m
+        if profile is not None and profile.input_cny_per_1m is not None
+        else default_in
+    )
+    hit_rate = (
+        profile.cache_hit_cny_per_1m
+        if profile is not None and profile.cache_hit_cny_per_1m is not None
+        else default_hit
+    )
+    out_rate = (
+        profile.output_cny_per_1m
+        if profile is not None and profile.output_cny_per_1m is not None
+        else default_out
+    )
+    return (miss_tokens * in_rate + hit_tokens * hit_rate + out_tokens * out_rate) / 1_000_000.0
 
 
 @dataclass
@@ -70,7 +85,12 @@ class LLMCompletionResult:
     usage: LLMUsage = field(default_factory=LLMUsage)
 
 
-def _parse_usage(raw_usage: Dict[str, Any], model: str, profile_name: str) -> LLMUsage:
+def _parse_usage(
+    raw_usage: Dict[str, Any],
+    model: str,
+    profile_name: str,
+    profile: Optional[ProfileConfig] = None,
+) -> LLMUsage:
     prompt_tokens = int(raw_usage.get("prompt_tokens", 0) or 0)
     details = raw_usage.get("prompt_tokens_details") or {}
     cache_hit = int(
@@ -88,7 +108,7 @@ def _parse_usage(raw_usage: Dict[str, Any], model: str, profile_name: str) -> LL
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         estimated_cost_cny=estimate_cny_cost(
-            model, prompt_tokens, cache_hit, completion_tokens
+            model, prompt_tokens, cache_hit, completion_tokens, profile=profile
         ),
         model=model,
         profile=profile_name,
@@ -250,7 +270,7 @@ class LLMRouter:
                         continue
                     if isinstance(chunk.get("usage"), dict):
                         self.last_usage = _parse_usage(
-                            chunk["usage"], profile.model, profile.name
+                            chunk["usage"], profile.model, profile.name, profile=profile
                         )
                     choices = chunk.get("choices") or []
                     if not choices:
@@ -555,7 +575,9 @@ class LLMRouter:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(chunk.get("usage"), dict):
-                        usage = _parse_usage(chunk["usage"], profile.model, profile.name)
+                        usage = _parse_usage(
+                            chunk["usage"], profile.model, profile.name, profile=profile
+                        )
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue

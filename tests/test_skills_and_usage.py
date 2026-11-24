@@ -308,3 +308,80 @@ def test_cli_skills_history_and_usage(tmp_path: Path, capsys) -> None:
 
     assert cli_main(["--db", str(db_path), "skills", "delete", "--id", "skill_cli_1"]) == 0
     assert "Deprecated skill skill_cli_1" in capsys.readouterr().out
+
+
+async def test_p4_03_pure_web_search_does_not_auto_learn_without_explicit_command(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "p4_03.db")
+    await store.initialize()
+    cfg = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="m")},
+    )
+    mgr = SkillManager(store, LLMRouter(cfg), SkillsConfig(auto_learn=True))
+
+    search_only = [
+        ToolTraceStep(1, "web_search", {"query": "Python 3.12"}, "safe", "ok", "5 hits"),
+        ToolTraceStep(2, "web_fetch", {"url": "https://docs.python.org"}, "safe", "ok", "fetched"),
+    ]
+    assert mgr.should_learn("帮我查一下 Python 3.12 新特性", search_only) is False
+    assert mgr.should_learn("记住这个操作流程，以后按这样查", search_only) is True
+
+    shell_steps = [
+        ToolTraceStep(1, "shell_exec", {"command": "git status"}, "safe", "ok", "clean"),
+        ToolTraceStep(2, "shell_exec", {"command": "pytest -q"}, "confirm", "ok", "58 passed"),
+    ]
+    assert mgr.should_learn("跑一下状态和测试", shell_steps) is True
+    await store.close()
+
+
+def test_p4_04_per_profile_pricing_override() -> None:
+    from brain.llm_router import estimate_cny_cost
+
+    custom_prof = ProfileConfig(
+        name="custom_paid",
+        label="Custom",
+        provider="openai_compatible",
+        model="deepseek-chat",
+        input_cny_per_1m=10.0,
+        cache_hit_cny_per_1m=1.0,
+        output_cny_per_1m=20.0,
+    )
+    # 1M total prompt (500k miss * 10 + 500k hit * 1) + 500k out * 20 = 5.0 + 0.5 + 10.0 = 15.5 CNY
+    cost = estimate_cny_cost(
+        "deepseek-chat",
+        prompt_tokens=1_000_000,
+        cache_hit_tokens=500_000,
+        completion_tokens=500_000,
+        profile=custom_prof,
+    )
+    assert abs(cost - 15.5) < 1e-9
+
+    # Also verify load_config ignores legacy computer_use block cleanly & parses profile pricing overrides
+    import yaml, tempfile
+    from brain.config import load_config
+
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as tf:
+        yaml.safe_dump(
+            {
+                "default_profile": "p1",
+                "profiles": {
+                    "p1": {
+                        "label": "P1",
+                        "provider": "openai_compatible",
+                        "model": "m1",
+                        "input_cny_per_1m": 4.5,
+                        "cache_hit_cny_per_1m": 0.5,
+                        "output_cny_per_1m": 12.0,
+                    }
+                },
+                "tools": {"computer_use": {"enabled": False}},
+            },
+            tf,
+        )
+        cfg_path = Path(tf.name)
+    loaded = load_config(cfg_path)
+    cfg_path.unlink(missing_ok=True)
+    assert not hasattr(loaded.tools, "computer_use")
+    assert loaded.profiles["p1"].input_cny_per_1m == 4.5
+    assert loaded.profiles["p1"].cache_hit_cny_per_1m == 0.5
+    assert loaded.profiles["p1"].output_cny_per_1m == 12.0

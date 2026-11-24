@@ -262,8 +262,13 @@
       }
     }, 1000);
 
+    const allowRemember = detailsObj.allow_remember !== false;
     actionsRow.appendChild(approveBtn);
-    actionsRow.appendChild(rememberBtn);
+    if (allowRemember) {
+      actionsRow.appendChild(rememberBtn);
+    } else {
+      rememberBtn.disabled = true;
+    }
     actionsRow.appendChild(denyBtn);
     actionsRow.appendChild(resultBadge);
 
