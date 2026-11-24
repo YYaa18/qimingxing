@@ -284,6 +284,15 @@ class GodotConfig:
 
 
 @dataclass
+class ShortcutsConfig:
+    ptt_hotkey: str = "right_option"
+    chat_input_hotkey: str = "option+space"
+    cancel_hotkey: str = "option+esc"
+    toggle_dock_hotkey: str = "option+h"
+    settings_hotkey: str = "option+k"
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     default_profile: str = "mock_local"
@@ -298,6 +307,7 @@ class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     batch_context: BatchContextConfig = field(default_factory=BatchContextConfig)
     godot: GodotConfig = field(default_factory=GodotConfig)
+    shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
     _secrets: List[str] = field(default_factory=list, repr=False)
 
     def collect_secrets(self) -> List[str]:
@@ -607,6 +617,20 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         ambient_duck_db=float(godot_raw.get("ambient_duck_db", -12.0)),
     )
 
+    shortcuts_raw = raw.get("shortcuts") or {}
+    if not isinstance(shortcuts_raw, dict):
+        shortcuts_raw = {}
+    ptt_shortcut = str(shortcuts_raw.get("ptt_hotkey") or audio.ptt.hotkey or "right_option").strip().lower()
+    if ptt_shortcut:
+        audio.ptt.hotkey = ptt_shortcut
+    shortcuts = ShortcutsConfig(
+        ptt_hotkey=ptt_shortcut or "right_option",
+        chat_input_hotkey=str(shortcuts_raw.get("chat_input_hotkey", "option+space") or "option+space").strip().lower(),
+        cancel_hotkey=str(shortcuts_raw.get("cancel_hotkey", "option+esc") or "option+esc").strip().lower(),
+        toggle_dock_hotkey=str(shortcuts_raw.get("toggle_dock_hotkey", "option+h") or "option+h").strip().lower(),
+        settings_hotkey=str(shortcuts_raw.get("settings_hotkey", "option+k") or "option+k").strip().lower(),
+    )
+
     return AppConfig(
         server=server,
         default_profile=default_profile,
@@ -621,6 +645,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         audio=audio,
         batch_context=batch_context,
         godot=godot,
+        shortcuts=shortcuts,
     )
 
 
@@ -718,6 +743,13 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
             "auto_hide_on_capture": cfg.godot.auto_hide_on_capture,
             "earcons_enabled": cfg.godot.earcons_enabled,
             "ambient_duck_db": cfg.godot.ambient_duck_db,
+        },
+        "shortcuts": {
+            "ptt_hotkey": cfg.shortcuts.ptt_hotkey,
+            "chat_input_hotkey": cfg.shortcuts.chat_input_hotkey,
+            "cancel_hotkey": cfg.shortcuts.cancel_hotkey,
+            "toggle_dock_hotkey": cfg.shortcuts.toggle_dock_hotkey,
+            "settings_hotkey": cfg.shortcuts.settings_hotkey,
         },
     }
 
@@ -860,6 +892,32 @@ def save_settings_to_yaml(
                     godot_sec[k] = bool(godot_up[k])
             if "ambient_duck_db" in godot_up and godot_up["ambient_duck_db"] is not None:
                 godot_sec["ambient_duck_db"] = float(godot_up["ambient_duck_db"])
+
+    shortcuts_up = updates.get("shortcuts")
+    if isinstance(shortcuts_up, dict):
+        sc_sec = raw.setdefault("shortcuts", {})
+        if isinstance(sc_sec, dict):
+            for k in (
+                "ptt_hotkey",
+                "chat_input_hotkey",
+                "cancel_hotkey",
+                "toggle_dock_hotkey",
+                "settings_hotkey",
+            ):
+                if k in shortcuts_up and shortcuts_up[k] is not None:
+                    sc_sec[k] = str(shortcuts_up[k]).strip().lower()
+            if "ptt_hotkey" in sc_sec and sc_sec["ptt_hotkey"]:
+                audio_sec = raw.setdefault("audio", {})
+                if isinstance(audio_sec, dict):
+                    ptt_sec = audio_sec.setdefault("ptt", {})
+                    if isinstance(ptt_sec, dict):
+                        ptt_sec["hotkey"] = sc_sec["ptt_hotkey"]
+    elif isinstance(audio_up, dict) and isinstance(audio_up.get("ptt"), dict):
+        ptt_hk = audio_up["ptt"].get("hotkey")
+        if ptt_hk is not None and str(ptt_hk).strip():
+            sc_sec = raw.setdefault("shortcuts", {})
+            if isinstance(sc_sec, dict):
+                sc_sec["ptt_hotkey"] = str(ptt_hk).strip().lower()
 
     tmp_path = target.with_suffix(".yaml.tmp")
     dumped = yaml.safe_dump(raw, allow_unicode=True, sort_keys=False)

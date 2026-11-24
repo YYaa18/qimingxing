@@ -2,6 +2,7 @@ extends Node
 
 signal open_chat_input_requested
 signal open_settings_requested
+signal open_shortcuts_requested
 signal toggle_roam_requested(enabled: bool)
 signal toggle_earcons_requested(enabled: bool)
 signal toggle_ambient_requested(enabled: bool)
@@ -20,6 +21,7 @@ const ID_RESET_POS := 5
 const ID_RELOAD_MCP := 6
 const ID_OPEN_WEB := 7
 const ID_CHAT_INPUT := 8
+const ID_SHORTCUTS := 9
 const ID_QUIT := 99
 
 var _indicator: StatusIndicator
@@ -33,6 +35,7 @@ func _ready() -> void:
 
 	_menu.add_item("💬 文字对话输入框", ID_CHAT_INPUT)
 	_menu.add_item("⚙️ 设置与 API Key…", ID_SETTINGS)
+	_menu.add_item("⌨️ 快捷键管理…", ID_SHORTCUTS)
 	_menu.add_separator()
 	_menu.add_check_item("屏幕自由漫步", ID_ROAM)
 	_menu.add_check_item("状态微音效", ID_EARCONS)
@@ -89,12 +92,36 @@ func sync_toggles(roam_on: bool, earcons_on: bool, ambient_on: bool) -> void:
 	_menu.set_item_checked(_menu.get_item_index(ID_AMBIENT), ambient_on)
 
 
+func sync_shortcut_hints(chat_hk: String, ptt_hk: String) -> void:
+	var chat_clean := chat_hk.strip_edges()
+	var ptt_clean := ptt_hk.strip_edges()
+	if _menu != null:
+		var idx := _menu.get_item_index(ID_CHAT_INPUT)
+		if idx >= 0:
+			if chat_clean != "" and not (chat_clean.to_lower() in ["disabled", "off", "none"]):
+				_menu.set_item_text(idx, "💬 文字对话输入框 (%s)" % chat_clean)
+			else:
+				_menu.set_item_text(idx, "💬 文字对话输入框")
+	if _indicator != null:
+		var tip := "启明星（Qimingxing）桌面数字人"
+		var parts: Array[String] = []
+		if chat_clean != "" and not (chat_clean.to_lower() in ["disabled", "off", "none"]):
+			parts.append("文字: %s" % chat_clean)
+		if ptt_clean != "" and not (ptt_clean.to_lower() in ["disabled", "off", "none"]):
+			parts.append("语音: %s" % ptt_clean)
+		if not parts.is_empty():
+			tip += "\n快捷键: " + " | ".join(parts)
+		_indicator.tooltip = tip
+
+
 func _on_menu_id_pressed(id: int) -> void:
 	match id:
 		ID_CHAT_INPUT:
 			open_chat_input_requested.emit()
 		ID_SETTINGS:
 			open_settings_requested.emit()
+		ID_SHORTCUTS:
+			open_shortcuts_requested.emit()
 		ID_ROAM:
 			var idx := _menu.get_item_index(ID_ROAM)
 			var next_val := not _menu.is_item_checked(idx)

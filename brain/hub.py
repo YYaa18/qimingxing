@@ -88,10 +88,12 @@ from protocol.models import (
     SystemConfigSetPayload,
     SystemErrorPayload,
     SystemHelloPayload,
+    SystemHotkeyTriggeredPayload,
     SystemPingPayload,
     SystemPongPayload,
     SystemPrivacySetPayload,
     SystemPrivacyStatePayload,
+    SystemShortcutsSyncPayload,
     SystemWelcomePayload,
     ToolApprovalRequestPayload,
     ToolApprovalResponsePayload,
@@ -334,6 +336,24 @@ class Hub:
             )
             return
 
+        if isinstance(payload, SystemHotkeyTriggeredPayload):
+            logger.info(
+                "Received system.hotkey_triggered from %s action=%s hotkey=%s",
+                conn.client_id,
+                payload.action,
+                payload.hotkey,
+            )
+            if payload.action == "cancel":
+                await self._cancel_active_turn_or_bodies(conn, notify=True, target_turn_id=env.turn_id)
+            out_env = make_envelope("brain", "system.hotkey_triggered", payload)
+            for client in list(self.clients.values()):
+                if client.role in ("body", None):
+                    try:
+                        await client.send_envelope(out_env)
+                    except Exception:
+                        logger.debug("Failed broadcasting hotkey action to %s", client.client_id)
+            return
+
         if isinstance(payload, SystemConfigSetPayload):
             try:
                 self.llm_router.set_active_profile(payload.profile)
@@ -483,6 +503,7 @@ class Hub:
             server_version=SERVER_VERSION,
             active_profile=self.llm_router.active_profile,
             profiles=self.llm_router.list_public_profiles(),
+            shortcuts=self._build_shortcuts_sync_payload(),
         )
         await conn.send_envelope(make_envelope("brain", "system.welcome", welcome))
 
@@ -520,6 +541,32 @@ class Hub:
                     await self._send_welcome(client)
                 except Exception:
                     logger.debug("Failed sending welcome broadcast to %s", client.client_id)
+
+    def _build_shortcuts_sync_payload(self) -> SystemShortcutsSyncPayload:
+        sc = self.config.shortcuts
+        return SystemShortcutsSyncPayload(
+            ptt_hotkey=sc.ptt_hotkey or self.config.audio.ptt.hotkey,
+            chat_input_hotkey=sc.chat_input_hotkey,
+            cancel_hotkey=sc.cancel_hotkey,
+            toggle_dock_hotkey=sc.toggle_dock_hotkey,
+            settings_hotkey=sc.settings_hotkey,
+        )
+
+    async def _send_shortcuts_sync(self, conn: ClientConnection) -> None:
+        await conn.send_envelope(
+            make_envelope("brain", "system.shortcuts_sync", self._build_shortcuts_sync_payload())
+        )
+
+    async def _broadcast_shortcuts_sync(self) -> None:
+        payload = self._build_shortcuts_sync_payload()
+        for client in list(self.clients.values()):
+            if client.role == "senses":
+                try:
+                    await client.send_envelope(
+                        make_envelope("brain", "system.shortcuts_sync", payload)
+                    )
+                except Exception:
+                    logger.debug("Failed sending shortcuts_sync to %s", client.client_id)
 
     async def _cancel_active_turn_or_bodies(
         self,
@@ -661,6 +708,7 @@ class Hub:
             inbox_tool.config = fresh_cfg  # type: ignore[attr-defined]
         await self._broadcast_welcome_to_bodies()
         await self._broadcast_privacy_state()
+        await self._broadcast_shortcuts_sync()
 
     async def broadcast_tool_notice(self, tool: str, label: str) -> None:
         env = make_envelope(

@@ -123,11 +123,20 @@ class ProfileInfo(ProtocolModel):
     supports_vision: bool = False
 
 
+class SystemShortcutsSyncPayload(ProtocolModel):
+    ptt_hotkey: str = "right_option"
+    chat_input_hotkey: str = "option+space"
+    cancel_hotkey: str = "option+esc"
+    toggle_dock_hotkey: str = "option+h"
+    settings_hotkey: str = "option+k"
+
+
 class SystemWelcomePayload(ProtocolModel):
     server_version: str
     protocol_version: str = PROTOCOL_VERSION
     active_profile: str
     profiles: List[ProfileInfo] = Field(default_factory=list)
+    shortcuts: SystemShortcutsSyncPayload = Field(default_factory=SystemShortcutsSyncPayload)
 
 
 class SystemPingPayload(ProtocolModel):
@@ -163,6 +172,11 @@ class SystemPrivacyStatePayload(ProtocolModel):
     senses_connected: bool = False
     platform: str = "unknown"
     permissions: PermissionStatus = Field(default_factory=PermissionStatus)
+
+
+class SystemHotkeyTriggeredPayload(ProtocolModel):
+    action: Literal["chat_input", "cancel", "toggle_dock", "settings"]
+    hotkey: str = ""
     permission_hint: str = ""
     active_window_summary: str = ""
 
@@ -387,6 +401,8 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "system.error": SystemErrorPayload,
     "system.privacy_set": SystemPrivacySetPayload,
     "system.privacy_state": SystemPrivacyStatePayload,
+    "system.shortcuts_sync": SystemShortcutsSyncPayload,
+    "system.hotkey_triggered": SystemHotkeyTriggeredPayload,
     "system.capture_prepare": SystemCapturePreparePayload,
     "system.capture_done": SystemCaptureDonePayload,
     "input.text": InputTextPayload,

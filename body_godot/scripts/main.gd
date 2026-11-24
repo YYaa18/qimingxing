@@ -12,6 +12,14 @@ const PREFS_PATH := "user://qimingxing_body_prefs.cfg"
 var _http: HTTPRequest
 var _pending_http_label: String = ""
 var _settings_win: Window
+var _shortcuts: Dictionary = {
+	"ptt_hotkey": "right_option",
+	"chat_input_hotkey": "option+space",
+	"cancel_hotkey": "option+esc",
+	"toggle_dock_hotkey": "option+h",
+	"settings_hotkey": "option+k",
+}
+var _last_hotkey_trigger_ms: Dictionary = {}
 
 
 func _ready() -> void:
@@ -21,6 +29,7 @@ func _ready() -> void:
 
 	_load_audio_prefs()
 	tray.call("sync_toggles", avatar.call("is_roam_enabled"), audio.earcons_enabled, audio.call("is_ambient_enabled"))
+	tray.call("sync_shortcut_hints", str(_shortcuts.get("chat_input_hotkey", "")), str(_shortcuts.get("ptt_hotkey", "")))
 	overlay.call("set_avatar_scale", avatar.call("get_avatar_scale"))
 
 	ws.connected_changed.connect(func(ok: bool) -> void:
@@ -64,7 +73,8 @@ func _ready() -> void:
 	overlay.text_submitted.connect(_on_text_submitted)
 
 	tray.open_chat_input_requested.connect(_open_chat_input)
-	tray.open_settings_requested.connect(_open_settings_window)
+	tray.open_settings_requested.connect(func() -> void: _open_settings_window(0))
+	tray.open_shortcuts_requested.connect(func() -> void: _open_settings_window(3))
 	tray.toggle_roam_requested.connect(func(on: bool) -> void:
 		avatar.set_roam_enabled(on)
 		overlay.show_transient_status("桌面自由漫步: %s" % ("已开启" if on else "已暂停"), 1.8)
@@ -128,7 +138,7 @@ func _ensure_settings_window() -> Window:
 	return _settings_win
 
 
-func _open_settings_window() -> void:
+func _open_settings_window(initial_tab: int = 0) -> void:
 	var win := _ensure_settings_window()
 	win.call(
 		"open_settings",
@@ -136,7 +146,8 @@ func _open_settings_window() -> void:
 		avatar.call("get_avatar_scale"),
 		avatar.call("is_roam_enabled"),
 		audio.earcons_enabled,
-		audio.call("is_ambient_enabled")
+		audio.call("is_ambient_enabled"),
+		initial_tab
 	)
 
 
@@ -166,6 +177,13 @@ func _on_envelope(event_type: String, turn_id: String, payload: Dictionary) -> v
 			var prof := str(payload.get("active_profile", ""))
 			if prof != "":
 				overlay.show_transient_status("启明星已上线 (%s)" % prof, 2.2)
+			var welcome_sc: Variant = payload.get("shortcuts", {})
+			if typeof(welcome_sc) == TYPE_DICTIONARY:
+				_apply_shortcuts_payload(welcome_sc)
+		"system.shortcuts_sync":
+			_apply_shortcuts_payload(payload)
+		"system.hotkey_triggered":
+			_handle_shortcut_action(str(payload.get("action", "")))
 		"system.capture_prepare":
 			var hide_ms := int(payload.get("hide_ms", 150))
 			avatar.set_capture_hidden(true, maxf(1.5, float(hide_ms) / 1000.0 + 1.5))
@@ -236,10 +254,145 @@ func _on_cancel_requested(turn_id: String) -> void:
 	ws.send_event("input.cancel", {"reason": "godot_emergency_stop"}, turn_id)
 
 
+func _apply_shortcuts_payload(payload: Dictionary) -> void:
+	for k in ["ptt_hotkey", "chat_input_hotkey", "cancel_hotkey", "toggle_dock_hotkey", "settings_hotkey"]:
+		if payload.has(k):
+			_shortcuts[k] = str(payload.get(k, "")).strip_edges().to_lower()
+	tray.call(
+		"sync_shortcut_hints",
+		str(_shortcuts.get("chat_input_hotkey", "")),
+		str(_shortcuts.get("ptt_hotkey", ""))
+	)
+
+
 func _open_chat_input() -> void:
 	if bool(avatar.call("is_docked_tucked")):
 		avatar.call("reset_to_default_position")
 	overlay.call("set_chat_input_visible", true)
+
+
+func _handle_shortcut_action(action: String) -> void:
+	if action == "":
+		return
+	var now_ticks := Time.get_ticks_msec()
+	var prev_ticks := int(_last_hotkey_trigger_ms.get(action, -10000))
+	if now_ticks - prev_ticks < 280:
+		return
+	_last_hotkey_trigger_ms[action] = now_ticks
+
+	match action:
+		"chat_input":
+			if bool(avatar.call("is_docked_tucked")):
+				avatar.call("reset_to_default_position")
+			var opened := bool(overlay.call("toggle_chat_input"))
+			if opened:
+				overlay.show_transient_status("直接打字和我聊吧～（Enter 发送 / Esc 收起）", 2.0)
+		"cancel":
+			audio.stop_tts_immediately()
+			ws.send_event("input.cancel", {"reason": "godot_hotkey_cancel"})
+			overlay.show_transient_status("已通过快捷键急停当前播报/任务", 1.8)
+		"toggle_dock":
+			var hidden := bool(avatar.call("toggle_edge_hide"))
+			overlay.show_transient_status("已一键贴边隐藏" if hidden else "已恢复默认位置", 1.8)
+		"settings":
+			_open_settings_window(3)
+
+
+func _input(event: InputEvent) -> void:
+	if not (event is InputEventKey):
+		return
+	var ev := event as InputEventKey
+	if not ev.pressed or ev.echo:
+		return
+	var mapping := [
+		["chat_input", str(_shortcuts.get("chat_input_hotkey", ""))],
+		["cancel", str(_shortcuts.get("cancel_hotkey", ""))],
+		["toggle_dock", str(_shortcuts.get("toggle_dock_hotkey", ""))],
+		["settings", str(_shortcuts.get("settings_hotkey", ""))],
+	]
+	for entry in mapping:
+		if _match_hotkey_event(ev, str(entry[1])):
+			_handle_shortcut_action(str(entry[0]))
+			get_viewport().set_input_as_handled()
+			return
+
+
+func _match_hotkey_event(ev: InputEventKey, spec_str: String) -> bool:
+	var norm := spec_str.strip_edges().to_lower()
+	if norm == "" or norm in ["disabled", "off", "none"]:
+		return false
+	var parts := norm.split("+", false)
+	if parts.is_empty():
+		return false
+	var key_name := parts[parts.size() - 1].strip_edges()
+	var target_key := _key_name_to_keycode(key_name)
+	if target_key == KEY_NONE:
+		return false
+
+	var want_alt := false
+	var want_ctrl := false
+	var want_cmd := false
+	var want_shift := false
+	for i in range(parts.size() - 1):
+		var m := parts[i].strip_edges()
+		if m in ["option", "alt", "left_option", "right_option", "left_alt", "right_alt"]:
+			want_alt = true
+		elif m in ["ctrl", "control", "left_ctrl", "right_ctrl"]:
+			want_ctrl = true
+		elif m in ["cmd", "command", "left_cmd", "right_cmd"]:
+			want_cmd = true
+		elif m == "shift":
+			want_shift = true
+		else:
+			return false
+
+	if ev.alt_pressed != want_alt or ev.ctrl_pressed != want_ctrl or ev.meta_pressed != want_cmd or ev.shift_pressed != want_shift:
+		return false
+	var is_fn_key := target_key >= KEY_F1 and target_key <= KEY_F12
+	if not (want_alt or want_ctrl or want_cmd or is_fn_key):
+		return false
+	return ev.keycode == target_key or ev.physical_keycode == target_key
+
+
+func _key_name_to_keycode(key_name: String) -> int:
+	match key_name:
+		"space":
+			return KEY_SPACE
+		"esc", "escape":
+			return KEY_ESCAPE
+		"enter", "return":
+			return KEY_ENTER
+		"tab":
+			return KEY_TAB
+		"f1":
+			return KEY_F1
+		"f2":
+			return KEY_F2
+		"f3":
+			return KEY_F3
+		"f4":
+			return KEY_F4
+		"f5":
+			return KEY_F5
+		"f6":
+			return KEY_F6
+		"f7":
+			return KEY_F7
+		"f8":
+			return KEY_F8
+		"f9":
+			return KEY_F9
+		"f10":
+			return KEY_F10
+		"f11":
+			return KEY_F11
+		"f12":
+			return KEY_F12
+	if key_name.length() == 1:
+		var code := key_name.to_upper().unicode_at(0)
+		if (code >= 65 and code <= 90) or (code >= 48 and code <= 57):
+			return code
+	return KEY_NONE
 
 
 func _on_text_submitted(text: String) -> void:

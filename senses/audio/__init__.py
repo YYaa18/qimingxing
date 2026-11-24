@@ -5,6 +5,7 @@ from senses.audio.base import (
     AudioPermissionStatus,
     HotkeyListener,
     HotkeySpec,
+    is_disabled_hotkey,
     parse_hotkey_spec,
 )
 from senses.audio.macos_ptt import MacOSPTTListener, check_macos_audio_permissions
@@ -18,5 +19,6 @@ __all__ = [
     "MacOSPTTListener",
     "SoundDeviceMicCapturer",
     "check_macos_audio_permissions",
+    "is_disabled_hotkey",
     "parse_hotkey_spec",
 ]

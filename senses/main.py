@@ -8,7 +8,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import websockets
 
@@ -27,8 +27,10 @@ from protocol.models import (  # noqa: E402
     PermissionStatus,
     SensesCaptureRequestPayload,
     SystemHelloPayload,
+    SystemHotkeyTriggeredPayload,
     SystemPingPayload,
     SystemPrivacyStatePayload,
+    SystemShortcutsSyncPayload,
     make_envelope,
     new_turn_id,
     now_ms,
@@ -41,6 +43,7 @@ from senses.audio import (  # noqa: E402
     MacOSPTTListener,
     SoundDeviceMicCapturer,
     check_macos_audio_permissions,
+    is_disabled_hotkey,
 )
 from senses.privacy_guard import PrivacyGuard  # noqa: E402
 from senses.screen_capture import ScreenCapture  # noqa: E402
@@ -100,8 +103,16 @@ class SensesAgent:
             audio_enabled if audio_enabled is not None else (cfg.audio.enabled if cfg else True)
         )
         self.ptt_hotkey = (
-            ptt_hotkey if ptt_hotkey is not None else (cfg.audio.ptt.hotkey if cfg else "right_option")
+            ptt_hotkey
+            if ptt_hotkey is not None
+            else (cfg.shortcuts.ptt_hotkey if cfg else "right_option")
         )
+        self.action_hotkeys: Dict[str, str] = {
+            "chat_input": cfg.shortcuts.chat_input_hotkey if cfg else "option+space",
+            "cancel": cfg.shortcuts.cancel_hotkey if cfg else "option+esc",
+            "toggle_dock": cfg.shortcuts.toggle_dock_hotkey if cfg else "option+h",
+            "settings": cfg.shortcuts.settings_hotkey if cfg else "option+k",
+        }
         self.audio_sample_rate = (
             audio_sample_rate
             if audio_sample_rate is not None
@@ -277,6 +288,27 @@ class SensesAgent:
                     logger.info("Privacy mode synced from Brain -> %s", payload.mode)
             elif isinstance(payload, SensesCaptureRequestPayload):
                 asyncio.create_task(self.handle_capture_request(ws, payload))
+            elif isinstance(payload, SystemShortcutsSyncPayload):
+                self._apply_shortcuts_sync(payload.model_dump())
+
+    def _apply_shortcuts_sync(self, sc: Dict[str, Any]) -> None:
+        self.ptt_hotkey = str(sc.get("ptt_hotkey") or self.ptt_hotkey or "right_option")
+        self.action_hotkeys = {
+            "chat_input": str(sc.get("chat_input_hotkey") or "option+space"),
+            "cancel": str(sc.get("cancel_hotkey") or "option+esc"),
+            "toggle_dock": str(sc.get("toggle_dock_hotkey") or "option+h"),
+            "settings": str(sc.get("settings_hotkey") or "option+k"),
+        }
+        if self._hotkey_listener is not None and hasattr(self._hotkey_listener, "update_hotkeys"):
+            self._hotkey_listener.update_hotkeys(self.ptt_hotkey, self.action_hotkeys)
+        logger.info(
+            "Shortcuts synced from Brain -> ptt=%s chat=%s cancel=%s dock=%s settings=%s",
+            self.ptt_hotkey,
+            self.action_hotkeys["chat_input"],
+            self.action_hotkeys["cancel"],
+            self.action_hotkeys["toggle_dock"],
+            self.action_hotkeys["settings"],
+        )
 
     def _get_audio_capturer(self) -> AudioCapturer:
         if self._audio_capturer is None:
@@ -285,8 +317,23 @@ class SensesAgent:
 
     def _get_hotkey_listener(self) -> HotkeyListener:
         if self._hotkey_listener is None:
-            self._hotkey_listener = MacOSPTTListener(self.ptt_hotkey)
+            self._hotkey_listener = MacOSPTTListener(
+                self.ptt_hotkey,
+                action_hotkeys=self.action_hotkeys,
+            )
         return self._hotkey_listener
+
+    async def trigger_shortcut_action(self, action: str, hotkey: str, ws: Optional[Any] = None) -> None:
+        target_ws = ws or self._active_ws
+        if target_ws is None:
+            return
+        env = make_envelope(
+            "senses",
+            "system.hotkey_triggered",
+            SystemHotkeyTriggeredPayload(action=action, hotkey=hotkey),  # type: ignore[arg-type]
+        )
+        await target_ws.send(env.model_dump_json())
+        logger.info("Triggered global shortcut action=%s hotkey=%s", action, hotkey)
 
     def _enqueue_audio_chunk_threadsafe(self, pcm_bytes: bytes) -> None:
         loop = self._loop
@@ -414,9 +461,10 @@ class SensesAgent:
         self._audio_out_queue = asyncio.Queue()
 
         ptt_started = False
-        if self.audio_enabled:
+        has_action_hotkeys = any(not is_disabled_hotkey(h) for h in self.action_hotkeys.values())
+        if self.audio_enabled or has_action_hotkeys:
             perm = await asyncio.to_thread(check_macos_audio_permissions)
-            if not perm.microphone or not perm.accessibility:
+            if not perm.accessibility or (self.audio_enabled and not perm.microphone):
                 logger.warning("语音/全局热键权限提示: %s", perm.hint)
             listener = self._get_hotkey_listener()
 
@@ -431,6 +479,17 @@ class SensesAgent:
                     self._loop.call_soon_threadsafe(
                         lambda: asyncio.create_task(self.trigger_ptt_release())
                     )
+
+            def _on_action(action: str, hotkey: str) -> None:
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        lambda a=action, hk=hotkey: asyncio.create_task(
+                            self.trigger_shortcut_action(a, hk)
+                        )
+                    )
+
+            if hasattr(listener, "set_action_callback"):
+                listener.set_action_callback(_on_action)
 
             try:
                 listener.start(on_press=_on_press, on_release=_on_release)
@@ -448,10 +507,14 @@ class SensesAgent:
                         hello_env = make_envelope("senses", "system.hello", self._build_hello_payload())
                         await ws.send(hello_env.model_dump_json())
                         welcome_raw = await ws.recv()
+                        welcome_obj = json.loads(welcome_raw)
+                        welcome_sc = (welcome_obj.get("payload") or {}).get("shortcuts")
+                        if isinstance(welcome_sc, dict):
+                            self._apply_shortcuts_sync(welcome_sc)
                         logger.info(
                             "Connected to Brain (%s): %s",
                             self.provider.platform_name,
-                            json.loads(welcome_raw).get("type"),
+                            welcome_obj.get("type"),
                         )
 
                         tasks = [

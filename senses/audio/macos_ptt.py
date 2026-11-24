@@ -4,12 +4,13 @@ import ctypes
 import logging
 import sys
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from senses.audio.base import (
     AudioPermissionStatus,
     HotkeyListener,
     HotkeySpec,
+    is_disabled_hotkey,
     parse_hotkey_spec,
 )
 
@@ -82,15 +83,22 @@ def check_macos_audio_permissions() -> AudioPermissionStatus:
 
 
 class MacOSPTTListener(HotkeyListener):
-    """Global macOS Push-to-Talk hotkey listener backed by Quartz CGEventTap."""
+    """Global macOS Push-to-Talk & multi-action hotkey listener backed by Quartz CGEventTap."""
 
     def __init__(
         self,
         hotkey_spec: str = "right_option",
         *,
         permission_checker: Optional[Callable[[], AudioPermissionStatus]] = None,
+        action_hotkeys: Optional[Dict[str, str]] = None,
+        on_action: Optional[Callable[[str, str], None]] = None,
     ) -> None:
+        self._lock = threading.Lock()
         self.spec: HotkeySpec = parse_hotkey_spec(hotkey_spec)
+        self._ptt_enabled: bool = not is_disabled_hotkey(hotkey_spec)
+        self._action_specs: Dict[str, HotkeySpec] = {}
+        self._action_pressed: Dict[str, bool] = {}
+        self._on_action: Optional[Callable[[str, str], None]] = on_action
         self._permission_checker = permission_checker or check_macos_audio_permissions
         self._thread: Optional[threading.Thread] = None
         self._run_loop: Any = None
@@ -99,6 +107,34 @@ class MacOSPTTListener(HotkeyListener):
         self._pressed = False
         self._on_press: Optional[Callable[[], None]] = None
         self._on_release: Optional[Callable[[], None]] = None
+        self.update_hotkeys(hotkey_spec, action_hotkeys)
+
+    def set_action_callback(self, on_action: Optional[Callable[[str, str], None]]) -> None:
+        with self._lock:
+            self._on_action = on_action
+
+    def update_hotkeys(
+        self,
+        ptt_hotkey: str,
+        action_hotkeys: Optional[Dict[str, str]] = None,
+    ) -> None:
+        new_ptt_enabled = not is_disabled_hotkey(ptt_hotkey)
+        new_ptt_spec = parse_hotkey_spec(ptt_hotkey) if new_ptt_enabled else parse_hotkey_spec("right_option")
+        compiled_actions: Dict[str, HotkeySpec] = {}
+        if action_hotkeys:
+            for action, raw_spec in action_hotkeys.items():
+                if not is_disabled_hotkey(raw_spec):
+                    compiled_actions[str(action)] = parse_hotkey_spec(raw_spec)
+        with self._lock:
+            self._ptt_enabled = new_ptt_enabled
+            self.spec = new_ptt_spec
+            self._action_specs = compiled_actions
+            self._action_pressed = {k: False for k in compiled_actions}
+        logger.info(
+            "Updated global hotkeys: ptt=%s actions=%s",
+            ptt_hotkey if new_ptt_enabled else "disabled",
+            {k: v.raw_spec for k, v in compiled_actions.items()},
+        )
 
     def start(
         self,
@@ -148,24 +184,81 @@ class MacOSPTTListener(HotkeyListener):
                 logger.debug("PTT on_release callback error: %s", exc)
 
     def _handle_event(self, event_type: int, keycode: int, flags: int, is_repeat: int) -> None:
-        if self.spec.is_modifier_only:
-            # FlagsChanged event code is 12 on Quartz
-            if event_type == 12 and keycode in self.spec.key_codes:
-                if (flags & self.spec.modifier_mask) != 0:
-                    self._emit_press()
-                else:
-                    self._emit_release()
-            return
+        fired_actions: list[tuple[str, str]] = []
+        emit_ptt_press = False
+        emit_ptt_release = False
 
-        # Combo hotkey: KeyDown=10, KeyUp=11, FlagsChanged=12
-        if event_type == 10 and is_repeat == 0 and keycode in self.spec.key_codes:
-            if (flags & self.spec.modifier_mask) == self.spec.modifier_mask:
-                self._emit_press()
-        elif event_type == 11 and keycode in self.spec.key_codes:
-            self._emit_release()
-        elif event_type == 12 and self._pressed:
-            if (flags & self.spec.modifier_mask) != self.spec.modifier_mask:
-                self._emit_release()
+        with self._lock:
+            ptt_enabled = self._ptt_enabled
+            ptt_spec = self.spec
+            action_items = list(self._action_specs.items())
+            on_action = self._on_action
+
+            if ptt_enabled:
+                if ptt_spec.is_modifier_only:
+                    if event_type == 12 and keycode in ptt_spec.key_codes:
+                        if (flags & ptt_spec.modifier_mask) != 0:
+                            if not self._pressed:
+                                self._pressed = True
+                                emit_ptt_press = True
+                        elif self._pressed:
+                            self._pressed = False
+                            emit_ptt_release = True
+                else:
+                    if event_type == 10 and is_repeat == 0 and keycode in ptt_spec.key_codes:
+                        if (flags & ptt_spec.modifier_mask) == ptt_spec.modifier_mask:
+                            if not self._pressed:
+                                self._pressed = True
+                                emit_ptt_press = True
+                    elif event_type == 11 and keycode in ptt_spec.key_codes:
+                        if self._pressed:
+                            self._pressed = False
+                            emit_ptt_release = True
+                    elif event_type == 12 and self._pressed:
+                        if (flags & ptt_spec.modifier_mask) != ptt_spec.modifier_mask:
+                            self._pressed = False
+                            emit_ptt_release = True
+            elif self._pressed:
+                self._pressed = False
+                emit_ptt_release = True
+
+            for action, spec in action_items:
+                was_pressed = self._action_pressed.get(action, False)
+                if spec.is_modifier_only:
+                    if event_type == 12 and keycode in spec.key_codes:
+                        if (flags & spec.modifier_mask) != 0:
+                            if not was_pressed:
+                                self._action_pressed[action] = True
+                                fired_actions.append((action, spec.raw_spec))
+                        else:
+                            self._action_pressed[action] = False
+                else:
+                    if event_type == 10 and is_repeat == 0 and keycode in spec.key_codes:
+                        if (flags & spec.modifier_mask) == spec.modifier_mask and not was_pressed:
+                            self._action_pressed[action] = True
+                            fired_actions.append((action, spec.raw_spec))
+                    elif event_type == 11 and keycode in spec.key_codes:
+                        self._action_pressed[action] = False
+                    elif event_type == 12 and was_pressed:
+                        if (flags & spec.modifier_mask) != spec.modifier_mask:
+                            self._action_pressed[action] = False
+
+        if emit_ptt_press and self._on_press is not None:
+            try:
+                self._on_press()
+            except Exception as exc:
+                logger.debug("PTT on_press callback error: %s", exc)
+        if emit_ptt_release and self._on_release is not None:
+            try:
+                self._on_release()
+            except Exception as exc:
+                logger.debug("PTT on_release callback error: %s", exc)
+        if on_action is not None:
+            for action, raw_spec in fired_actions:
+                try:
+                    on_action(action, raw_spec)
+                except Exception as exc:
+                    logger.debug("Hotkey action callback error (%s): %s", action, exc)
 
     def _run_tap_loop(self) -> None:
         try:

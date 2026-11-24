@@ -216,6 +216,28 @@ func is_docked_tucked() -> bool:
 	return _dock_edge != "" and not _dock_peeking
 
 
+func toggle_edge_hide() -> bool:
+	if _dock_edge != "":
+		reset_to_default_position()
+		return false
+	var usable := _get_usable_rect()
+	var center := _avatar_center_in_window()
+	var cur_center_x := _win_pos_f.x + center.x
+	var screen_mid_x := usable.position.x + usable.size.x * 0.5
+	_dock_edge = "left" if cur_center_x < screen_mid_x else "right"
+	_roam_state = "rest"
+	_roam_velocity = Vector2.ZERO
+	_dock_peeking = false
+	_dock_retract_timer = 0.0
+	_recompute_dock_positions()
+	_win_pos_f = _dock_hidden_pos
+	DisplayServer.window_set_position(Vector2i(_win_pos_f))
+	_last_reported_tucked = true
+	_save_prefs()
+	dock_state_changed.emit(_dock_edge, true)
+	return true
+
+
 func _load_tex(res_path: String) -> Texture2D:
 	var abs_path := ProjectSettings.globalize_path(res_path)
 	if FileAccess.file_exists(abs_path):

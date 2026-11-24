@@ -60,6 +60,11 @@ class HotkeySpec:
     is_fallback: bool = False
 
 
+def is_disabled_hotkey(spec: str) -> bool:
+    """Return True when a configured shortcut is intentionally disabled."""
+    return str(spec or "").strip().lower() in ("", "disabled", "off", "none")
+
+
 def parse_hotkey_spec(spec: str) -> HotkeySpec:
     """Parse configurable PTT hotkey specs like 'right_option', 'option+space', 'ctrl+space'."""
     normalized = "+".join(part.strip().lower() for part in str(spec or "").split("+") if part.strip())
