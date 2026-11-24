@@ -52,6 +52,7 @@ def create_app(
     scheduler: Optional[TaskScheduler] = None,
     capture_timeout_seconds: float = 3.5,
 ) -> FastAPI:
+    _config_injected = config is not None
     cfg = config or load_config()
     router = llm_router or LLMRouter(cfg)
     artifacts = artifact_store or ArtifactStore()
@@ -266,6 +267,32 @@ def create_app(
                 "content_type": rec.content_type,
                 "expires_at": rec.expires_at,
                 "size_bytes": rec.size_bytes,
+            }
+        )
+
+    @app.post("/api/mcp/reload")
+    async def reload_mcp_servers(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="MCP reload is restricted to localhost.")
+
+        new_servers = None
+        if not _config_injected:
+            try:
+                fresh_cfg = load_config()
+                new_servers = fresh_cfg.mcp_servers
+            except Exception as exc:
+                safe_err = cfg.redact_secrets(f"{type(exc).__name__}: {exc}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to load config for MCP reload: {safe_err}",
+                ) from exc
+
+        statuses = await active_mcp.reload(hub.tool_registry, servers=new_servers)
+        return JSONResponse(
+            {
+                "status": "ok",
+                "mcp_servers": [asdict(s) for s in statuses],
             }
         )
 

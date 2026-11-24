@@ -13,7 +13,7 @@ from brain.config import AppConfig, MCPServerConfig, ProfileConfig, load_config
 from brain.llm_router import LLMCompletionResult, LLMRouter, ToolCallRequest
 from brain.main import create_app
 from brain.memory.cli import main as cli_main
-from brain.tools import ToolRegistry, build_default_tool_registry
+from brain.tools import ToolExecutionContext, ToolRegistry, build_default_tool_registry
 from brain.tools.mcp_client import MCPClientManager
 
 
@@ -383,3 +383,184 @@ def test_mcp_config_parsing_and_cli(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "fs | stdio | enabled" in out
     assert "remote_http | streamable_http | disabled" in out
+
+
+def test_p5_01_mcp_auto_reconnect_retry_and_http_reload(tmp_path: Path) -> None:
+    cfg_a = AppConfig(
+        mcp_servers=[
+            MCPServerConfig(
+                name="flaky",
+                enabled=True,
+                transport="stdio",
+                command="echo",
+                safe_tools=["ping"],
+            )
+        ]
+    )
+
+    class _PingSession:
+        def __init__(self, *, fail_with: Optional[Exception] = None) -> None:
+            self.fail_with = fail_with
+            self.calls = 0
+
+        async def list_tools(self) -> Any:
+            return type(
+                "ListToolsRes",
+                (),
+                {
+                    "tools": [
+                        _FakeToolSchema(
+                            name="ping",
+                            description="Ping server",
+                            inputSchema={"type": "object", "properties": {}},
+                        )
+                    ]
+                },
+            )()
+
+        async def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+            self.calls += 1
+            if self.fail_with is not None:
+                raise self.fail_with
+            return _FakeCallResult(content=[_FakeTextContent(text="recovered_ok")])
+
+    async def _exercise_reconnect() -> None:
+        open_calls = 0
+        closed_stacks = 0
+
+        async def opener(srv: MCPServerConfig, stack):
+            nonlocal open_calls, closed_stacks
+            open_calls += 1
+
+            def _on_close() -> None:
+                nonlocal closed_stacks
+                closed_stacks += 1
+
+            stack.callback(_on_close)
+            if open_calls == 1:
+                return _PingSession(fail_with=ConnectionResetError("broken pipe"))
+            return _PingSession(fail_with=None)
+
+        reg = build_default_tool_registry(cfg_a)
+        mgr = MCPClientManager(cfg_a, transport_opener=opener)
+        await mgr.start_all(reg)
+        assert open_calls == 1
+
+        tool = reg.get("mcp__flaky__ping")
+        assert tool is not None
+        ctx = ToolExecutionContext(turn_id="t-p501", session_id="s-p501", config=cfg_a)
+        res = await tool.execute({}, ctx)
+        assert res.ok is True
+        assert "recovered_ok" in res.output
+        assert open_calls == 2
+        assert closed_stacks == 1
+        assert mgr.list_statuses()[0].status == "connected"
+        await mgr.stop_all(reg)
+
+    asyncio.run(_exercise_reconnect())
+
+    cfg_b = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="m")},
+        mcp_servers=[
+            MCPServerConfig(
+                name="flaky",
+                enabled=True,
+                transport="stdio",
+                command="echo",
+                safe_tools=["ping"],
+            )
+        ],
+    )
+    cfg_b.memory.sqlite_path = str(tmp_path / "mcp_reload.db")
+    cfg_b.memory.extraction.enabled = False
+
+    reload_open_calls = 0
+
+    async def reload_opener(srv: MCPServerConfig, stack):
+        nonlocal reload_open_calls
+        reload_open_calls += 1
+        return _PingSession(fail_with=None)
+
+    mgr_b = MCPClientManager(cfg_b, transport_opener=reload_opener)
+    app = create_app(config=cfg_b, mcp_manager=mgr_b)
+    with TestClient(app) as client:
+        assert reload_open_calls == 1
+        resp = client.post("/api/mcp/reload")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["mcp_servers"][0]["name"] == "flaky"
+        assert body["mcp_servers"][0]["status"] == "connected"
+        assert reload_open_calls == 2
+
+
+async def test_p5_02_mcp_output_4000_char_truncation_and_secret_redaction() -> None:
+    cfg = AppConfig(
+        profiles={
+            "p": ProfileConfig(
+                name="p",
+                label="P",
+                provider="openai_compat",
+                model="m",
+                api_key="cfg-secret-key-xyz999",
+            )
+        },
+        mcp_servers=[
+            MCPServerConfig(
+                name="logger",
+                enabled=True,
+                transport="stdio",
+                command="echo",
+                safe_tools=["read_logs"],
+            )
+        ],
+    )
+
+    payload_text = (
+        "HEAD_MARKER auth=Bearer tok_1234567890 key=cfg-secret-key-xyz999\n"
+        + ("L" * 6000)
+        + "\ntoken=sk-abcdefgh12345678 TAIL_MARKER"
+    )
+
+    class _LargeOutputSession:
+        async def list_tools(self) -> Any:
+            return type(
+                "ListToolsRes",
+                (),
+                {
+                    "tools": [
+                        _FakeToolSchema(
+                            name="read_logs",
+                            description="Read huge logs",
+                            inputSchema={"type": "object", "properties": {}},
+                        )
+                    ]
+                },
+            )()
+
+        async def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+            return _FakeCallResult(content=[_FakeTextContent(text=payload_text)])
+
+    async def opener(srv: MCPServerConfig, stack):
+        return _LargeOutputSession()
+
+    reg = build_default_tool_registry(cfg)
+    mgr = MCPClientManager(cfg, transport_opener=opener)
+    await mgr.start_all(reg)
+
+    tool = reg.get("mcp__logger__read_logs")
+    assert tool is not None
+    ctx = ToolExecutionContext(turn_id="t-p502", session_id="s-p502", config=cfg)
+    res = await tool.execute({}, ctx)
+    await mgr.stop_all(reg)
+
+    assert res.ok is True
+    assert len(res.output) <= 4100
+    assert "截断" in res.output
+    assert "HEAD_MARKER" in res.output
+    assert "TAIL_MARKER" in res.output
+    assert "***REDACTED***" in res.output
+    assert "cfg-secret-key-xyz999" not in res.output
+    assert "tok_1234567890" not in res.output
+    assert "sk-abcdefgh12345678" not in res.output

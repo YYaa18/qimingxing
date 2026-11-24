@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -13,6 +14,42 @@ from brain.utils import truncate_head_tail
 from protocol.models import RiskLevel
 
 logger = logging.getLogger("qimingxing.tools.mcp")
+
+MCP_MAX_OUTPUT_CHARS = 4000
+
+_TRANSPORT_DISCONNECT_RE = re.compile(
+    r"(?:closedresourceerror|brokenresourceerror|endofstream|connecterror|"
+    r"remoteprotocolerror|connection\s+closed|broken\s+pipe|connection\s+reset|"
+    r"connection\s+aborted|connection\s+refused|stream\s+closed|session\s+closed|"
+    r"server\s+closed|not\s+connected|process\s+exited|\beof\b|transport|disconnect)",
+    re.IGNORECASE,
+)
+
+
+def _is_transport_disconnect_error(exc: BaseException) -> bool:
+    """Return True if `exc` indicates a dropped/crashed MCP transport rather than timeout or logic errors."""
+    visited: set[int] = set()
+    queue: List[BaseException] = [exc]
+    while queue:
+        cur = queue.pop(0)
+        if id(cur) in visited:
+            continue
+        visited.add(id(cur))
+        if isinstance(cur, (asyncio.CancelledError, TimeoutError, asyncio.TimeoutError)):
+            continue
+        if isinstance(cur, (ConnectionError, EOFError)):
+            return True
+        sig = f"{type(cur).__name__}: {cur}"
+        if _TRANSPORT_DISCONNECT_RE.search(sig):
+            return True
+        if cur.__cause__ is not None:
+            queue.append(cur.__cause__)
+        if cur.__context__ is not None:
+            queue.append(cur.__context__)
+        sub_excs = getattr(cur, "exceptions", None)
+        if isinstance(sub_excs, (list, tuple)):
+            queue.extend(sub_excs)
+    return False
 
 
 def _extract_mcp_result_text(result: Any) -> str:
@@ -42,7 +79,8 @@ class MCPToolAdapter(Tool):
         raw_tool_name: str,
         description: str,
         parameters_schema: Dict[str, Any],
-        session: Any,
+        session: Any = None,
+        manager: Optional["MCPClientManager"] = None,
         is_safe: bool,
         timeout_sec: float = 30.0,
     ) -> None:
@@ -52,6 +90,7 @@ class MCPToolAdapter(Tool):
         self.description = f"[MCP:{server_name}] {description or raw_tool_name}"
         self.parameters_schema = parameters_schema or {"type": "object", "properties": {}}
         self._session = session
+        self._manager = manager
         self.default_risk: RiskLevel = "safe" if is_safe else "confirm"
         self._timeout_sec = timeout_sec
 
@@ -82,10 +121,20 @@ class MCPToolAdapter(Tool):
         ctx: ToolExecutionContext,
     ) -> ToolResult:
         try:
-            raw_res = await asyncio.wait_for(
-                self._session.call_tool(self.raw_tool_name, arguments=arguments),
-                timeout=max(1.0, self._timeout_sec),
-            )
+            if self._manager is not None:
+                raw_res = await self._manager.call_tool(
+                    self.server_name,
+                    self.raw_tool_name,
+                    arguments,
+                    timeout_sec=self._timeout_sec,
+                )
+            elif self._session is not None:
+                raw_res = await asyncio.wait_for(
+                    self._session.call_tool(self.raw_tool_name, arguments=arguments),
+                    timeout=max(1.0, self._timeout_sec),
+                )
+            else:
+                raise ConnectionError(f"MCP server '{self.server_name}' 会话未连接")
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
@@ -97,6 +146,11 @@ class MCPToolAdapter(Tool):
             )
         except Exception as exc:
             safe_err = ctx.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            safe_err = truncate_head_tail(
+                safe_err,
+                MCP_MAX_OUTPUT_CHARS,
+                notice="MCP 异常信息已按 4,000 字符预算截断",
+            )
             return ToolResult(
                 ok=False,
                 output=f"MCP 工具调用失败: {safe_err}",
@@ -107,7 +161,11 @@ class MCPToolAdapter(Tool):
         is_err = bool(getattr(raw_res, "isError", False))
         text = _extract_mcp_result_text(raw_res) or ("MCP 工具执行失败" if is_err else "（执行成功，无文本输出）")
         text = ctx.config.redact_secrets(text)
-        trimmed = truncate_head_tail(text, 6000, notice="MCP 返回内容已按预算截断")
+        trimmed = truncate_head_tail(
+            text,
+            MCP_MAX_OUTPUT_CHARS,
+            notice="MCP 返回内容已按 4,000 字符预算截断",
+        )
         return ToolResult(
             ok=not is_err,
             output=trimmed,
@@ -126,6 +184,16 @@ class MCPServerStatus:
     error: str = ""
 
 
+@dataclass
+class _ServerRuntime:
+    config: MCPServerConfig
+    stack: Optional[AsyncExitStack] = None
+    session: Any = None
+    tool_names: List[str] = field(default_factory=list)
+    generation: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 TransportOpener = Callable[[MCPServerConfig, AsyncExitStack], Any]
 
 
@@ -140,61 +208,104 @@ class MCPClientManager:
     ) -> None:
         self.config = config
         self._transport_opener = transport_opener
-        self._stacks: List[AsyncExitStack] = []
-        self._registered_tool_names: List[str] = []
-        self._statuses: Dict[str, MCPServerStatus] = {
-            srv.name: MCPServerStatus(
+        self._registry: Any = None
+        self._reload_lock = asyncio.Lock()
+        self._runtimes: Dict[str, _ServerRuntime] = {}
+        self._statuses: Dict[str, MCPServerStatus] = {}
+        self._sync_server_tables()
+
+    def _sync_server_tables(self) -> None:
+        new_runtimes: Dict[str, _ServerRuntime] = {}
+        new_statuses: Dict[str, MCPServerStatus] = {}
+        for srv in self.config.mcp_servers:
+            prev_rt = self._runtimes.get(srv.name)
+            new_runtimes[srv.name] = _ServerRuntime(
+                config=srv,
+                stack=prev_rt.stack if prev_rt is not None else None,
+                session=prev_rt.session if prev_rt is not None else None,
+                tool_names=list(prev_rt.tool_names) if prev_rt is not None else [],
+                generation=prev_rt.generation if prev_rt is not None else 0,
+                lock=prev_rt.lock if prev_rt is not None else asyncio.Lock(),
+            )
+            new_statuses[srv.name] = MCPServerStatus(
                 name=srv.name,
                 transport=srv.transport,
                 enabled=srv.enabled,
                 status="disabled" if not srv.enabled else "offline",
             )
-            for srv in config.mcp_servers
-        }
+        self._runtimes = new_runtimes
+        self._statuses = new_statuses
 
     async def start_all(self, registry: Any) -> List[MCPServerStatus]:
         """Connect all enabled MCP servers cleanly; failed servers stay isolated and offline."""
+        self._registry = registry
+        self._sync_server_tables()
         for srv in self.config.mcp_servers:
-            st = MCPServerStatus(
+            if not srv.enabled:
+                continue
+            runtime = self._runtimes[srv.name]
+            async with runtime.lock:
+                await self._connect_server_locked(runtime, registry)
+        return self.list_statuses()
+
+    async def _connect_server_locked(
+        self, runtime: _ServerRuntime, registry: Any
+    ) -> bool:
+        srv = runtime.config
+        st = self._statuses.setdefault(
+            srv.name,
+            MCPServerStatus(
                 name=srv.name,
                 transport=srv.transport,
                 enabled=srv.enabled,
                 status="disabled" if not srv.enabled else "offline",
-            )
-            self._statuses[srv.name] = st
-            if not srv.enabled:
-                continue
+            ),
+        )
+        if not srv.enabled:
+            st.status = "disabled"
+            st.tools = []
+            st.error = ""
+            return False
 
-            stack = AsyncExitStack()
+        stack = AsyncExitStack()
+        try:
+            session, tools_registered = await asyncio.wait_for(
+                self._connect_one(srv, stack, registry),
+                timeout=max(2.0, float(srv.startup_timeout_sec)),
+            )
+            runtime.stack = stack
+            runtime.session = session
+            runtime.tool_names = list(tools_registered)
+            runtime.generation += 1
+            st.status = "connected"
+            st.tools = list(tools_registered)
+            st.error = ""
+            logger.info(
+                "Connected MCP server '%s' (%s): registered %d tool(s): %s",
+                srv.name,
+                srv.transport,
+                len(tools_registered),
+                ", ".join(tools_registered),
+            )
+            return True
+        except Exception as exc:
+            safe_err = self.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            runtime.stack = None
+            runtime.session = None
+            runtime.tool_names = []
+            st.status = "offline"
+            st.tools = []
+            st.error = safe_err[:240]
+            logger.warning(
+                "MCP server '%s' failed to start (isolated cleanly): %s",
+                srv.name,
+                st.error,
+            )
             try:
-                tools_registered = await asyncio.wait_for(
-                    self._connect_one(srv, stack, registry),
-                    timeout=max(2.0, float(srv.startup_timeout_sec)),
-                )
-                self._stacks.append(stack)
-                st.status = "connected"
-                st.tools = tools_registered
-                logger.info(
-                    "Connected MCP server '%s' (%s): registered %d tool(s): %s",
-                    srv.name,
-                    srv.transport,
-                    len(tools_registered),
-                    ", ".join(tools_registered),
-                )
-            except Exception as exc:
-                safe_err = self.config.redact_secrets(f"{type(exc).__name__}: {exc}")
-                st.status = "offline"
-                st.error = safe_err[:240]
-                logger.warning(
-                    "MCP server '%s' failed to start (isolated cleanly): %s",
-                    srv.name,
-                    st.error,
-                )
-                try:
-                    await stack.aclose()
-                except Exception:
-                    pass
-        return self.list_statuses()
+                await stack.aclose()
+            except Exception:
+                pass
+            return False
 
     async def _open_session(
         self, srv: MCPServerConfig, stack: AsyncExitStack
@@ -249,7 +360,7 @@ class MCPClientManager:
         srv: MCPServerConfig,
         stack: AsyncExitStack,
         registry: Any,
-    ) -> List[str]:
+    ) -> Tuple[Any, List[str]]:
         session = await self._open_session(srv, stack)
         listed = await session.list_tools()
         raw_tools = getattr(listed, "tools", listed) or []
@@ -270,31 +381,166 @@ class MCPClientManager:
                 description=desc,
                 parameters_schema=dict(schema) if isinstance(schema, dict) else {"type": "object", "properties": {}},
                 session=session,
+                manager=self,
                 is_safe=(raw_name in safe_set),
                 timeout_sec=srv.timeout_sec,
             )
             registry.register(adapter)
-            self._registered_tool_names.append(adapter.name)
             registered.append(adapter.name)
 
-        return sorted(registered)
+        return session, sorted(registered)
 
-    async def stop_all(self, registry: Any = None) -> None:
-        if registry is not None:
-            for name in self._registered_tool_names:
-                registry.unregister(name)
-        self._registered_tool_names.clear()
-
-        for stack in reversed(self._stacks):
+    async def _close_server_runtime_locked(
+        self,
+        runtime: _ServerRuntime,
+        registry: Any = None,
+        *,
+        unregister_tools: bool = True,
+    ) -> None:
+        reg = registry if registry is not None else self._registry
+        if unregister_tools and reg is not None:
+            for name in runtime.tool_names:
+                reg.unregister(name)
+        runtime.tool_names.clear()
+        runtime.session = None
+        stack = runtime.stack
+        runtime.stack = None
+        if stack is not None:
             try:
                 await asyncio.wait_for(stack.aclose(), timeout=5.0)
             except Exception as exc:
-                logger.debug("Ignoring MCP shutdown error: %s", exc)
-        self._stacks.clear()
+                logger.debug("Ignoring MCP shutdown error for '%s': %s", runtime.config.name, exc)
+        st = self._statuses.get(runtime.config.name)
+        if st is not None and st.status == "connected":
+            st.status = "offline"
+            st.tools = []
 
-        for st in self._statuses.values():
-            if st.status == "connected":
-                st.status = "offline"
+    async def _close_server_runtime(
+        self,
+        server_name: str,
+        registry: Any = None,
+        *,
+        unregister_tools: bool = True,
+    ) -> None:
+        runtime = self._runtimes.get(server_name)
+        if runtime is None:
+            return
+        async with runtime.lock:
+            await self._close_server_runtime_locked(
+                runtime, registry, unregister_tools=unregister_tools
+            )
+
+    async def reconnect_server(
+        self,
+        server_name: str,
+        registry: Any = None,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> bool:
+        """Close the stale runtime for `server_name` and attempt a single clean reconnect."""
+        runtime = self._runtimes.get(server_name)
+        if runtime is None or not runtime.config.enabled:
+            return False
+        reg = registry if registry is not None else self._registry
+        async with runtime.lock:
+            if (
+                expected_generation is not None
+                and runtime.generation != expected_generation
+                and runtime.session is not None
+            ):
+                return True
+            await self._close_server_runtime_locked(runtime, reg, unregister_tools=True)
+            return await self._connect_server_locked(runtime, reg)
+
+    async def call_tool(
+        self,
+        server_name: str,
+        raw_tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        timeout_sec: float = 30.0,
+    ) -> Any:
+        """Invoke an MCP tool with one automatic reconnect-and-retry on transport disconnect."""
+        runtime = self._runtimes.get(server_name)
+        if runtime is None:
+            raise ConnectionError(f"未找到 MCP server '{server_name}'")
+
+        session = runtime.session
+        gen = runtime.generation
+        if session is None:
+            reconnected = await self.reconnect_server(server_name, expected_generation=gen)
+            if not reconnected or runtime.session is None:
+                st = self._statuses.get(server_name)
+                detail = st.error if st and st.error else "无法建立连接"
+                raise ConnectionError(f"MCP server '{server_name}' 未连接: {detail}")
+            session = runtime.session
+            gen = runtime.generation
+
+        timeout = max(1.0, float(timeout_sec))
+        try:
+            return await asyncio.wait_for(
+                session.call_tool(raw_tool_name, arguments=arguments),
+                timeout=timeout,
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            raise
+        except Exception as exc:
+            if not _is_transport_disconnect_error(exc):
+                raise
+
+            logger.warning(
+                "MCP tool %s.%s transport disconnected (%s: %s); attempting single auto-reconnect...",
+                server_name,
+                raw_tool_name,
+                type(exc).__name__,
+                self.config.redact_secrets(str(exc))[:160],
+            )
+            reconnected = await self.reconnect_server(server_name, expected_generation=gen)
+            if not reconnected or runtime.session is None:
+                st = self._statuses.get(server_name)
+                if st is not None:
+                    st.status = "offline"
+                raise ConnectionError(
+                    f"MCP transport disconnected ({type(exc).__name__}: {exc}); auto-reconnect failed"
+                ) from exc
+
+            new_session = runtime.session
+            try:
+                return await asyncio.wait_for(
+                    new_session.call_tool(raw_tool_name, arguments=arguments),
+                    timeout=timeout,
+                )
+            except Exception as retry_exc:
+                if _is_transport_disconnect_error(retry_exc):
+                    st = self._statuses.get(server_name)
+                    if st is not None:
+                        st.status = "offline"
+                        st.error = self.config.redact_secrets(
+                            f"{type(retry_exc).__name__}: {retry_exc}"
+                        )[:240]
+                raise
+
+    async def reload(
+        self,
+        registry: Any,
+        servers: Optional[List[MCPServerConfig]] = None,
+    ) -> List[MCPServerStatus]:
+        """Hot-reload MCP connections and refresh ToolRegistry entries."""
+        async with self._reload_lock:
+            await self.stop_all(registry)
+            if servers is not None:
+                self.config.mcp_servers = list(servers)
+            return await self.start_all(registry)
+
+    async def stop_all(self, registry: Any = None) -> None:
+        reg = registry if registry is not None else self._registry
+        for runtime in reversed(list(self._runtimes.values())):
+            async with runtime.lock:
+                await self._close_server_runtime_locked(
+                    runtime, reg, unregister_tools=True
+                )
 
     def list_statuses(self) -> List[MCPServerStatus]:
         return list(self._statuses.values())
