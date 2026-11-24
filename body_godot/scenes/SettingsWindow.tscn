@@ -3,10 +3,10 @@
 [ext_resource type="Script" path="res://scripts/settings_window.gd" id="1"]
 
 [node name="SettingsWindow" type="Window"]
-title = "启明星 — 设置与 API Key"
+title = "启明星 — 设置"
 initial_position = 1
-size = Vector2i(520, 560)
+size = Vector2i(620, 672)
 visible = false
 always_on_top = true
-min_size = Vector2i(460, 480)
+min_size = Vector2i(560, 540)
 script = ExtResource("1")

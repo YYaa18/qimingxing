@@ -5,9 +5,17 @@ signal profile_selected(profile_name: String)
 signal new_chat_requested
 signal visibility_changed_custom(is_visible: bool)
 
+const UITokens := preload("res://theme/ui_tokens.gd")
+
+const SHADOW_MARGIN_X := 28
+const SHADOW_MARGIN_TOP := 20
+const SHADOW_MARGIN_BOTTOM := 34
+
+var _outer: MarginContainer
 var _card: PanelContainer
 var _prompt_edit: TextEdit
 var _chip_row: HBoxContainer
+var _chip_icon: TextureRect
 var _chip_label: Label
 var _file_btn: Button
 var _screen_btn: Button
@@ -20,98 +28,57 @@ var _with_screen: bool = false
 var _attached_paths: Array[String] = []
 var _profile_names: Array[String] = []
 var _is_syncing_profiles: bool = false
+var _has_send_content: bool = false
+var _anim_tween: Tween
 
 var _dragging: bool = false
 var _drag_mouse_start: Vector2i
 var _drag_win_start: Vector2i
 
-var _pill_normal: StyleBoxFlat
-var _pill_hover: StyleBoxFlat
-var _pill_active: StyleBoxFlat
-var _send_ready_style: StyleBoxFlat
-var _send_muted_style: StyleBoxFlat
-
 
 func _ready() -> void:
-	_init_styles()
+	theme = UITokens.build_obsidian_theme()
 	_build_ui()
 	close_requested.connect(close_quick_entry)
 	files_dropped.connect(_on_files_dropped)
 
 
-func _init_styles() -> void:
-	_pill_normal = _make_pill_style(Color(0.16, 0.18, 0.22, 0.92), Color(1.0, 1.0, 1.0, 0.08), 8)
-	_pill_hover = _make_pill_style(Color(0.22, 0.25, 0.30, 0.96), Color(1.0, 1.0, 1.0, 0.18), 8)
-	_pill_active = _make_pill_style(Color(0.16, 0.46, 0.62, 0.95), Color(0.38, 0.84, 1.0, 0.70), 8)
-	_send_ready_style = _make_pill_style(Color(0.22, 0.74, 0.97, 1.0), Color(0.45, 0.88, 1.0, 0.9), 10)
-	_send_muted_style = _make_pill_style(Color(0.20, 0.22, 0.27, 0.85), Color(1.0, 1.0, 1.0, 0.06), 10)
-
-
-func _make_pill_style(bg: Color, border: Color, radius: int, pad_x: int = 10, pad_y: int = 5) -> StyleBoxFlat:
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = bg
-	sb.border_color = border
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(radius)
-	sb.content_margin_left = pad_x
-	sb.content_margin_right = pad_x
-	sb.content_margin_top = pad_y
-	sb.content_margin_bottom = pad_y
-	return sb
-
-
-func _style_pill_button(btn: Button, active: bool = false) -> void:
-	var base := _pill_active if active else _pill_normal
-	btn.add_theme_stylebox_override("normal", base)
-	btn.add_theme_stylebox_override("hover", base if active else _pill_hover)
-	btn.add_theme_stylebox_override("pressed", _pill_active)
-	btn.add_theme_stylebox_override("focus", base)
-	var col := Color(0.96, 0.99, 1.0) if active else Color(0.84, 0.88, 0.94)
-	btn.add_theme_color_override("font_color", col)
-	btn.add_theme_color_override("font_hover_color", Color(0.98, 0.99, 1.0))
-	btn.add_theme_color_override("font_pressed_color", Color(1.0, 1.0, 1.0))
-
-
 func _build_ui() -> void:
-	var outer := MarginContainer.new()
-	outer.set_anchors_preset(Control.PRESET_FULL_RECT)
-	outer.add_theme_constant_override("margin_left", 14)
-	outer.add_theme_constant_override("margin_right", 14)
-	outer.add_theme_constant_override("margin_top", 12)
-	outer.add_theme_constant_override("margin_bottom", 16)
-	add_child(outer)
+	_outer = MarginContainer.new()
+	_outer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_outer.add_theme_constant_override("margin_left", SHADOW_MARGIN_X)
+	_outer.add_theme_constant_override("margin_right", SHADOW_MARGIN_X)
+	_outer.add_theme_constant_override("margin_top", SHADOW_MARGIN_TOP)
+	_outer.add_theme_constant_override("margin_bottom", SHADOW_MARGIN_BOTTOM)
+	add_child(_outer)
 
 	_card = PanelContainer.new()
-	var card_sb := StyleBoxFlat.new()
-	card_sb.bg_color = Color(0.11, 0.12, 0.15, 0.96)
-	card_sb.border_color = Color(1.0, 1.0, 1.0, 0.14)
-	card_sb.set_border_width_all(1)
-	card_sb.set_corner_radius_all(16)
-	card_sb.shadow_size = 12
-	card_sb.shadow_offset = Vector2(0, 5)
-	card_sb.shadow_color = Color(0.0, 0.0, 0.0, 0.45)
-	card_sb.content_margin_left = 16
-	card_sb.content_margin_right = 16
-	card_sb.content_margin_top = 14
-	card_sb.content_margin_bottom = 12
+	var card_sb := UITokens.make_panel_style(
+		UITokens.RADIUS_QUICK_ENTRY,
+		UITokens.SURFACE_PRIMARY,
+		UITokens.BORDER_HAIRLINE,
+		26,
+		Vector2(0, 10)
+	)
+	card_sb.content_margin_left = 18
+	card_sb.content_margin_right = 18
+	card_sb.content_margin_top = 16
+	card_sb.content_margin_bottom = 14
 	_card.add_theme_stylebox_override("panel", card_sb)
 	_card.gui_input.connect(_on_card_gui_input)
-	outer.add_child(_card)
+	_outer.add_child(_card)
+	UITokens.attach_specular_top(_card, UITokens.RADIUS_QUICK_ENTRY)
 
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 10)
+	col.add_theme_constant_override("separation", 12)
 	_card.add_child(col)
 
-	# 1. Top composer row (Claude emblem + borderless TextEdit + subtle close)
+	# 1. Top composer row (vector star emblem + borderless TextEdit + clickable ESC keycap)
 	var top_row := HBoxContainer.new()
-	top_row.add_theme_constant_override("separation", 10)
+	top_row.add_theme_constant_override("separation", 12)
 	col.add_child(top_row)
 
-	var emblem := Label.new()
-	emblem.text = "✦"
-	emblem.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-	emblem.add_theme_font_size_override("font_size", 20)
-	emblem.add_theme_color_override("font_color", Color(0.38, 0.84, 1.0))
+	var emblem := StarEmblem.new()
 	top_row.add_child(emblem)
 
 	_prompt_edit = TextEdit.new()
@@ -119,31 +86,38 @@ func _build_ui() -> void:
 	_prompt_edit.custom_minimum_size = Vector2(0, 72)
 	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	_prompt_edit.scroll_fit_content_height = false
-	_prompt_edit.placeholder_text = "问启明星任何问题…（Enter 发送 · Shift+Enter 换行 · Esc 关闭）"
+	_prompt_edit.placeholder_text = "问启明星任何问题…"
 	_prompt_edit.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
 	_prompt_edit.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	_prompt_edit.add_theme_font_size_override("font_size", 16)
-	_prompt_edit.add_theme_color_override("font_color", Color(0.95, 0.97, 1.0))
-	_prompt_edit.add_theme_color_override("font_placeholder_color", Color(0.55, 0.60, 0.68))
-	_prompt_edit.add_theme_color_override("caret_color", Color(0.38, 0.84, 1.0))
+	_prompt_edit.add_theme_font_size_override("font_size", 15)
+	_prompt_edit.add_theme_color_override("font_color", UITokens.TEXT_PRIMARY)
+	_prompt_edit.add_theme_color_override("font_placeholder_color", UITokens.TEXT_MUTED)
+	_prompt_edit.add_theme_color_override("caret_color", UITokens.ACCENT_CYAN)
 	_prompt_edit.text_changed.connect(_refresh_send_button_state)
 	_prompt_edit.gui_input.connect(_on_prompt_gui_input)
 	top_row.add_child(_prompt_edit)
 
-	var close_btn := Button.new()
-	close_btn.text = "×"
-	close_btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	close_btn.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
-	close_btn.add_theme_stylebox_override("hover", _pill_hover)
-	close_btn.add_theme_stylebox_override("pressed", _pill_hover)
-	close_btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	close_btn.add_theme_font_size_override("font_size", 15)
-	close_btn.add_theme_color_override("font_color", Color(0.55, 0.60, 0.68))
-	close_btn.add_theme_color_override("font_hover_color", Color(0.94, 0.96, 1.0))
-	close_btn.pressed.connect(close_quick_entry)
-	top_row.add_child(close_btn)
+	var esc_btn := Button.new()
+	esc_btn.text = "ESC"
+	esc_btn.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	esc_btn.tooltip_text = "关闭输入框"
+	esc_btn.add_theme_font_size_override("font_size", UITokens.FONT_SIZE_KEYCAP)
+	UITokens.apply_button_states(
+		esc_btn,
+		UITokens.KEYCAP_BG,
+		UITokens.SURFACE_HOVER,
+		UITokens.SURFACE_PRESSED,
+		UITokens.KEYCAP_BORDER,
+		UITokens.RADIUS_KEYCAP,
+		UITokens.TEXT_SECONDARY,
+		8,
+		3,
+		UITokens.TEXT_PRIMARY
+	)
+	esc_btn.pressed.connect(close_quick_entry)
+	top_row.add_child(esc_btn)
 
-	# 2. Optional attachment / screen-capture context chip row
+	# 2. Optional attachment / screen-capture context chip row (no emojis)
 	_chip_row = HBoxContainer.new()
 	_chip_row.add_theme_constant_override("separation", 8)
 	_chip_row.visible = false
@@ -151,52 +125,68 @@ func _build_ui() -> void:
 
 	var chip_card := PanelContainer.new()
 	chip_card.add_theme_stylebox_override(
-		"panel", _make_pill_style(Color(0.14, 0.24, 0.34, 0.92), Color(0.35, 0.82, 0.98, 0.45), 8, 10, 4)
+		"panel",
+		UITokens.make_capsule_style(
+			UITokens.RADIUS_PILL,
+			UITokens.ACCENT_CYAN_BG,
+			UITokens.ACCENT_CYAN_BORDER,
+			10,
+			4,
+			0
+		)
 	)
 	_chip_row.add_child(chip_card)
 
+	var chip_hbox := HBoxContainer.new()
+	chip_hbox.add_theme_constant_override("separation", 6)
+	chip_card.add_child(chip_hbox)
+
+	_chip_icon = UITokens.make_icon_rect("paperclip", 14, UITokens.ACCENT_CYAN)
+	chip_hbox.add_child(_chip_icon)
+
 	_chip_label = Label.new()
-	_chip_label.add_theme_font_size_override("font_size", 12)
-	_chip_label.add_theme_color_override("font_color", Color(0.84, 0.95, 1.0))
-	chip_card.add_child(_chip_label)
+	_chip_label.add_theme_font_size_override("font_size", UITokens.FONT_SIZE_SMALL)
+	_chip_label.add_theme_color_override("font_color", UITokens.TEXT_PRIMARY)
+	chip_hbox.add_child(_chip_label)
 
 	var clr_chip_btn := Button.new()
-	clr_chip_btn.text = "清空"
-	clr_chip_btn.add_theme_font_size_override("font_size", 11)
-	_style_pill_button(clr_chip_btn, false)
+	clr_chip_btn.icon = UITokens.get_icon("close", 12, UITokens.TEXT_SECONDARY, 1.0)
+	clr_chip_btn.expand_icon = false
+	clr_chip_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	clr_chip_btn.custom_minimum_size = Vector2(22, 22)
+	clr_chip_btn.tooltip_text = "清空挂载"
+	UITokens.apply_button_states(
+		clr_chip_btn,
+		UITokens.SURFACE_CHIP,
+		UITokens.SURFACE_HOVER,
+		UITokens.SURFACE_PRESSED,
+		UITokens.BORDER_HAIRLINE,
+		9,
+		UITokens.TEXT_SECONDARY,
+		4,
+		4
+	)
 	clr_chip_btn.pressed.connect(_clear_attachments)
 	_chip_row.add_child(clr_chip_btn)
 
 	# 3. Hairline divider
-	var divider := ColorRect.new()
-	divider.custom_minimum_size = Vector2(0, 1)
-	divider.color = Color(1.0, 1.0, 1.0, 0.08)
-	col.add_child(divider)
+	col.add_child(UITokens.make_divider(0))
 
-	# 4. Bottom toolbar (attachments + look screen + new chat | spacer | model + submit)
+	# 4. Bottom toolbar: 3 monochrome ghost pills | spacer | green-dot model pill + circular arrow send
 	var bot_row := HBoxContainer.new()
 	bot_row.add_theme_constant_override("separation", 8)
 	col.add_child(bot_row)
 
-	_file_btn = Button.new()
-	_file_btn.text = "+ 文件"
-	_file_btn.add_theme_font_size_override("font_size", 12)
-	_style_pill_button(_file_btn, false)
+	_file_btn = _make_toolbar_pill("文件", "plus")
 	_file_btn.pressed.connect(_open_file_picker)
 	bot_row.add_child(_file_btn)
 
-	_screen_btn = Button.new()
-	_screen_btn.text = "📷 看屏"
+	_screen_btn = _make_toolbar_pill("看屏", "eye")
 	_screen_btn.toggle_mode = true
-	_screen_btn.add_theme_font_size_override("font_size", 12)
-	_style_pill_button(_screen_btn, false)
 	_screen_btn.toggled.connect(_on_screen_toggled)
 	bot_row.add_child(_screen_btn)
 
-	_new_chat_btn = Button.new()
-	_new_chat_btn.text = "↻ 新对话"
-	_new_chat_btn.add_theme_font_size_override("font_size", 12)
-	_style_pill_button(_new_chat_btn, false)
+	_new_chat_btn = _make_toolbar_pill("新对话", "refresh")
 	_new_chat_btn.pressed.connect(_on_new_chat_pressed)
 	bot_row.add_child(_new_chat_btn)
 
@@ -204,24 +194,49 @@ func _build_ui() -> void:
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	bot_row.add_child(spacer)
 
+	# Unified model selector pill with emerald status indicator dot
+	var model_pill := PanelContainer.new()
+	model_pill.add_theme_stylebox_override(
+		"panel",
+		UITokens.make_button_style(
+			UITokens.SURFACE_ELEVATED,
+			UITokens.BORDER_HAIRLINE,
+			UITokens.RADIUS_PILL,
+			10,
+			3
+		)
+	)
+	bot_row.add_child(model_pill)
+
+	var model_hbox := HBoxContainer.new()
+	model_hbox.add_theme_constant_override("separation", 6)
+	model_pill.add_child(model_hbox)
+
+	var dot := StatusDot.new()
+	dot.dot_color = UITokens.STATUS_EMERALD
+	model_hbox.add_child(dot)
+
 	_profile_opt = OptionButton.new()
-	_profile_opt.add_theme_font_size_override("font_size", 12)
-	_profile_opt.add_theme_stylebox_override("normal", _pill_normal)
-	_profile_opt.add_theme_stylebox_override("hover", _pill_hover)
-	_profile_opt.add_theme_stylebox_override("pressed", _pill_hover)
-	_profile_opt.add_theme_stylebox_override("focus", _pill_normal)
-	_profile_opt.add_theme_color_override("font_color", Color(0.84, 0.88, 0.94))
+	_profile_opt.add_theme_font_size_override("font_size", UITokens.FONT_SIZE_SMALL)
+	_profile_opt.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+	_profile_opt.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+	_profile_opt.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+	_profile_opt.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	_profile_opt.add_theme_color_override("font_color", UITokens.TEXT_PRIMARY)
+	_profile_opt.add_theme_color_override("font_hover_color", UITokens.ACCENT_CYAN_HOVER)
+	_profile_opt.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	_profile_opt.item_selected.connect(_on_profile_item_selected)
-	bot_row.add_child(_profile_opt)
+	model_hbox.add_child(_profile_opt)
 
 	_send_btn = Button.new()
-	_send_btn.text = "↑"
-	_send_btn.custom_minimum_size = Vector2(34, 30)
-	_send_btn.add_theme_font_size_override("font_size", 15)
+	_send_btn.custom_minimum_size = Vector2(32, 32)
+	_send_btn.expand_icon = false
+	_send_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_send_btn.tooltip_text = "发送 (Enter)"
 	_send_btn.pressed.connect(_submit_prompt)
 	bot_row.add_child(_send_btn)
 
-	# Native multi-file picker for + 文件
+	# Native multi-file picker for 文件
 	_file_dialog = FileDialog.new()
 	_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
 	_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -234,12 +249,57 @@ func _build_ui() -> void:
 	_refresh_send_button_state()
 
 
+func _make_toolbar_pill(label_text: String, icon_name: String, active: bool = false) -> Button:
+	var btn := Button.new()
+	btn.text = label_text
+	btn.add_theme_font_size_override("font_size", UITokens.FONT_SIZE_SMALL)
+	btn.add_theme_constant_override("h_separation", 6)
+	btn.expand_icon = false
+	_apply_pill_style(btn, icon_name, active)
+	return btn
+
+
+func _apply_pill_style(btn: Button, icon_name: String, active: bool) -> void:
+	if active:
+		btn.icon = UITokens.get_icon(icon_name, 14, UITokens.ACCENT_CYAN, 1.0)
+		UITokens.apply_button_states(
+			btn,
+			UITokens.ACCENT_CYAN_BG,
+			UITokens.ACCENT_CYAN_BG.lightened(0.08),
+			UITokens.ACCENT_CYAN_BG.lightened(0.15),
+			UITokens.ACCENT_CYAN_BORDER,
+			UITokens.RADIUS_PILL,
+			UITokens.TEXT_PRIMARY,
+			12,
+			5,
+			UITokens.TEXT_PRIMARY
+		)
+	else:
+		btn.icon = UITokens.get_icon(icon_name, 14, UITokens.TEXT_SECONDARY, 1.0)
+		UITokens.apply_button_states(
+			btn,
+			UITokens.SURFACE_CHIP,
+			UITokens.SURFACE_HOVER,
+			UITokens.SURFACE_PRESSED,
+			UITokens.BORDER_HAIRLINE,
+			UITokens.RADIUS_PILL,
+			UITokens.TEXT_SECONDARY,
+			12,
+			5,
+			UITokens.TEXT_PRIMARY
+		)
+
+
 func open_quick_entry() -> void:
 	var usable := DisplayServer.screen_get_usable_rect()
 	var win_w := size.x
 	var target_x := usable.position.x + int((usable.size.x - win_w) * 0.5)
 	var target_y := usable.position.y + int(usable.size.y * 0.22)
 	position = Vector2i(target_x, target_y)
+
+	if _anim_tween != null and _anim_tween.is_running():
+		_anim_tween.kill()
+
 	visible = true
 	visibility_changed_custom.emit(true)
 	grab_focus()
@@ -247,19 +307,44 @@ func open_quick_entry() -> void:
 		_prompt_edit.call_deferred("grab_focus")
 	call_deferred("_sync_window_height")
 
+	if _outer != null and _card != null:
+		_outer.modulate.a = 0.0
+		_card.pivot_offset = _card.size * 0.5
+		_card.scale = Vector2(0.97, 0.97)
+		_anim_tween = create_tween().set_parallel(true)
+		_anim_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		_anim_tween.tween_property(_outer, "modulate:a", 1.0, 0.15)
+		_anim_tween.tween_property(_card, "scale", Vector2.ONE, 0.15)
+
 
 func close_quick_entry() -> void:
-	if visible:
+	if not visible:
+		return
+	if _anim_tween != null and _anim_tween.is_running():
+		_anim_tween.kill()
+	if _outer == null or _card == null:
 		visible = false
 		visibility_changed_custom.emit(false)
+		return
+	_card.pivot_offset = _card.size * 0.5
+	_anim_tween = create_tween().set_parallel(true)
+	_anim_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_anim_tween.tween_property(_outer, "modulate:a", 0.0, 0.11)
+	_anim_tween.tween_property(_card, "scale", Vector2(0.97, 0.97), 0.11)
+	_anim_tween.finished.connect(func() -> void:
+		visible = false
+		_outer.modulate.a = 1.0
+		_card.scale = Vector2.ONE
+		visibility_changed_custom.emit(false)
+	)
 
 
 func toggle_quick_entry() -> bool:
 	if visible:
 		close_quick_entry()
-	else:
-		open_quick_entry()
-	return visible
+		return false
+	open_quick_entry()
+	return true
 
 
 func sync_profiles(active_profile: String, profiles: Array) -> void:
@@ -326,7 +411,7 @@ func _on_card_gui_input(ev: InputEvent) -> void:
 
 func _on_screen_toggled(pressed: bool) -> void:
 	_with_screen = pressed
-	_style_pill_button(_screen_btn, pressed)
+	_apply_pill_style(_screen_btn, "eye", pressed)
 	_refresh_chips()
 	_refresh_send_button_state()
 
@@ -359,7 +444,7 @@ func _clear_attachments() -> void:
 	_with_screen = false
 	if _screen_btn != null:
 		_screen_btn.set_pressed_no_signal(false)
-		_style_pill_button(_screen_btn, false)
+		_apply_pill_style(_screen_btn, "eye", false)
 	_attached_paths.clear()
 	_refresh_chips()
 	_refresh_send_button_state()
@@ -370,19 +455,22 @@ func _refresh_chips() -> void:
 		return
 	var parts: Array[String] = []
 	if _with_screen:
-		parts.append("📷 将附带当前屏幕画面")
+		parts.append("将附带当前屏幕画面")
 	if not _attached_paths.is_empty():
-		parts.append("📎 已挂载 %d 项文件" % _attached_paths.size())
+		parts.append("已挂载 %d 项文件" % _attached_paths.size())
 	_chip_row.visible = not parts.is_empty()
-	_chip_label.text = "   ".join(parts)
+	if _chip_icon != null:
+		var icon_name := "eye" if (_with_screen and _attached_paths.is_empty()) else "paperclip"
+		_chip_icon.texture = UITokens.get_icon(icon_name, 14, UITokens.ACCENT_CYAN, 2.0)
+	_chip_label.text = " · ".join(parts)
 	call_deferred("_sync_window_height")
 
 
 func _sync_window_height() -> void:
 	if _card == null:
 		return
-	var target_h := int(ceil(_card.get_combined_minimum_size().y)) + 28
-	target_h = clampi(target_h, 178, 300)
+	var target_h := int(ceil(_card.get_combined_minimum_size().y)) + SHADOW_MARGIN_TOP + SHADOW_MARGIN_BOTTOM
+	target_h = clampi(target_h, 210, 340)
 	if size.y != target_h:
 		size = Vector2i(size.x, target_h)
 
@@ -395,14 +483,33 @@ func _refresh_send_button_state() -> void:
 		or _with_screen
 		or not _attached_paths.is_empty()
 	)
-	var st := _send_ready_style if has_content else _send_muted_style
-	_send_btn.add_theme_stylebox_override("normal", st)
-	_send_btn.add_theme_stylebox_override("hover", _send_ready_style if has_content else _pill_hover)
-	_send_btn.add_theme_stylebox_override("pressed", _send_ready_style)
-	_send_btn.add_theme_stylebox_override("focus", st)
-	_send_btn.add_theme_color_override(
-		"font_color", Color(0.06, 0.10, 0.14) if has_content else Color(0.58, 0.62, 0.68)
-	)
+	_has_send_content = has_content
+	if has_content:
+		_send_btn.icon = UITokens.get_icon("arrow_up", 16, Color(0.05, 0.08, 0.12), 1.0)
+		UITokens.apply_button_states(
+			_send_btn,
+			UITokens.ACCENT_CYAN,
+			UITokens.ACCENT_CYAN_HOVER,
+			UITokens.ACCENT_CYAN,
+			Color.TRANSPARENT,
+			14,
+			Color(0.05, 0.08, 0.12),
+			6,
+			6
+		)
+	else:
+		_send_btn.icon = UITokens.get_icon("arrow_up", 16, UITokens.TEXT_SECONDARY, 1.0)
+		UITokens.apply_button_states(
+			_send_btn,
+			UITokens.SURFACE_ELEVATED,
+			UITokens.SURFACE_HOVER,
+			UITokens.SURFACE_ELEVATED,
+			UITokens.BORDER_HAIRLINE,
+			14,
+			UITokens.TEXT_SECONDARY,
+			6,
+			6
+		)
 	_send_btn.disabled = not has_content
 
 
@@ -414,7 +521,7 @@ func _on_profile_item_selected(idx: int) -> void:
 
 func _on_new_chat_pressed() -> void:
 	new_chat_requested.emit()
-	_prompt_edit.placeholder_text = "已开启新对话，输入你的新问题…"
+	_prompt_edit.placeholder_text = "已开启新对话，继续输入…"
 	if _prompt_edit != null:
 		_prompt_edit.call_deferred("grab_focus")
 
@@ -431,3 +538,38 @@ func _submit_prompt() -> void:
 	_clear_attachments()
 	close_quick_entry()
 	prompt_submitted.emit(text, use_screen, paths)
+
+
+class StarEmblem extends Control:
+	func _init() -> void:
+		custom_minimum_size = Vector2(20, 26)
+		size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var c := Vector2(10.0, 14.5)
+		var outer_r := 8.5
+		var inner_r := 2.6
+		var pts := PackedVector2Array([
+			c + Vector2(0, -outer_r),
+			c + Vector2(inner_r, -inner_r),
+			c + Vector2(outer_r, 0),
+			c + Vector2(inner_r, inner_r),
+			c + Vector2(0, outer_r),
+			c + Vector2(-inner_r, inner_r),
+			c + Vector2(-outer_r, 0),
+			c + Vector2(-inner_r, -inner_r),
+		])
+		draw_colored_polygon(pts, UITokens.ACCENT_CYAN)
+
+
+class StatusDot extends Control:
+	var dot_color: Color = Color(0.2039, 0.8275, 0.6000, 1.0)
+
+	func _init() -> void:
+		custom_minimum_size = Vector2(8, 16)
+		size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		draw_circle(Vector2(4.0, size.y * 0.5), 3.2, dot_color)

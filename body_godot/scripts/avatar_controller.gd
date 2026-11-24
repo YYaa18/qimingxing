@@ -22,14 +22,14 @@ const RIG_PATHS := {
 }
 
 const STATE_RING_COLORS := {
-	"idle": Color(0.28, 0.78, 0.96, 0.55),
-	"speaking": Color(0.20, 0.92, 0.85, 0.88),
-	"happy": Color(0.35, 0.95, 0.65, 0.82),
-	"thinking": Color(0.98, 0.78, 0.25, 0.85),
-	"working": Color(0.30, 0.90, 0.50, 0.85),
-	"alert": Color(1.00, 0.48, 0.25, 0.95),
-	"sorry": Color(0.95, 0.36, 0.42, 0.85),
-	"receiving": Color(0.42, 0.88, 1.00, 0.92),
+	"idle": Color(0.2196, 0.7412, 0.9725, 0.52),
+	"speaking": Color(0.2196, 0.7412, 0.9725, 0.88),
+	"happy": Color(0.2039, 0.8275, 0.6000, 0.82),
+	"thinking": Color(0.9843, 0.7490, 0.1412, 0.82),
+	"working": Color(0.2039, 0.8275, 0.6000, 0.84),
+	"alert": Color(0.9725, 0.4431, 0.4431, 0.90),
+	"sorry": Color(0.9725, 0.4431, 0.4431, 0.82),
+	"receiving": Color(0.3373, 0.8000, 0.9490, 0.90),
 }
 
 var _rig_textures: Dictionary = {}
@@ -790,28 +790,48 @@ func _draw() -> void:
 	var breath := 0.5 + 0.5 * sin(_pulse_time * (5.2 if _is_tts_speaking else 2.2))
 	var lift_comp := clampf(-_cur_offset.y / maxf(1.0, 12.0 * _avatar_scale), -0.5, 1.0)
 	var center := RIG_ANCHOR + Vector2(0.0, 88.0 * _avatar_scale)
-	var rx := (72.0 - lift_comp * 6.0 + breath * 6.0 + _rms * 14.0 + _hover_weight * 5.0) * _avatar_scale
-	var ry := (20.0 - lift_comp * 1.5 + breath * 2.2) * _avatar_scale
+	var rx := (72.0 - lift_comp * 6.0 + breath * 5.0 + _rms * 14.0 + _hover_weight * 5.0) * _avatar_scale
+	var ry := (19.0 - lift_comp * 1.5 + breath * 2.0) * _avatar_scale
+	var segs := 48
 
-	var pts := PackedVector2Array()
-	var segs := 44
+	# Soft radial ambient ground projection layers
+	var inner_fill_pts := PackedVector2Array()
+	var mid_fill_pts := PackedVector2Array()
 	for i in range(segs + 1):
 		var ang := TAU * float(i) / float(segs)
-		pts.append(Vector2(center.x + cos(ang) * rx, center.y + sin(ang) * ry))
+		var ca := cos(ang)
+		var sa := sin(ang)
+		inner_fill_pts.append(Vector2(center.x + ca * rx * 0.78, center.y + sa * ry * 0.78))
+		mid_fill_pts.append(Vector2(center.x + ca * rx * 1.04, center.y + sa * ry * 1.04))
+	draw_colored_polygon(mid_fill_pts, Color(base_col.r, base_col.g, base_col.b, 0.06 + 0.04 * breath))
+	draw_colored_polygon(inner_fill_pts, Color(base_col.r, base_col.g, base_col.b, 0.09 + 0.06 * breath))
 
-	var outer_col := Color(base_col.r, base_col.g, base_col.b, base_col.a * (0.48 + 0.42 * breath))
-	draw_polyline(pts, outer_col, maxf(2.0, 3.0 * _avatar_scale), true)
-
-	var inner_col := Color(base_col.r, base_col.g, base_col.b, 0.14 + 0.10 * breath)
-	draw_colored_polygon(pts, inner_col)
+	# Multi-pass diffused glow halo strokes (no flat hard ellipse edge)
+	var halo_passes := [
+		[1.14, 7.0, 0.06],
+		[1.07, 4.4, 0.13],
+		[1.02, 2.6, 0.26],
+		[0.99, 1.4, 0.48],
+	]
+	for pass_cfg in halo_passes:
+		var r_mul: float = pass_cfg[0]
+		var w_px: float = pass_cfg[1] * _avatar_scale
+		var a_mul: float = pass_cfg[2]
+		var ring_pts := PackedVector2Array()
+		for i in range(segs + 1):
+			var ang := TAU * float(i) / float(segs)
+			ring_pts.append(Vector2(center.x + cos(ang) * rx * r_mul, center.y + sin(ang) * ry * r_mul))
+		var pass_col := Color(base_col.r, base_col.g, base_col.b, base_col.a * a_mul * (0.65 + 0.35 * breath))
+		draw_polyline(ring_pts, pass_col, maxf(1.2, w_px), true)
 
 	if ring_state in ["working", "thinking", "speaking"]:
 		var arc_pts := PackedVector2Array()
 		var arc_start := _pulse_time * (3.6 if ring_state == "working" else 2.0)
-		for i in range(14):
-			var ang := arc_start + (PI * 0.55) * (float(i) / 13.0)
-			arc_pts.append(Vector2(center.x + cos(ang) * (rx + 5.0 * _avatar_scale), center.y + sin(ang) * (ry + 2.0 * _avatar_scale)))
-		draw_polyline(arc_pts, Color(base_col.r, base_col.g, base_col.b, 0.95), 2.2, true)
+		for i in range(16):
+			var ang := arc_start + (PI * 0.58) * (float(i) / 15.0)
+			arc_pts.append(Vector2(center.x + cos(ang) * (rx + 4.5 * _avatar_scale), center.y + sin(ang) * (ry + 1.8 * _avatar_scale)))
+		draw_polyline(arc_pts, Color(base_col.r, base_col.g, base_col.b, 0.25), maxf(3.0, 4.5 * _avatar_scale), true)
+		draw_polyline(arc_pts, Color(base_col.r, base_col.g, base_col.b, 0.85), maxf(1.4, 1.9 * _avatar_scale), true)
 
 	if is_docked_tucked():
 		var tab_col := Color(0.32, 0.92, 1.0, 0.55 + 0.35 * breath)

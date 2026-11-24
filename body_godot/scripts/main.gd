@@ -33,10 +33,12 @@ func _ready() -> void:
 
 	_load_audio_prefs()
 	tray.call("sync_toggles", avatar.call("is_roam_enabled"), audio.earcons_enabled, audio.call("is_ambient_enabled"))
-	tray.call("sync_shortcut_hints", str(_shortcuts.get("chat_input_hotkey", "")), str(_shortcuts.get("ptt_hotkey", "")))
+	tray.call("sync_shortcut_hints", str(_shortcuts.get("chat_input_hotkey", "")), str(_shortcuts.get("ptt_hotkey", "")), str(_shortcuts.get("settings_hotkey", "")))
+	tray.call("sync_status", false, _cached_active_profile)
 	overlay.call("set_avatar_scale", avatar.call("get_avatar_scale"))
 
 	ws.connected_changed.connect(func(ok: bool) -> void:
+		tray.call("sync_status", ok, _cached_active_profile)
 		if ok:
 			overlay.show_transient_status("启明星已连接", 2.5)
 		else:
@@ -182,6 +184,7 @@ func _on_envelope(event_type: String, turn_id: String, payload: Dictionary) -> v
 			if prof != "":
 				_cached_active_profile = prof
 				overlay.show_transient_status("启明星已上线 (%s)" % prof, 2.2)
+			tray.call("sync_status", bool(ws.call("is_connected_open")), _cached_active_profile)
 			var profs: Variant = payload.get("profiles", [])
 			if typeof(profs) == TYPE_ARRAY:
 				_cached_profiles = profs
@@ -297,7 +300,8 @@ func _apply_shortcuts_payload(payload: Dictionary) -> void:
 	tray.call(
 		"sync_shortcut_hints",
 		str(_shortcuts.get("chat_input_hotkey", "")),
-		str(_shortcuts.get("ptt_hotkey", ""))
+		str(_shortcuts.get("ptt_hotkey", "")),
+		str(_shortcuts.get("settings_hotkey", ""))
 	)
 
 
@@ -354,6 +358,10 @@ func _input(event: InputEvent) -> void:
 		return
 	var ev := event as InputEventKey
 	if not ev.pressed or ev.echo:
+		return
+	if ev.meta_pressed and not ev.alt_pressed and not ev.ctrl_pressed and ev.keycode == KEY_COMMA:
+		_open_settings_window(0)
+		get_viewport().set_input_as_handled()
 		return
 	var mapping := [
 		["chat_input", str(_shortcuts.get("chat_input_hotkey", ""))],
