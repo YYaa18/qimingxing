@@ -1,18 +1,16 @@
 extends Control
-class_name QimingxingAvatarController
 
 signal avatar_clicked
 signal files_dropped_queued(paths: PackedStringArray)
 
-const SPRITE_PATHS := {
-	"idle": "res://assets/sprites/idle.png",
-	"speaking": "res://assets/sprites/speaking.png",
-	"happy": "res://assets/sprites/happy.png",
-	"thinking": "res://assets/sprites/thinking.png",
-	"working": "res://assets/sprites/working.png",
-	"alert": "res://assets/sprites/alert.png",
-	"sorry": "res://assets/sprites/sorry.png",
-	"receiving": "res://assets/sprites/receiving.png",
+const FACE_DISPLAY_SCRIPT := preload("res://scripts/face_display.gd")
+
+const RIG_PATHS := {
+	"body": "res://assets/rig/body.png",
+	"head_shell": "res://assets/rig/head_shell.png",
+	"antenna": "res://assets/rig/antenna.png",
+	"hand_left": "res://assets/rig/hand_left.png",
+	"hand_right": "res://assets/rig/hand_right.png",
 }
 
 const STATE_RING_COLORS := {
@@ -26,12 +24,20 @@ const STATE_RING_COLORS := {
 	"receiving": Color(0.42, 0.88, 1.00, 0.92),
 }
 
-var _textures: Dictionary = {}
-var _sprite_rect: TextureRect
+var _rig_textures: Dictionary = {}
+var _rig_root: Node2D
+var _body_sprite: Sprite2D
+var _hand_left: Sprite2D
+var _hand_right: Sprite2D
+var _head_pivot: Node2D
+var _head_sprite: Sprite2D
+var _antenna_pivot: Node2D
+var _antenna_sprite: Sprite2D
+var _face_display: Node2D
+
 var _base_state: String = "idle"
-var _rendered_state: String = ""
+var _last_pose_state: String = "idle"
 var _is_tts_speaking: bool = false
-var _mouth_open: bool = false
 var _rms: float = 0.0
 var _pulse_time: float = 0.0
 
@@ -43,13 +49,20 @@ var _drag_moved: bool = false
 var _is_hovered: bool = false
 var _hover_weight: float = 0.0
 var _cur_offset: Vector2 = Vector2.ZERO
-var _cur_rot: float = 0.0
-var _cur_scale: Vector2 = Vector2.ONE
 var _bounce_energy: float = 0.0
 var _bounce_phase: float = 0.0
 
+# Spring physics & gaze state for option-3 multi-part rig
+var _prev_head_rot: float = 0.0
+var _antenna_rot: float = 0.0
+var _antenna_vel: float = 0.0
+var _cur_gaze: Vector2 = Vector2.ZERO
+var _blink_timer: float = 3.2
+var _blink_progress: float = 0.0
+var _is_blinking: bool = false
+
 var _poke_happy_timer: float = 0.0
-var _idle_quirk_cooldown: float = 6.5
+var _idle_quirk_cooldown: float = 7.0
 var _idle_quirk_active: float = 0.0
 var _idle_quirk_dir: float = 1.0
 
@@ -57,32 +70,18 @@ var _receiving_hold_timer: float = 0.0
 var _hide_failsafe_timer: float = 0.0
 var _ui_interactive_rects: Array[Rect2] = []
 
+const RIG_ANCHOR := Vector2(130.0, 146.0)
+const LEFT_HAND_BASE := Vector2(-58.0, 17.0)
+const RIGHT_HAND_BASE := Vector2(57.0, 17.0)
+
 
 func _ready() -> void:
-	for k in SPRITE_PATHS.keys():
-		var path: String = SPRITE_PATHS[k]
-		var tex: Texture2D = null
-		var abs_path := ProjectSettings.globalize_path(path)
-		if FileAccess.file_exists(abs_path):
-			var img := Image.load_from_file(abs_path)
-			if img != null and not img.is_empty():
-				tex = ImageTexture.create_from_image(img)
-		if tex == null and ResourceLoader.exists(path):
-			var res := load(path)
-			if res is Texture2D:
-				tex = res
+	for k in RIG_PATHS.keys():
+		var tex := _load_tex(RIG_PATHS[k])
 		if tex != null:
-			_textures[k] = tex
+			_rig_textures[k] = tex
 
-	_sprite_rect = TextureRect.new()
-	_sprite_rect.name = "SpriteRect"
-	_sprite_rect.position = Vector2.ZERO
-	_sprite_rect.size = size
-	_sprite_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	_sprite_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	_sprite_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_sprite_rect.pivot_offset = Vector2(size.x * 0.5, size.y * 0.72)
-	add_child(_sprite_rect)
+	_build_rig_hierarchy()
 
 	mouse_entered.connect(func() -> void: _is_hovered = true)
 	mouse_exited.connect(func() -> void: _is_hovered = false)
@@ -101,14 +100,77 @@ func _ready() -> void:
 				usable.position.y + usable.size.y - win.size.y - 36
 			)
 
-	_apply_sprite("idle", false)
 	call_deferred("refresh_mouse_passthrough")
 
 
+func _load_tex(res_path: String) -> Texture2D:
+	var abs_path := ProjectSettings.globalize_path(res_path)
+	if FileAccess.file_exists(abs_path):
+		var img := Image.load_from_file(abs_path)
+		if img != null and not img.is_empty():
+			return ImageTexture.create_from_image(img)
+	if ResourceLoader.exists(res_path):
+		var res := load(res_path)
+		if res is Texture2D:
+			return res
+	return null
+
+
+func _make_sprite(tex_key: String, sprite_offset: Vector2) -> Sprite2D:
+	var sp := Sprite2D.new()
+	sp.texture = _rig_textures.get(tex_key, null)
+	sp.centered = false
+	sp.offset = sprite_offset
+	return sp
+
+
+func _build_rig_hierarchy() -> void:
+	_rig_root = Node2D.new()
+	_rig_root.name = "RigRoot"
+	_rig_root.position = RIG_ANCHOR
+	add_child(_rig_root)
+
+	# 1. Floating hands & torso underneath head collar
+	_hand_left = _make_sprite("hand_left", Vector2(-24.0, -8.0))
+	_hand_left.position = LEFT_HAND_BASE
+	_rig_root.add_child(_hand_left)
+
+	_hand_right = _make_sprite("hand_right", Vector2(-7.0, -8.0))
+	_hand_right.position = RIGHT_HAND_BASE
+	_rig_root.add_child(_hand_right)
+
+	_body_sprite = _make_sprite("body", Vector2(-48.0, -39.0))
+	_body_sprite.position = Vector2(0.0, 38.0)
+	_rig_root.add_child(_body_sprite)
+
+	# 2. Articulated Head Pivot at neck joint (0, 0)
+	_head_pivot = Node2D.new()
+	_head_pivot.name = "HeadPivot"
+	_head_pivot.position = Vector2.ZERO
+	_rig_root.add_child(_head_pivot)
+
+	# Antenna socket tucks cleanly behind helmet dome (crown = (0, -102))
+	_antenna_pivot = Node2D.new()
+	_antenna_pivot.name = "AntennaPivot"
+	_antenna_pivot.position = Vector2(0.0, -102.0)
+	_head_pivot.add_child(_antenna_pivot)
+
+	_antenna_sprite = _make_sprite("antenna", Vector2(-13.0, -28.0))
+	_antenna_pivot.add_child(_antenna_sprite)
+
+	_head_sprite = _make_sprite("head_shell", Vector2(-64.0, -104.0))
+	_head_pivot.add_child(_head_sprite)
+
+	# 3. Real-time vector cyan LED face inside visor
+	_face_display = Node2D.new()
+	_face_display.name = "FaceDisplay"
+	_face_display.set_script(FACE_DISPLAY_SCRIPT)
+	_face_display.position = Vector2(0.0, -40.0)
+	_head_pivot.add_child(_face_display)
+
+
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_RESIZED and _sprite_rect != null:
-		_sprite_rect.size = size
-		_sprite_rect.pivot_offset = Vector2(size.x * 0.5, size.y * 0.72)
+	if what == NOTIFICATION_RESIZED:
 		refresh_mouse_passthrough()
 
 
@@ -130,31 +192,27 @@ func set_avatar_state(emotion: String, activity: String) -> void:
 				mapped = "sorry"
 			_:
 				mapped = "speaking" if activity == "speaking" else "idle"
-	_base_state = mapped
-	if _receiving_hold_timer <= 0.0:
-		_apply_current_visual(true)
+	if mapped != _base_state:
+		_base_state = mapped
+		trigger_bounce(0.75)
 
 
 func set_approval_alert(active: bool) -> void:
-	if active:
+	if active and _base_state != "alert":
 		_base_state = "alert"
-		_apply_current_visual(true)
+		trigger_bounce(0.85)
 
 
 func set_tts_speaking(speaking: bool) -> void:
 	_is_tts_speaking = speaking
 	if not speaking:
-		_mouth_open = false
 		_rms = 0.0
 		if _base_state == "speaking":
 			_base_state = "idle"
-	_apply_current_visual(false)
 
 
 func set_tts_amplitude(rms: float) -> void:
 	_rms = rms
-	_mouth_open = _is_tts_speaking and (rms > 0.05)
-	_apply_current_visual(false)
 
 
 func set_ui_interactive_rects(rects: Array[Rect2]) -> void:
@@ -167,51 +225,31 @@ func trigger_bounce(strength: float = 0.85) -> void:
 	_bounce_phase = 0.0
 
 
-func _apply_current_visual(allow_bounce: bool = true) -> void:
+func _active_pose_state() -> String:
 	if _receiving_hold_timer > 0.0:
-		_apply_sprite("receiving", allow_bounce)
-		return
+		return "receiving"
 	if _poke_happy_timer > 0.0 and not _is_tts_speaking and _base_state == "idle":
-		_apply_sprite("happy", allow_bounce)
-		return
-	if _is_tts_speaking and _mouth_open and _base_state in ["idle", "speaking", "happy"]:
-		_apply_sprite("speaking", false)
-	else:
-		_apply_sprite(_base_state, allow_bounce)
-
-
-func _apply_sprite(state_key: String, allow_bounce: bool = true) -> void:
-	if _sprite_rect == null:
-		return
-	var tex: Texture2D = _textures.get(state_key, _textures.get("idle"))
-	var changed := state_key != _rendered_state
-	_rendered_state = state_key
-	if tex != null and _sprite_rect.texture != tex:
-		_sprite_rect.texture = tex
-	if changed and allow_bounce:
-		trigger_bounce(0.75)
+		return "happy"
+	return _base_state
 
 
 func _process(delta: float) -> void:
 	_pulse_time += delta
 	if _receiving_hold_timer > 0.0:
 		_receiving_hold_timer -= delta
-		if _receiving_hold_timer <= 0.0:
-			_apply_current_visual(false)
-
 	if _poke_happy_timer > 0.0:
 		_poke_happy_timer -= delta
-		if _poke_happy_timer <= 0.0:
-			_apply_current_visual(false)
-
 	if _hide_failsafe_timer > 0.0:
 		_hide_failsafe_timer -= delta
 		if _hide_failsafe_timer <= 0.0:
 			set_capture_hidden(false)
 
-	# Idle life cues so the desktop companion feels alive even when quiet
-	var visual_state := _rendered_state if _rendered_state != "" else _base_state
-	if visual_state == "idle" and not _dragging and not _is_tts_speaking and _receiving_hold_timer <= 0.0:
+	var pose_state := _active_pose_state()
+	if pose_state != _last_pose_state:
+		_last_pose_state = pose_state
+
+	# Random idle quirks
+	if pose_state == "idle" and not _dragging and not _is_tts_speaking:
 		if _idle_quirk_active > 0.0:
 			_idle_quirk_active -= delta
 		else:
@@ -226,96 +264,186 @@ func _process(delta: float) -> void:
 	else:
 		_idle_quirk_active = 0.0
 
-	_update_procedural_motion(delta, visual_state)
+	_update_blink(delta)
+	_update_rig_kinematics(delta, pose_state)
 	queue_redraw()
 
 
-func _update_procedural_motion(delta: float, state_key: String) -> void:
-	if _sprite_rect == null:
-		return
+func _update_blink(delta: float) -> void:
+	if _is_blinking:
+		_blink_progress += delta * 9.5
+		if _blink_progress >= PI:
+			_is_blinking = false
+			_blink_progress = 0.0
+			_blink_timer = 0.14 if randf() < 0.2 else randf_range(2.6, 5.4)
+		_face_display.set("blink_amount", sin(_blink_progress))
+	else:
+		_blink_timer -= delta
+		if _blink_timer <= 0.0:
+			_is_blinking = true
+			_blink_progress = 0.0
+		_face_display.set("blink_amount", 0.0)
 
-	_hover_weight = move_toward(_hover_weight, 1.0 if (_is_hovered and not _dragging) else 0.0, delta * 5.5)
 
-	# 1. Base magnetic-levitation float & state-specific rhythm
-	var float_y := sin(_pulse_time * 2.15) * 6.0
-	var sway_rot := sin(_pulse_time * 1.1) * deg_to_rad(2.0)
-	var breath := sin(_pulse_time * 2.15 - 0.5)
-	var scale_x := 1.0 + breath * 0.014
-	var scale_y := 1.0 - breath * 0.014
-	var lean_x := 0.0
+func _compute_global_pointer_offset() -> Vector2:
+	var win := get_window()
+	if win == null:
+		return Vector2.ZERO
+	var global_mouse := Vector2(DisplayServer.mouse_get_position())
+	var head_screen := Vector2(win.position) + position + RIG_ANCHOR + Vector2(0.0, -40.0)
+	var diff := global_mouse - head_screen
+	return Vector2(
+		clampf(diff.x / 460.0, -1.0, 1.0),
+		clampf(diff.y / 380.0, -1.0, 1.0)
+	)
 
-	match state_key:
-		"thinking":
-			float_y = sin(_pulse_time * 1.55) * 4.5 - 2.0
-			sway_rot = sin(_pulse_time * 1.25) * deg_to_rad(5.2)
-		"working":
-			float_y = sin(_pulse_time * 4.0) * 3.5 + 1.0
-			sway_rot = deg_to_rad(3.2) + sin(_pulse_time * 3.8) * deg_to_rad(1.4)
-			lean_x = 2.0
-		"alert", "receiving":
-			float_y = sin(_pulse_time * 3.2) * 5.0 - 5.5
-			sway_rot = sin(_pulse_time * 2.4) * deg_to_rad(2.8)
-		"sorry":
-			float_y = sin(_pulse_time * 1.4) * 3.0 + 4.5
-			sway_rot = deg_to_rad(-3.2) + sin(_pulse_time * 1.1) * deg_to_rad(1.2)
-		"happy":
-			float_y = -absf(sin(_pulse_time * 3.8)) * 7.5
-			sway_rot = sin(_pulse_time * 3.4) * deg_to_rad(4.2)
 
-	# 2. Voice amplitude dance when speaking
+func _update_rig_kinematics(delta: float, pose_state: String) -> void:
+	var dt := minf(delta, 0.05)
+	_hover_weight = move_toward(_hover_weight, 1.0 if (_is_hovered and not _dragging) else 0.0, dt * 5.5)
+
+	# 1. Global mouse tracking for gaze + gentle head look
+	var target_gaze := _compute_global_pointer_offset()
+	if pose_state == "thinking":
+		target_gaze = Vector2(0.65, -0.55) + target_gaze * 0.25
+	elif pose_state == "sorry":
+		target_gaze = Vector2(target_gaze.x * 0.3, 0.55)
+	_cur_gaze = _cur_gaze.lerp(target_gaze, minf(1.0, dt * 8.5))
+
+	# 2. Whole-body magnetic levitation & spring squash/stretch
+	var float_y := sin(_pulse_time * 2.15) * 5.5
+	var breath := sin(_pulse_time * 2.15 - 0.6)
+	var root_sx := 1.0 + breath * 0.012
+	var root_sy := 1.0 - breath * 0.012
+	var root_rot := sin(_pulse_time * 1.1) * deg_to_rad(1.4)
+
+	if pose_state == "working":
+		float_y = sin(_pulse_time * 4.2) * 3.2 + 1.5
+		root_rot = deg_to_rad(2.5)
+	elif pose_state == "alert" or pose_state == "receiving":
+		float_y = sin(_pulse_time * 3.0) * 4.5 - 5.0
+	elif pose_state == "sorry":
+		float_y = sin(_pulse_time * 1.4) * 2.5 + 4.5
+		root_rot = deg_to_rad(-2.2)
+	elif pose_state == "happy":
+		float_y = -absf(sin(_pulse_time * 3.8)) * 7.0
+
 	if _is_tts_speaking:
-		float_y -= _rms * 7.0
-		var v_boost := _rms * 0.065
-		scale_x += v_boost * 0.65
-		scale_y += v_boost
+		float_y -= _rms * 6.5
+		root_sx += _rms * 0.045
+		root_sy += _rms * 0.06
 
-	# 3. Damped spring squash & stretch on state change / click poke
 	if _bounce_energy > 0.004:
-		_bounce_phase += delta * 14.0
+		_bounce_phase += dt * 14.0
 		var wave := sin(_bounce_phase) * _bounce_energy
-		float_y -= maxf(0.0, wave) * 12.0
-		scale_x -= wave * 0.065
-		scale_y += wave * 0.085
-		_bounce_energy = lerpf(_bounce_energy, 0.0, minf(1.0, delta * 5.8))
+		float_y -= maxf(0.0, wave) * 11.0
+		root_sx -= wave * 0.06
+		root_sy += wave * 0.08
+		_bounce_energy = lerpf(_bounce_energy, 0.0, minf(1.0, dt * 5.8))
 	else:
 		_bounce_energy = 0.0
 
-	# 4. Playful idle head-tilt quirk
-	if _idle_quirk_active > 0.0:
-		var env := sin(PI * clampf(_idle_quirk_active / 1.25, 0.0, 1.0))
-		sway_rot += _idle_quirk_dir * deg_to_rad(6.5) * env
-
-	# 5. Mouse hover response: subtle lift & look toward pointer
 	if _hover_weight > 0.001:
-		var rel_x := clampf((get_local_mouse_position().x - size.x * 0.5) / maxf(1.0, size.x * 0.5), -1.0, 1.0)
-		float_y -= 4.5 * _hover_weight
-		sway_rot += rel_x * deg_to_rad(5.0) * _hover_weight
-		scale_x += 0.03 * _hover_weight
-		scale_y += 0.03 * _hover_weight
+		float_y -= 4.0 * _hover_weight
+		root_sx += 0.025 * _hover_weight
+		root_sy += 0.025 * _hover_weight
 
-	var target_offset := Vector2(lean_x, float_y)
-	var target_scale := Vector2(scale_x, scale_y)
-	var smooth := minf(1.0, delta * 14.0)
-	_cur_offset = _cur_offset.lerp(target_offset, smooth)
-	_cur_rot = lerpf(_cur_rot, sway_rot, smooth)
-	_cur_scale = _cur_scale.lerp(target_scale, smooth)
+	var target_root_pos := RIG_ANCHOR + Vector2(0.0, float_y)
+	_cur_offset = _cur_offset.lerp(Vector2(0.0, float_y), minf(1.0, dt * 12.0))
+	_rig_root.position = RIG_ANCHOR + _cur_offset
+	_rig_root.rotation = lerpf(_rig_root.rotation, root_rot, minf(1.0, dt * 10.0))
+	_rig_root.scale = _rig_root.scale.lerp(Vector2(root_sx, root_sy), minf(1.0, dt * 12.0))
+	_body_sprite.scale = Vector2(1.0 + breath * 0.015, 1.0 - breath * 0.015)
 
-	_sprite_rect.position = _cur_offset
-	_sprite_rect.rotation = _cur_rot
-	_sprite_rect.scale = _cur_scale
+	# 3. Articulated head rotation (tracks cursor + idle quirk + thinking tilt)
+	var target_head_rot := _cur_gaze.x * deg_to_rad(6.0)
+	var target_head_pos := Vector2(_cur_gaze.x * 1.8, sin(_pulse_time * 2.15 - 0.3) * 1.4)
+	if pose_state == "thinking":
+		target_head_rot += deg_to_rad(-5.5) + sin(_pulse_time * 1.3) * deg_to_rad(3.5)
+	elif pose_state == "sorry":
+		target_head_rot += deg_to_rad(-5.0)
+		target_head_pos.y += 3.0
+	elif pose_state == "working":
+		target_head_rot += deg_to_rad(3.5)
+	elif _idle_quirk_active > 0.0:
+		var qenv := sin(PI * clampf(_idle_quirk_active / 1.25, 0.0, 1.0))
+		target_head_rot += _idle_quirk_dir * deg_to_rad(9.5) * qenv
+
+	var new_head_rot := lerpf(_head_pivot.rotation, target_head_rot, minf(1.0, dt * 10.0))
+	var head_ang_vel := (new_head_rot - _prev_head_rot) / maxf(0.001, dt)
+	_prev_head_rot = new_head_rot
+	_head_pivot.rotation = new_head_rot
+	_head_pivot.position = _head_pivot.position.lerp(target_head_pos, minf(1.0, dt * 10.0))
+
+	# 4. Spring pendulum physics on star antenna
+	var ant_rest := sin(_pulse_time * 2.4) * deg_to_rad(3.0) - new_head_rot * 0.25
+	var stiffness := 130.0
+	var damping := 7.5
+	var ant_acc := -stiffness * (_antenna_rot - ant_rest) - damping * _antenna_vel - head_ang_vel * 0.55
+	_antenna_vel += ant_acc * dt
+	_antenna_rot = clampf(_antenna_rot + _antenna_vel * dt, deg_to_rad(-24.0), deg_to_rad(24.0))
+	_antenna_pivot.rotation = _antenna_rot
+
+	# 5. Independent floating hands with out-of-phase levitation & pose targets
+	var hl_float := Vector2(sin(_pulse_time * 1.9) * 1.5, sin(_pulse_time * 2.5 + 0.7) * 4.5)
+	var hr_float := Vector2(sin(_pulse_time * 1.9 + 1.4) * 1.5, sin(_pulse_time * 2.5 + 2.2) * 4.5)
+	var hl_pos := LEFT_HAND_BASE + hl_float
+	var hr_pos := RIGHT_HAND_BASE + hr_float
+	var hl_rot := sin(_pulse_time * 1.7 + 0.4) * deg_to_rad(4.0)
+	var hr_rot := sin(_pulse_time * 1.7 + 2.0) * deg_to_rad(4.0)
+
+	match pose_state:
+		"happy":
+			hr_pos = Vector2(56.0, -8.0) + hr_float * 0.4
+			hr_rot = deg_to_rad(-115.0) + sin(_pulse_time * 11.0) * deg_to_rad(20.0)
+			hl_pos = LEFT_HAND_BASE + Vector2(-2.0, 2.0) + hl_float * 0.7
+		"thinking":
+			hr_pos = Vector2(26.0, 4.0) + hr_float * 0.25
+			hr_rot = deg_to_rad(-130.0)
+			hl_pos = Vector2(-46.0, 22.0) + hl_float * 0.5
+			hl_rot = deg_to_rad(-10.0)
+		"working":
+			var work_bob := sin(_pulse_time * 9.0) * 3.0
+			hl_pos = Vector2(-34.0, 16.0 + work_bob)
+			hr_pos = Vector2(34.0, 16.0 - work_bob)
+			hl_rot = deg_to_rad(-55.0)
+			hr_rot = deg_to_rad(55.0)
+		"alert":
+			hr_pos = Vector2(54.0, -4.0) + hr_float * 0.35
+			hr_rot = deg_to_rad(-118.0) + sin(_pulse_time * 4.5) * deg_to_rad(6.0)
+		"sorry":
+			hl_pos = Vector2(-38.0, 25.0) + hl_float * 0.4
+			hr_pos = Vector2(38.0, 25.0) + hr_float * 0.4
+			hl_rot = deg_to_rad(-28.0)
+			hr_rot = deg_to_rad(28.0)
+		"receiving":
+			hl_pos = Vector2(-64.0, 4.0) + hl_float * 0.5
+			hr_pos = Vector2(64.0, 4.0) + hr_float * 0.5
+			hl_rot = deg_to_rad(85.0) + sin(_pulse_time * 4.5) * deg_to_rad(8.0)
+			hr_rot = deg_to_rad(-85.0) - sin(_pulse_time * 4.5) * deg_to_rad(8.0)
+
+	var h_smooth := minf(1.0, dt * 11.0)
+	_hand_left.position = _hand_left.position.lerp(hl_pos, h_smooth)
+	_hand_right.position = _hand_right.position.lerp(hr_pos, h_smooth)
+	_hand_left.rotation = lerpf(_hand_left.rotation, hl_rot, h_smooth)
+	_hand_right.rotation = lerpf(_hand_right.rotation, hr_rot, h_smooth)
+
+	# 6. Update procedural LED face state
+	_face_display.set("expression", pose_state)
+	_face_display.set("gaze", _cur_gaze)
+	_face_display.set("is_speaking", _is_tts_speaking)
+	_face_display.set("rms", _rms)
 
 
 func _draw() -> void:
 	# Companion breathing status ring inversely coupled with levitation height
-	var ring_state := "receiving" if _receiving_hold_timer > 0.0 else (
-		"speaking" if _is_tts_speaking else (
-			"happy" if (_poke_happy_timer > 0.0 and _base_state == "idle") else _base_state
-		)
-	)
+	var ring_state := _active_pose_state()
+	if _is_tts_speaking:
+		ring_state = "speaking"
 	var base_col: Color = STATE_RING_COLORS.get(ring_state, STATE_RING_COLORS["idle"])
 	var breath := 0.5 + 0.5 * sin(_pulse_time * (5.2 if _is_tts_speaking else 2.2))
 	var lift_comp := clampf(-_cur_offset.y / 12.0, -0.5, 1.0)
-	var center := Vector2(size.x * 0.5, size.y * 0.88)
+	var center := Vector2(size.x * 0.5, size.y * 0.90)
 	var rx := 72.0 - lift_comp * 6.0 + breath * 6.0 + _rms * 14.0 + _hover_weight * 5.0
 	var ry := 20.0 - lift_comp * 1.5 + breath * 2.2
 
@@ -331,7 +459,6 @@ func _draw() -> void:
 	var inner_col := Color(base_col.r, base_col.g, base_col.b, 0.14 + 0.10 * breath)
 	draw_colored_polygon(pts, inner_col)
 
-	# Rotating telemetry arc while thinking or executing tools
 	if ring_state in ["working", "thinking", "speaking"]:
 		var arc_pts := PackedVector2Array()
 		var arc_start := _pulse_time * (3.6 if ring_state == "working" else 2.0)
@@ -354,9 +481,8 @@ func _gui_input(event: InputEvent) -> void:
 				var was_click := _dragging and not _drag_moved
 				_dragging = false
 				if was_click:
-					_poke_happy_timer = 1.35
+					_poke_happy_timer = 1.6
 					trigger_bounce(1.0)
-					_apply_current_visual(false)
 					avatar_clicked.emit()
 	elif event is InputEventMouseMotion and _dragging:
 		var cur := DisplayServer.mouse_get_position()
@@ -370,7 +496,7 @@ func _on_window_files_dropped(files: PackedStringArray) -> void:
 	if files.is_empty():
 		return
 	_receiving_hold_timer = 1.8
-	_apply_sprite("receiving", true)
+	trigger_bounce(0.9)
 	files_dropped_queued.emit(files)
 
 
@@ -391,8 +517,7 @@ func refresh_mouse_passthrough() -> void:
 	var win := get_window()
 	if win == null:
 		return
-	# Compute convex bounding region covering character body + any active UI overlays
-	var avatar_rect := Rect2(position + Vector2(36.0, 20.0), size - Vector2(72.0, 24.0))
+	var avatar_rect := Rect2(position + Vector2(30.0, 14.0), size - Vector2(60.0, 16.0))
 	var combined := avatar_rect
 	for r in _ui_interactive_rects:
 		if r.size.x > 1.0 and r.size.y > 1.0:
