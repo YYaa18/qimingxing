@@ -123,3 +123,62 @@ context_budget:
   l3_recall_tokens: 500
   l3_desktop_ocr_tokens: 1500
   total_max_tokens: 6000
+
+tools:
+  enabled: true
+  max_tool_steps: 8
+  approval_timeout_sec: 60
+  web_search:
+    enabled: true
+    provider: "deepseek"  # 复用 DEEPSEEK_API_KEY
+    base_url: "https://api.deepseek.com/v1"
+    api_key: "${DEEPSEEK_API_KEY}"
+    timeout_seconds: 15
+    max_results: 5
+    max_fetch_chars: 6000
+  shell:
+    enabled: true
+    safe_commands:
+      - "pwd"
+      - "ls"
+      - "git status"
+      - "git log"
+      - "git diff"
+      - "which"
+      - "whoami"
+      - "uname"
+      - "date"
+      - "echo"
+      - "head"
+      - "tail"
+      - "wc"
+      - "cat"
+    blocked_patterns:
+      - "rm\\s+-[a-zA-Z]*r[a-zA-Z]*f?\\s+(/|\\*|~)"
+      - "rm\\s+-[a-zA-Z]*f[a-zA-Z]*r\\s+(/|\\*|~)"
+      - "\\bmkfs(\\.[a-z0-9]+)?\\b"
+      - "\\bdd\\s+if="
+      - "\\bsudo\\b"
+      - "\\b(shutdown|reboot|halt|poweroff)\\b"
+      - "\\bdiskutil\\s+(erase|partition|zeroDisk)"
+      - "\\bprintenv\\b"
+      - "config\\.yaml"
+      - "\\.env\\b"
+    timeout_sec: 30
+    default_cwd: "~"
+    max_output_chars: 4000
+  computer_use:
+    enabled: false  # 阶段四暂缓，待方案细化后启用
+    max_steps: 15
+    require_session_approval: true
+    corner_kill_switch: true
+    action_delay_ms: 350
+  skills:
+    auto_learn: true
+    max_recalled_skills: 2
+    learn_profile: "fast_deepseek"
+  usage_alert:
+    enabled: true
+    daily_warn_cny: 5.0
+    turn_warn_tokens: 50000
+    hard_block: false  # 仅做软额度提醒与查账，严禁硬性截断正在执行的任务

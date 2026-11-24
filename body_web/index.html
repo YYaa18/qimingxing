@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>启明星 · Qimingxing MVP 2.0</title>
+  <title>启明星 · Qimingxing MVP 4.0</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -31,6 +31,11 @@
       <span id="sensesBadge" class="senses-badge offline">桌面感官未连接</span>
       <span id="windowSummary">未收到窗口上下文</span>
     </div>
+    <div id="toolStatusBar" class="tool-status-bar">
+      <span id="toolStepBadge" class="tool-step-badge">工具执行</span>
+      <span id="toolStatusLabel">准备中…</span>
+    </div>
+    <button id="emergencyStopBtn" class="btn btn-emergency" type="button" hidden>🚨 紧急停止</button>
     <div id="captureIndicator" class="capture-indicator">
       <span>👁️</span>
       <span id="captureLabel">正在查看当前桌面…</span>
@@ -50,6 +55,10 @@
     <section class="chat-panel">
       <div id="permissionBanner" class="banner permission-banner">
         <span id="permissionText"></span>
+      </div>
+      <div id="usageAlertBanner" class="banner permission-banner">
+        <span id="usageAlertText"></span>
+        <button id="dismissUsageBtn" class="btn-ghost" type="button">知道了</button>
       </div>
       <div id="errorBanner" class="banner error-banner">
         <span id="errorText"></span>

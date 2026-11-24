@@ -230,6 +230,28 @@ class OutputToolStatusPayload(ProtocolModel):
     status: Literal["running", "completed", "error"]
     tool: str
     label: str = ""
+    step: Optional[int] = None
+    max_steps: Optional[int] = None
+
+
+RiskLevel = Literal["safe", "confirm", "blocked"]
+
+
+class ToolApprovalRequestPayload(ProtocolModel):
+    approval_id: str
+    turn_id: str
+    tool_name: str
+    risk_level: RiskLevel = "confirm"
+    summary: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    timeout_sec: int = 60
+
+
+class ToolApprovalResponsePayload(ProtocolModel):
+    approval_id: str
+    turn_id: str
+    approved: bool
+    remember_for_session: bool = False
 
 
 class CardAction(ProtocolModel):
@@ -283,6 +305,8 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "output.text_delta": OutputTextDeltaPayload,
     "output.tool_status": OutputToolStatusPayload,
     "output.card": OutputCardPayload,
+    "tool.approval_request": ToolApprovalRequestPayload,
+    "tool.approval_response": ToolApprovalResponsePayload,
     "avatar.state": AvatarStatePayload,
 }
 

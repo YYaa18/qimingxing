@@ -67,6 +67,9 @@ def create_app(
         hot_message_limit=cfg.memory.hot_message_limit,
         archive_batch_size=cfg.memory.archive_batch_size,
     )
+    from brain.memory.skills import SkillManager
+
+    skill_manager = SkillManager(backend, router, cfg.tools.skills)
 
     hub = Hub(
         llm_router=router,
@@ -80,6 +83,7 @@ def create_app(
         memory_extractor=extractor,
         intent_detector=intent_detector,
         screen_router=screen_router,
+        skill_manager=skill_manager,
         capture_timeout_seconds=capture_timeout_seconds,
     )
 
@@ -103,6 +107,7 @@ def create_app(
                 pass
             extractor.cancel_idle_timers()
             await extractor.wait_for_idle()
+            await skill_manager.wait_for_idle()
             await backend.close()
             artifacts.cleanup_all()
 
@@ -143,6 +148,12 @@ def create_app(
         recent_msgs = await backend.get_messages(session.session_id, limit=12)
         categories = await backend.list_categories()
         hot_count, archived_count = await backend.count_messages()
+        skills = await backend.list_skills(status="active", limit=30)
+        work_logs = await backend.list_work_history(limit=10)
+        import time as _time
+        lt = _time.localtime()
+        day_start = _time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        today_usage = await backend.get_usage_summary(since_ts=day_start)
 
         return JSONResponse(
             {
@@ -155,6 +166,16 @@ def create_app(
                 },
                 "hot_messages_count": hot_count,
                 "archived_messages_count": archived_count,
+                "skills_count": len(skills),
+                "work_history_count": len(work_logs),
+                "today_usage": {
+                    "calls": today_usage.calls,
+                    "prompt_tokens": today_usage.prompt_tokens,
+                    "prompt_cache_hit_tokens": today_usage.prompt_cache_hit_tokens,
+                    "completion_tokens": today_usage.completion_tokens,
+                    "total_cost_cny": round(today_usage.total_cost_cny, 6),
+                    "cache_hit_rate": round(today_usage.cache_hit_rate, 4),
+                },
                 "categories": [
                     {
                         "category_key": c.category_key,

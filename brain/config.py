@@ -124,6 +124,100 @@ class ContextBudgetConfig:
     total_max_tokens: int = 6000
 
 
+DEFAULT_SAFE_SHELL_COMMANDS = [
+    "pwd",
+    "ls",
+    "git status",
+    "git log",
+    "git diff",
+    "which",
+    "whoami",
+    "uname",
+    "date",
+    "echo",
+    "head",
+    "tail",
+    "wc",
+    "cat",
+]
+
+DEFAULT_BLOCKED_SHELL_PATTERNS = [
+    r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(/|\*|~)",
+    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*r\s+(/|\*|~)",
+    r"\bmkfs(\.[a-z0-9]+)?\b",
+    r"\bdd\s+if=",
+    r"\bsudo\b",
+    r"\b(shutdown|reboot|halt|poweroff)\b",
+    r"\bdiskutil\s+(erase|partition|zeroDisk)",
+    r"\bprintenv\b",
+    r"\benv\b\s*$",
+    r"config\.yaml",
+    r"\.env\b",
+    r":\(\)\s*\{",
+    r">\s*/dev/sd",
+    r"chmod\s+-R\s+777\s+/",
+]
+
+
+@dataclass
+class WebSearchToolConfig:
+    enabled: bool = True
+    provider: str = "deepseek"
+    base_url: str = "https://api.deepseek.com/v1"
+    api_key: str = ""
+    timeout_seconds: float = 15.0
+    max_results: int = 5
+    max_fetch_chars: int = 6000
+
+
+@dataclass
+class ShellToolConfig:
+    enabled: bool = True
+    safe_commands: List[str] = field(default_factory=lambda: list(DEFAULT_SAFE_SHELL_COMMANDS))
+    blocked_patterns: List[str] = field(
+        default_factory=lambda: list(DEFAULT_BLOCKED_SHELL_PATTERNS)
+    )
+    timeout_sec: int = 30
+    default_cwd: str = "~"
+    max_output_chars: int = 4000
+
+
+@dataclass
+class ComputerUseToolConfig:
+    enabled: bool = False
+    max_steps: int = 15
+    require_session_approval: bool = True
+    corner_kill_switch: bool = True
+    action_delay_ms: int = 350
+
+
+@dataclass
+class SkillsConfig:
+    auto_learn: bool = True
+    max_recalled_skills: int = 2
+    learn_profile: str = "fast_deepseek"
+
+
+@dataclass
+class UsageAlertConfig:
+    enabled: bool = True
+    daily_warn_cny: float = 5.0
+    turn_warn_tokens: int = 50000
+    hard_block: bool = False  # Soft alert only; never hard-blocks ongoing execution
+
+
+@dataclass
+class ToolsConfig:
+    enabled: bool = True
+    max_tool_steps: int = 8
+    approval_timeout_sec: int = 60
+    web_search: WebSearchToolConfig = field(default_factory=WebSearchToolConfig)
+    shell: ShellToolConfig = field(default_factory=ShellToolConfig)
+    computer_use: ComputerUseToolConfig = field(default_factory=ComputerUseToolConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
+    usage_alert: UsageAlertConfig = field(default_factory=UsageAlertConfig)
+
+
 @dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -133,6 +227,7 @@ class AppConfig:
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     _secrets: List[str] = field(default_factory=list, repr=False)
 
     def collect_secrets(self) -> List[str]:
@@ -141,6 +236,8 @@ class AppConfig:
             secrets.append(self.ocr.api_key)
         if self.memory.embedding.api_key:
             secrets.append(self.memory.embedding.api_key)
+        if self.tools.web_search.api_key:
+            secrets.append(self.tools.web_search.api_key)
         secrets.extend(self._secrets)
         return sorted({s for s in secrets if len(s) >= 4}, key=len, reverse=True)
 
@@ -291,6 +388,60 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         total_max_tokens=int(budget_raw.get("total_max_tokens", 6000)),
     )
 
+    tools_raw = raw.get("tools") or {}
+    ws_raw = tools_raw.get("web_search") or {}
+    ws_key = _expand_env_vars(str(ws_raw.get("api_key", "") or "")) or ocr_key
+    shell_raw = tools_raw.get("shell") or {}
+    cu_raw = tools_raw.get("computer_use") or {}
+    skills_raw = tools_raw.get("skills") or {}
+    usage_raw = tools_raw.get("usage_alert") or {}
+    learn_prof = str(skills_raw.get("learn_profile", ext_profile))
+    if learn_prof not in profiles and default_profile:
+        learn_prof = default_profile
+
+    tools = ToolsConfig(
+        enabled=bool(tools_raw.get("enabled", True)),
+        max_tool_steps=int(tools_raw.get("max_tool_steps", 8)),
+        approval_timeout_sec=int(tools_raw.get("approval_timeout_sec", 60)),
+        web_search=WebSearchToolConfig(
+            enabled=bool(ws_raw.get("enabled", True)),
+            provider=str(ws_raw.get("provider", "deepseek")),
+            base_url=str(ws_raw.get("base_url", "https://api.deepseek.com/v1") or "").rstrip("/"),
+            api_key=ws_key,
+            timeout_seconds=float(ws_raw.get("timeout_seconds", 15.0)),
+            max_results=int(ws_raw.get("max_results", 5)),
+            max_fetch_chars=int(ws_raw.get("max_fetch_chars", 6000)),
+        ),
+        shell=ShellToolConfig(
+            enabled=bool(shell_raw.get("enabled", True)),
+            safe_commands=list(shell_raw.get("safe_commands", DEFAULT_SAFE_SHELL_COMMANDS)),
+            blocked_patterns=list(
+                shell_raw.get("blocked_patterns", DEFAULT_BLOCKED_SHELL_PATTERNS)
+            ),
+            timeout_sec=int(shell_raw.get("timeout_sec", 30)),
+            default_cwd=str(shell_raw.get("default_cwd", "~")),
+            max_output_chars=int(shell_raw.get("max_output_chars", 4000)),
+        ),
+        computer_use=ComputerUseToolConfig(
+            enabled=bool(cu_raw.get("enabled", False)),
+            max_steps=int(cu_raw.get("max_steps", 15)),
+            require_session_approval=bool(cu_raw.get("require_session_approval", True)),
+            corner_kill_switch=bool(cu_raw.get("corner_kill_switch", True)),
+            action_delay_ms=int(cu_raw.get("action_delay_ms", 350)),
+        ),
+        skills=SkillsConfig(
+            auto_learn=bool(skills_raw.get("auto_learn", True)),
+            max_recalled_skills=int(skills_raw.get("max_recalled_skills", 2)),
+            learn_profile=learn_prof,
+        ),
+        usage_alert=UsageAlertConfig(
+            enabled=bool(usage_raw.get("enabled", True)),
+            daily_warn_cny=float(usage_raw.get("daily_warn_cny", 5.0)),
+            turn_warn_tokens=int(usage_raw.get("turn_warn_tokens", 50000)),
+            hard_block=False,  # Soft alert only; hard blocking disabled by design
+        ),
+    )
+
     return AppConfig(
         server=server,
         default_profile=default_profile,
@@ -299,4 +450,5 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         privacy=privacy,
         memory=memory,
         context_budget=context_budget,
+        tools=tools,
     )

@@ -17,8 +17,13 @@ from brain.memory.models import (
     MemoryCategory,
     MemoryEpisode,
     MemoryFact,
+    MemorySkill,
     MessageRecord,
     SessionRecord,
+    SkillStatus,
+    UsageLedgerRecord,
+    UsageSummary,
+    WorkHistoryRecord,
     new_session_id,
     tokenize_for_fts,
 )
@@ -109,6 +114,53 @@ CREATE TABLE IF NOT EXISTS messages_archive (
 
 CREATE INDEX IF NOT EXISTS idx_messages_archive_session
     ON messages_archive(session_id, msg_id);
+
+CREATE TABLE IF NOT EXISTS memory_skills (
+    skill_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    trigger_intent TEXT NOT NULL,
+    tool_preference TEXT NOT NULL DEFAULT 'shell',
+    prerequisites TEXT NOT NULL DEFAULT '',
+    steps_json TEXT NOT NULL DEFAULT '[]',
+    success_count INTEGER NOT NULL DEFAULT 1,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_skills_status_score
+    ON memory_skills(status, success_count DESC, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS work_history (
+    work_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL DEFAULT '',
+    turn_id TEXT NOT NULL DEFAULT '',
+    goal TEXT NOT NULL,
+    result_summary TEXT NOT NULL,
+    trace_json TEXT NOT NULL DEFAULT '[]',
+    step_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'completed',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_history_created
+    ON work_history(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS usage_ledger (
+    ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL DEFAULT '',
+    turn_id TEXT NOT NULL DEFAULT '',
+    profile TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_cny REAL NOT NULL DEFAULT 0.0,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_created
+    ON usage_ledger(created_at DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     item_id UNINDEXED,
@@ -717,7 +769,7 @@ class SQLiteMemoryStore(MemoryBackend):
                     """
                     SELECT item_id, item_type, bm25(memory_fts) AS rank
                     FROM memory_fts
-                    WHERE memory_fts MATCH ?
+                    WHERE memory_fts MATCH ? AND item_type IN ('fact', 'episode', 'message')
                     ORDER BY rank ASC
                     LIMIT ?
                     """,
@@ -762,6 +814,298 @@ class SQLiteMemoryStore(MemoryBackend):
             for r in episodes:
                 items.append((str(r["episode_id"]), "episode", bytes(r["embedding"])))
             return items
+
+    # --- M4: Procedural Skills, Work History & Usage Ledger ---
+
+    async def upsert_skill(self, skill: MemorySkill) -> MemorySkill:
+        async with self._lock:
+            conn = self._ensure_conn()
+            now = skill.updated_at or time.time()
+            conn.execute(
+                """
+                INSERT INTO memory_skills (
+                    skill_id, name, trigger_intent, tool_preference, prerequisites,
+                    steps_json, success_count, failure_count, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(skill_id) DO UPDATE SET
+                    name = excluded.name,
+                    trigger_intent = excluded.trigger_intent,
+                    tool_preference = excluded.tool_preference,
+                    prerequisites = excluded.prerequisites,
+                    steps_json = excluded.steps_json,
+                    success_count = excluded.success_count,
+                    failure_count = excluded.failure_count,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    skill.skill_id,
+                    skill.name,
+                    skill.trigger_intent,
+                    skill.tool_preference,
+                    skill.prerequisites,
+                    skill.steps_json,
+                    skill.success_count,
+                    skill.failure_count,
+                    skill.status,
+                    now,
+                ),
+            )
+            if skill.status == "active":
+                fts_text = f"{skill.name} {skill.trigger_intent} {skill.prerequisites} {skill.steps_json}"
+                self._sync_fts_entry(conn, skill.skill_id, "skill", fts_text)
+            else:
+                self._sync_fts_entry(conn, skill.skill_id, "skill", None)
+            conn.commit()
+            return skill
+
+    async def get_skill(self, skill_id: str) -> Optional[MemorySkill]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM memory_skills WHERE skill_id = ?", (skill_id,)
+            ).fetchone()
+            return _row_to_skill(row) if row else None
+
+    async def list_skills(
+        self,
+        *,
+        status: Optional[SkillStatus] = "active",
+        limit: int = 100,
+    ) -> List[MemorySkill]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            if status is None:
+                rows = conn.execute(
+                    "SELECT * FROM memory_skills ORDER BY success_count DESC, updated_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM memory_skills WHERE status = ? ORDER BY success_count DESC, updated_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            return [_row_to_skill(r) for r in rows]
+
+    async def search_skills(self, query_expr: str, *, limit: int = 5) -> List[MemorySkill]:
+        if not query_expr or not query_expr.strip():
+            return []
+        async with self._lock:
+            conn = self._ensure_conn()
+            try:
+                fts_rows = conn.execute(
+                    """
+                    SELECT item_id, bm25(memory_fts) AS rank
+                    FROM memory_fts
+                    WHERE memory_fts MATCH ? AND item_type = 'skill'
+                    ORDER BY rank ASC
+                    LIMIT ?
+                    """,
+                    (query_expr, limit * 3),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+
+            results: List[Tuple[float, MemorySkill]] = []
+            for r in fts_rows:
+                srow = conn.execute(
+                    "SELECT * FROM memory_skills WHERE skill_id = ? AND status = 'active'",
+                    (str(r["item_id"]),),
+                ).fetchone()
+                if srow is None:
+                    continue
+                skill = _row_to_skill(srow)
+                bm25_score = max(0.0, -float(r["rank"]))
+                reliability = (skill.success_count + 1) / (
+                    skill.success_count + skill.failure_count + 2
+                )
+                results.append((bm25_score * (0.6 + 0.4 * reliability), skill))
+            results.sort(key=lambda pair: pair[0], reverse=True)
+            return [s for _, s in results[:limit]]
+
+    async def record_skill_outcome(
+        self, skill_id: str, *, success: bool
+    ) -> Optional[MemorySkill]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM memory_skills WHERE skill_id = ?", (skill_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            succ = int(row["success_count"]) + (1 if success else 0)
+            fail = int(row["failure_count"]) + (0 if success else 1)
+            new_status: SkillStatus = str(row["status"])  # type: ignore[assignment]
+            if not success and fail >= 3 and fail > succ:
+                new_status = "deprecated"
+            elif success:
+                new_status = "active"
+            now = time.time()
+            conn.execute(
+                """
+                UPDATE memory_skills
+                SET success_count = ?, failure_count = ?, status = ?, updated_at = ?
+                WHERE skill_id = ?
+                """,
+                (succ, fail, new_status, now, skill_id),
+            )
+            if new_status != "active":
+                self._sync_fts_entry(conn, skill_id, "skill", None)
+            else:
+                fts_text = (
+                    f"{row['name']} {row['trigger_intent']} "
+                    f"{row['prerequisites']} {row['steps_json']}"
+                )
+                self._sync_fts_entry(conn, skill_id, "skill", fts_text)
+            conn.commit()
+            updated_row = conn.execute(
+                "SELECT * FROM memory_skills WHERE skill_id = ?", (skill_id,)
+            ).fetchone()
+            return _row_to_skill(updated_row) if updated_row else None
+
+    async def update_skill_status(self, skill_id: str, status: SkillStatus) -> bool:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM memory_skills WHERE skill_id = ?", (skill_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "UPDATE memory_skills SET status = ?, updated_at = ? WHERE skill_id = ?",
+                (status, time.time(), skill_id),
+            )
+            if status == "active":
+                fts_text = (
+                    f"{row['name']} {row['trigger_intent']} "
+                    f"{row['prerequisites']} {row['steps_json']}"
+                )
+                self._sync_fts_entry(conn, skill_id, "skill", fts_text)
+            else:
+                self._sync_fts_entry(conn, skill_id, "skill", None)
+            conn.commit()
+            return True
+
+    async def add_work_history(self, record: WorkHistoryRecord) -> WorkHistoryRecord:
+        async with self._lock:
+            conn = self._ensure_conn()
+            conn.execute(
+                """
+                INSERT INTO work_history (
+                    work_id, session_id, turn_id, goal, result_summary,
+                    trace_json, step_count, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.work_id,
+                    record.session_id,
+                    record.turn_id,
+                    record.goal,
+                    record.result_summary,
+                    record.trace_json,
+                    record.step_count,
+                    record.status,
+                    record.created_at,
+                ),
+            )
+            conn.commit()
+            return record
+
+    async def get_work_history(self, work_id: str) -> Optional[WorkHistoryRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM work_history WHERE work_id = ?", (work_id,)
+            ).fetchone()
+            return _row_to_work_history(row) if row else None
+
+    async def list_work_history(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[WorkHistoryRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            if session_id:
+                rows = conn.execute(
+                    "SELECT * FROM work_history WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM work_history ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [_row_to_work_history(r) for r in rows]
+
+    async def add_usage_record(self, record: UsageLedgerRecord) -> UsageLedgerRecord:
+        async with self._lock:
+            conn = self._ensure_conn()
+            cur = conn.execute(
+                """
+                INSERT INTO usage_ledger (
+                    session_id, turn_id, profile, model,
+                    prompt_tokens, prompt_cache_hit_tokens, completion_tokens,
+                    estimated_cost_cny, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.session_id,
+                    record.turn_id,
+                    record.profile,
+                    record.model,
+                    record.prompt_tokens,
+                    record.prompt_cache_hit_tokens,
+                    record.completion_tokens,
+                    record.estimated_cost_cny,
+                    record.created_at,
+                ),
+            )
+            conn.commit()
+            return UsageLedgerRecord(
+                ledger_id=int(cur.lastrowid),
+                session_id=record.session_id,
+                turn_id=record.turn_id,
+                profile=record.profile,
+                model=record.model,
+                prompt_tokens=record.prompt_tokens,
+                prompt_cache_hit_tokens=record.prompt_cache_hit_tokens,
+                completion_tokens=record.completion_tokens,
+                estimated_cost_cny=record.estimated_cost_cny,
+                created_at=record.created_at,
+            )
+
+    async def get_usage_summary(self, *, since_ts: float = 0.0) -> UsageSummary:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(prompt_tokens), 0) AS pt,
+                    COALESCE(SUM(prompt_cache_hit_tokens), 0) AS ht,
+                    COALESCE(SUM(completion_tokens), 0) AS ct,
+                    COALESCE(SUM(estimated_cost_cny), 0.0) AS cost
+                FROM usage_ledger
+                WHERE created_at >= ?
+                """,
+                (since_ts,),
+            ).fetchone()
+            calls = int(row["calls"]) if row else 0
+            pt = int(row["pt"]) if row else 0
+            ht = int(row["ht"]) if row else 0
+            ct = int(row["ct"]) if row else 0
+            cost = float(row["cost"]) if row else 0.0
+            hit_rate = (ht / pt) if pt > 0 else 0.0
+            return UsageSummary(
+                calls=calls,
+                prompt_tokens=pt,
+                prompt_cache_hit_tokens=ht,
+                completion_tokens=ct,
+                total_cost_cny=cost,
+                cache_hit_rate=hit_rate,
+            )
 
     # --- Lossless JSONL Snapshot Export / Import ---
 
@@ -821,6 +1165,17 @@ class SQLiteMemoryStore(MemoryBackend):
                         d.pop("embedding", None)
                         d["embedding_b64"] = None
                     f.write(json.dumps({"_type": "episode", **d}, ensure_ascii=False) + "\n")
+                    count += 1
+                for r in conn.execute("SELECT * FROM memory_skills ORDER BY updated_at ASC"):
+                    f.write(json.dumps({"_type": "skill", **dict(r)}, ensure_ascii=False) + "\n")
+                    count += 1
+                for r in conn.execute("SELECT * FROM work_history ORDER BY created_at ASC"):
+                    f.write(
+                        json.dumps({"_type": "work_history", **dict(r)}, ensure_ascii=False) + "\n"
+                    )
+                    count += 1
+                for r in conn.execute("SELECT * FROM usage_ledger ORDER BY ledger_id ASC"):
+                    f.write(json.dumps({"_type": "usage", **dict(r)}, ensure_ascii=False) + "\n")
                     count += 1
             return count
 
@@ -988,6 +1343,79 @@ class SQLiteMemoryStore(MemoryBackend):
                                 f"{rec.get('keywords', '')} {rec['summary']}",
                             )
                         count += 1
+                    elif rtype == "skill":
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO memory_skills (
+                                skill_id, name, trigger_intent, tool_preference, prerequisites,
+                                steps_json, success_count, failure_count, status, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec["skill_id"],
+                                rec["name"],
+                                rec["trigger_intent"],
+                                rec.get("tool_preference", "shell"),
+                                rec.get("prerequisites", ""),
+                                rec.get("steps_json", "[]"),
+                                rec.get("success_count", 1),
+                                rec.get("failure_count", 0),
+                                rec.get("status", "active"),
+                                rec["updated_at"],
+                            ),
+                        )
+                        if rec.get("status", "active") == "active":
+                            self._sync_fts_entry(
+                                conn,
+                                rec["skill_id"],
+                                "skill",
+                                f"{rec['name']} {rec['trigger_intent']} {rec.get('prerequisites', '')} {rec.get('steps_json', '[]')}",
+                            )
+                        count += 1
+                    elif rtype == "work_history":
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO work_history (
+                                work_id, session_id, turn_id, goal, result_summary,
+                                trace_json, step_count, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec["work_id"],
+                                rec.get("session_id", ""),
+                                rec.get("turn_id", ""),
+                                rec["goal"],
+                                rec["result_summary"],
+                                rec.get("trace_json", "[]"),
+                                rec.get("step_count", 0),
+                                rec.get("status", "completed"),
+                                rec["created_at"],
+                            ),
+                        )
+                        count += 1
+                    elif rtype == "usage":
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO usage_ledger (
+                                ledger_id, session_id, turn_id, profile, model,
+                                prompt_tokens, prompt_cache_hit_tokens, completion_tokens,
+                                estimated_cost_cny, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec["ledger_id"],
+                                rec.get("session_id", ""),
+                                rec.get("turn_id", ""),
+                                rec.get("profile", ""),
+                                rec.get("model", ""),
+                                rec.get("prompt_tokens", 0),
+                                rec.get("prompt_cache_hit_tokens", 0),
+                                rec.get("completion_tokens", 0),
+                                rec.get("estimated_cost_cny", 0.0),
+                                rec["created_at"],
+                            ),
+                        )
+                        count += 1
             conn.commit()
             return count
 
@@ -1033,6 +1461,35 @@ def _row_to_fact(row: sqlite3.Row) -> MemoryFact:
     )
 
 
+def _row_to_skill(row: sqlite3.Row) -> MemorySkill:
+    return MemorySkill(
+        skill_id=str(row["skill_id"]),
+        name=str(row["name"]),
+        trigger_intent=str(row["trigger_intent"]),
+        tool_preference=str(row["tool_preference"] or "shell"),
+        prerequisites=str(row["prerequisites"] or ""),
+        steps_json=str(row["steps_json"] or "[]"),
+        success_count=int(row["success_count"] or 0),
+        failure_count=int(row["failure_count"] or 0),
+        status=row["status"],  # type: ignore[arg-type]
+        updated_at=float(row["updated_at"]),
+    )
+
+
+def _row_to_work_history(row: sqlite3.Row) -> WorkHistoryRecord:
+    return WorkHistoryRecord(
+        work_id=str(row["work_id"]),
+        session_id=str(row["session_id"] or ""),
+        turn_id=str(row["turn_id"] or ""),
+        goal=str(row["goal"]),
+        result_summary=str(row["result_summary"]),
+        trace_json=str(row["trace_json"] or "[]"),
+        step_count=int(row["step_count"] or 0),
+        status=str(row["status"] or "completed"),
+        created_at=float(row["created_at"]),
+    )
+
+
 def _row_to_category(row: sqlite3.Row) -> MemoryCategory:
     return MemoryCategory(
         category_key=str(row["category_key"]),
@@ -1060,4 +1517,33 @@ def _row_to_episode(row: sqlite3.Row) -> MemoryEpisode:
         created_at=float(row["created_at"]),
         embedding=bytes(row["embedding"]) if row["embedding"] is not None else None,
         embedding_model=str(row["embedding_model"]) if row["embedding_model"] else None,
+    )
+
+
+def _row_to_skill(row: sqlite3.Row) -> MemorySkill:
+    return MemorySkill(
+        skill_id=str(row["skill_id"]),
+        name=str(row["name"]),
+        trigger_intent=str(row["trigger_intent"]),
+        tool_preference=str(row["tool_preference"] or "shell"),
+        prerequisites=str(row["prerequisites"] or ""),
+        steps_json=str(row["steps_json"] or "[]"),
+        success_count=int(row["success_count"] or 0),
+        failure_count=int(row["failure_count"] or 0),
+        status=row["status"],  # type: ignore[arg-type]
+        updated_at=float(row["updated_at"]),
+    )
+
+
+def _row_to_work_history(row: sqlite3.Row) -> WorkHistoryRecord:
+    return WorkHistoryRecord(
+        work_id=str(row["work_id"]),
+        session_id=str(row["session_id"] or ""),
+        turn_id=str(row["turn_id"] or ""),
+        goal=str(row["goal"]),
+        result_summary=str(row["result_summary"]),
+        trace_json=str(row["trace_json"] or "[]"),
+        step_count=int(row["step_count"] or 0),
+        status=str(row["status"] or "completed"),
+        created_at=float(row["created_at"]),
     )

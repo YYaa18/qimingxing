@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -238,6 +239,103 @@ async def run_cli(args: argparse.Namespace) -> int:
                 f"archived={cold_before}->{cold_after}"
             )
             return 0
+        if args.command == "skills":
+            subcmd = args.skills_action
+            if subcmd == "list":
+                rows = await backend.list_skills(
+                    status=None if args.status == "all" else args.status,
+                    limit=args.limit,
+                )
+                if not rows:
+                    print("No skills stored.")
+                for s in rows:
+                    print(
+                        f"{s.skill_id} | {s.status} | {s.tool_preference} | "
+                        f"ok={s.success_count} fail={s.failure_count} | {s.name} — {s.trigger_intent}"
+                    )
+                return 0
+            if subcmd == "inspect":
+                if not args.id:
+                    print("Please specify skill_id with --id", file=sys.stderr)
+                    return 1
+                sk = await backend.get_skill(args.id)
+                if sk is None:
+                    print(f"Skill not found: {args.id}", file=sys.stderr)
+                    return 1
+                print(
+                    json.dumps(
+                        {
+                            "skill_id": sk.skill_id,
+                            "name": sk.name,
+                            "trigger_intent": sk.trigger_intent,
+                            "tool_preference": sk.tool_preference,
+                            "prerequisites": sk.prerequisites,
+                            "steps": json.loads(sk.steps_json),
+                            "success_count": sk.success_count,
+                            "failure_count": sk.failure_count,
+                            "status": sk.status,
+                            "updated_at": sk.updated_at,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
+            if subcmd == "delete":
+                if not args.id:
+                    print("Please specify skill_id with --id", file=sys.stderr)
+                    return 1
+                ok = await backend.update_skill_status(args.id, "deprecated")
+                if not ok:
+                    print(f"Skill not found: {args.id}", file=sys.stderr)
+                    return 1
+                print(f"Deprecated skill {args.id}")
+                return 0
+            return 1
+        if args.command == "history":
+            if args.id:
+                rec = await backend.get_work_history(args.id)
+                if rec is None:
+                    print(f"Work history not found: {args.id}", file=sys.stderr)
+                    return 1
+                print(
+                    json.dumps(
+                        {
+                            "work_id": rec.work_id,
+                            "session_id": rec.session_id,
+                            "turn_id": rec.turn_id,
+                            "goal": rec.goal,
+                            "result_summary": rec.result_summary,
+                            "step_count": rec.step_count,
+                            "status": rec.status,
+                            "created_at": rec.created_at,
+                            "trace": json.loads(rec.trace_json),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
+            rows = await backend.list_work_history(limit=args.limit)
+            if not rows:
+                print("No work history recorded.")
+            for w in rows:
+                print(
+                    f"{w.work_id} | {w.status} | steps={w.step_count} | {w.goal} -> {w.result_summary[:80]}"
+                )
+            return 0
+        if args.command == "usage":
+            since = 0.0 if args.days <= 0 else time.time() - args.days * 86400.0
+            summary = await backend.get_usage_summary(since_ts=since)
+            scope = f"last {args.days}d" if args.days > 0 else "all-time"
+            print(
+                f"Usage ({scope}): calls={summary.calls} | "
+                f"prompt={summary.prompt_tokens} (cache_hit={summary.prompt_cache_hit_tokens}, "
+                f"hit_rate={summary.cache_hit_rate * 100:.1f}%) | "
+                f"completion={summary.completion_tokens} | "
+                f"est_cost_cny=¥{summary.total_cost_cny:.4f}"
+            )
+            return 0
         return 1
     finally:
         await backend.close()
@@ -284,6 +382,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_arch = sub.add_parser("archive", help="Archive old hot messages into messages_archive")
     p_arch.add_argument("--keep", type=int, default=10000, help="Hot message retention count")
     p_arch.add_argument("--batch", type=int, default=2000, help="Max messages to move per run")
+
+    p_skills = sub.add_parser("skills", help="Manage learned procedural skills")
+    p_skills.add_argument("skills_action", nargs="?", choices=["list", "inspect", "delete"], default="list")
+    p_skills.add_argument("--id", default=None, help="Skill ID for inspect/delete")
+    p_skills.add_argument("--status", choices=["active", "deprecated", "all"], default="active")
+    p_skills.add_argument("--limit", type=int, default=50)
+
+    p_hist = sub.add_parser("history", help="List or inspect archived multi-step work history")
+    p_hist.add_argument("--id", default=None, help="Work ID to inspect full trace JSON")
+    p_hist.add_argument("--limit", type=int, default=20)
+
+    p_usage = sub.add_parser("usage", help="Show LLM usage ledger summary and cache hit rate")
+    p_usage.add_argument("--days", type=int, default=1, help="Window in days (0 = all time)")
     return parser
 
 

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from brain.config import ContextBudgetConfig
 from brain.context_store import ContextStore
-from brain.memory.models import MemoryCategory, MemoryFact, RetrievedMemory
+from brain.memory.models import MemoryCategory, MemoryFact, MemorySkill, RetrievedMemory
 from brain.prompts import BASE_SYSTEM_PROMPT
 
 _ACTIVITY_INTENT_RE = re.compile(
@@ -90,6 +90,7 @@ class BuildStats:
     total_tokens: int = 0
     static_prefix_hash: str = ""
     recalled_count: int = 0
+    recalled_skills_count: int = 0
     retrieval_ms: float = 0.0
     timeline_expanded: bool = False
     ocr_truncated: bool = False
@@ -118,10 +119,15 @@ class ContextBuilder:
         recalled_memories: List[RetrievedMemory],
         context_store: ContextStore,
         categories: Optional[Dict[str, MemoryCategory]] = None,
+        recalled_skills: Optional[List[MemorySkill]] = None,
         retrieval_ms: float = 0.0,
         system_base_prompt: str = BASE_SYSTEM_PROMPT,
     ) -> BuiltContext:
-        stats = BuildStats(retrieval_ms=retrieval_ms, recalled_count=len(recalled_memories))
+        stats = BuildStats(
+            retrieval_ms=retrieval_ms,
+            recalled_count=len(recalled_memories),
+            recalled_skills_count=len(recalled_skills or []),
+        )
 
         # --- L0 (100% static) + L1 (low-frequency deterministic user profile) ---
         l0_text = system_base_prompt.strip()
@@ -168,6 +174,10 @@ class ContextBuilder:
         recall_block = self._render_l3_recalled(recalled_memories)
         if recall_block:
             l3_sections.append(recall_block)
+
+        skills_block = self._render_l3_skills(recalled_skills or [])
+        if skills_block:
+            l3_sections.append(skills_block)
 
         expand_tl = needs_full_timeline(user_text)
         stats.timeline_expanded = expand_tl
@@ -289,6 +299,25 @@ class ContextBuilder:
         if not lines:
             return ""
         return "【相关长期记忆召回】\n" + "\n".join(lines)
+
+    def _render_l3_skills(self, skills: List[MemorySkill]) -> str:
+        if not skills:
+            return ""
+        import json as _json
+
+        lines: List[str] = []
+        for s in skills:
+            try:
+                steps = _json.loads(s.steps_json)
+                step_text = " -> ".join(str(x) for x in steps[:5]) if isinstance(steps, list) else str(steps)
+            except Exception:
+                step_text = s.steps_json
+            pre = f"（前置: {s.prerequisites}）" if s.prerequisites else ""
+            lines.append(
+                f"- [skill:{s.skill_id} | 工具={s.tool_preference} | 成功{s.success_count}次] "
+                f"{s.name}{pre}: {step_text}"
+            )
+        return "【可复用的已学技能（Skill，按需参考执行）】\n" + "\n".join(lines)
 
     def _apply_ocr_budget(
         self,

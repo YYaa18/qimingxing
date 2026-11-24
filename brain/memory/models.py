@@ -12,6 +12,7 @@ EpisodeStatus = Literal["active", "deleted"]
 SessionStatus = Literal["active", "archived"]
 MutationOp = Literal["ADD", "UPDATE", "DELETE", "NONE"]
 CategoryTier = Literal["core", "episodic", "chitchat"]
+SkillStatus = Literal["active", "deprecated"]
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
@@ -27,6 +28,14 @@ def new_fact_id() -> str:
 
 def new_episode_id() -> str:
     return f"ep_{uuid.uuid4().hex[:12]}"
+
+
+def new_skill_id() -> str:
+    return f"skill_{uuid.uuid4().hex[:12]}"
+
+
+def new_work_id() -> str:
+    return f"work_{uuid.uuid4().hex[:12]}"
 
 
 def tokenize_for_fts(text: str) -> str:
@@ -276,3 +285,54 @@ class RetrievedMemory:
     importance: float
     score: float
     updated_at: float
+
+
+@dataclass
+class MemorySkill:
+    skill_id: str
+    name: str
+    trigger_intent: str
+    tool_preference: str = "shell"
+    prerequisites: str = ""
+    steps_json: str = "[]"
+    success_count: int = 1
+    failure_count: int = 0
+    status: SkillStatus = "active"
+    updated_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class WorkHistoryRecord:
+    work_id: str
+    session_id: str
+    turn_id: str
+    goal: str
+    result_summary: str
+    trace_json: str = "[]"
+    step_count: int = 0
+    status: str = "completed"
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class UsageLedgerRecord:
+    ledger_id: int = 0
+    session_id: str = ""
+    turn_id: str = ""
+    profile: str = ""
+    model: str = ""
+    prompt_tokens: int = 0
+    prompt_cache_hit_tokens: int = 0
+    completion_tokens: int = 0
+    estimated_cost_cny: float = 0.0
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class UsageSummary:
+    calls: int = 0
+    prompt_tokens: int = 0
+    prompt_cache_hit_tokens: int = 0
+    completion_tokens: int = 0
+    total_cost_cny: float = 0.0
+    cache_hit_rate: float = 0.0

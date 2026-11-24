@@ -16,14 +16,23 @@ from brain.context_builder import BuildStats, ContextBuilder
 from brain.context_store import ContextStore
 from brain.history_store import InMemorySlidingWindowStore, MemoryStore
 from brain.intent_detector import ScreenIntentDetector
-from brain.llm_router import LLMError, LLMRouter
+from brain.llm_router import LLMError, LLMRouter, LLMUsage
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import NullEmbeddingProvider
 from brain.memory.extractor import MemoryExtractor
-from brain.memory.models import MemoryFact
+from brain.memory.models import (
+    MemoryFact,
+    MemorySkill,
+    UsageLedgerRecord,
+    WorkHistoryRecord,
+    new_work_id,
+)
 from brain.memory.retrieval import MemoryRetriever
+from brain.memory.skills import SkillManager
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
+from brain.tools import ToolExecutionContext, ToolExecutor, ToolRegistry, build_default_tool_registry
+from brain.tools.base import ToolTraceStep
 from protocol.models import (
     AvatarStatePayload,
     CardAction,
@@ -43,6 +52,7 @@ from protocol.models import (
     OutputTurnStartPayload,
     PermissionStatus,
     PrivacyMode,
+    RiskLevel,
     SensesCaptureRequestPayload,
     SourceRole,
     SystemConfigSetPayload,
@@ -53,6 +63,8 @@ from protocol.models import (
     SystemPrivacySetPayload,
     SystemPrivacyStatePayload,
     SystemWelcomePayload,
+    ToolApprovalRequestPayload,
+    ToolApprovalResponsePayload,
     make_envelope,
     new_turn_id,
     parse_envelope,
@@ -61,7 +73,7 @@ from protocol.models import (
 
 logger = logging.getLogger("qimingxing.hub")
 
-SERVER_VERSION = "0.3.0-mvp3"
+SERVER_VERSION = "0.4.0-mvp4"
 CAPTURE_TIMEOUT_SECONDS = 3.5
 
 
@@ -98,6 +110,9 @@ class Hub:
         memory_extractor: Optional[MemoryExtractor] = None,
         intent_detector: Optional[ScreenIntentDetector] = None,
         screen_router: Optional[ScreenUnderstandingRouter] = None,
+        tool_registry: Optional[ToolRegistry] = None,
+        tool_executor: Optional[ToolExecutor] = None,
+        skill_manager: Optional[SkillManager] = None,
         capture_timeout_seconds: float = CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
         self.llm_router = llm_router
@@ -135,6 +150,20 @@ class Hub:
         self.screen_router = screen_router or ScreenUnderstandingRouter(
             DeepSeekOCRProvider(self.config.ocr, self.config)
         )
+        self.tool_registry = (
+            tool_registry
+            if tool_registry is not None
+            else build_default_tool_registry(self.config)
+        )
+        self.tool_executor = tool_executor or ToolExecutor(llm_router)
+        if skill_manager is not None:
+            self.skill_manager: Optional[SkillManager] = skill_manager
+        elif memory_backend is not None:
+            self.skill_manager = SkillManager(
+                memory_backend, llm_router, self.config.tools.skills
+            )
+        else:
+            self.skill_manager = None
         self.capture_timeout_seconds = capture_timeout_seconds
 
         self.clients: Dict[str, ClientConnection] = {}
@@ -144,6 +173,9 @@ class Hub:
         self.senses_permissions = PermissionStatus()
         self.senses_permission_hint: str = ""
         self._pending_captures: Dict[str, asyncio.Future[ContextScreenRefPayload]] = {}
+        self._pending_approvals: Dict[str, tuple[str, asyncio.Future[ToolApprovalResponsePayload]]] = {}
+        self._turn_cancel_events: Dict[str, asyncio.Event] = {}
+        self._session_approved_tools: set[str] = set()
         self.last_build_stats: Optional[BuildStats] = None
 
     def register(self, websocket: WebSocket) -> ClientConnection:
@@ -292,6 +324,14 @@ class Hub:
                 self.artifact_store.delete(payload.artifact_id)
             return
 
+        if isinstance(payload, ToolApprovalResponsePayload):
+            entry = self._pending_approvals.get(payload.approval_id)
+            if entry is not None:
+                _, fut = entry
+                if not fut.done():
+                    fut.set_result(payload)
+            return
+
         if isinstance(payload, InputCancelPayload):
             target_turn = env.turn_id or conn.active_turn_id
             logger.info(
@@ -320,6 +360,7 @@ class Hub:
     ) -> None:
         if payload.action == "clear_history":
             self.memory_store.clear(conn.client_id)
+            self._session_approved_tools.clear()
             if self.memory_backend is not None:
                 prev_session = await self.memory_backend.get_or_create_active_session()
                 await self.memory_backend.create_new_session(archive_previous=True)
@@ -415,6 +456,11 @@ class Hub:
             return
 
         logger.info("Cancelling active turn task turn_id=%s", old_turn_id)
+        if old_turn_id and old_turn_id in self._turn_cancel_events:
+            self._turn_cancel_events[old_turn_id].set()
+        for aid, (pending_tid, fut) in list(self._pending_approvals.items()):
+            if pending_tid == old_turn_id and not fut.done():
+                fut.cancel()
         task.cancel()
         try:
             await task
@@ -557,6 +603,105 @@ class Hub:
             )
         )
 
+    async def _request_tool_approval(
+        self,
+        *,
+        conn: ClientConnection,
+        turn_id: str,
+        tool_name: str,
+        risk_level: RiskLevel,
+        summary: str,
+        details: Dict[str, Any],
+        timeout_sec: int,
+    ) -> tuple[bool, bool]:
+        approval_id = f"apr_{uuid.uuid4().hex[:10]}"
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[ToolApprovalResponsePayload] = loop.create_future()
+        self._pending_approvals[approval_id] = (turn_id, fut)
+        try:
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "tool.approval_request",
+                    ToolApprovalRequestPayload(
+                        approval_id=approval_id,
+                        turn_id=turn_id,
+                        tool_name=tool_name,
+                        risk_level=risk_level,
+                        summary=summary,
+                        details=details,
+                        timeout_sec=timeout_sec,
+                    ),
+                    turn_id=turn_id,
+                )
+            )
+            resp = await asyncio.wait_for(fut, timeout=max(1, timeout_sec))
+            return bool(resp.approved), bool(resp.remember_for_session)
+        except asyncio.TimeoutError:
+            logger.info("Tool approval timed out approval_id=%s tool=%s", approval_id, tool_name)
+            return False, False
+        finally:
+            self._pending_approvals.pop(approval_id, None)
+
+    async def _record_usage_and_alert(
+        self,
+        *,
+        conn: ClientConnection,
+        turn_id: str,
+        session_id: str,
+        turn_usages: List[LLMUsage],
+    ) -> None:
+        if self.memory_backend is None or not turn_usages:
+            return
+        turn_tokens = 0
+        for u in turn_usages:
+            if u.total_tokens <= 0 and u.prompt_tokens <= 0 and u.completion_tokens <= 0:
+                continue
+            turn_tokens += u.total_tokens or (u.prompt_tokens + u.completion_tokens)
+            await self.memory_backend.add_usage_record(
+                UsageLedgerRecord(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    profile=u.profile,
+                    model=u.model,
+                    prompt_tokens=u.prompt_tokens,
+                    prompt_cache_hit_tokens=u.prompt_cache_hit_tokens,
+                    completion_tokens=u.completion_tokens,
+                    estimated_cost_cny=u.estimated_cost_cny,
+                )
+            )
+        alert_cfg = self.config.tools.usage_alert
+        if not alert_cfg.enabled:
+            return
+        lt = time.localtime()
+        day_start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        summary = await self.memory_backend.get_usage_summary(since_ts=day_start)
+        reasons: List[str] = []
+        if alert_cfg.turn_warn_tokens > 0 and turn_tokens >= alert_cfg.turn_warn_tokens:
+            reasons.append(f"单轮消耗 {turn_tokens} tokens（提醒阈值 {alert_cfg.turn_warn_tokens}）")
+        if alert_cfg.daily_warn_cny > 0 and summary.total_cost_cny >= alert_cfg.daily_warn_cny:
+            reasons.append(
+                f"今日累计估算 ¥{summary.total_cost_cny:.4f}（提醒阈值 ¥{alert_cfg.daily_warn_cny:.2f}）"
+            )
+        if reasons:
+            msg = (
+                f"用量软提醒：{'；'.join(reasons)}。"
+                f"当前缓存命中率 {summary.cache_hit_rate * 100:.1f}%，已按策略继续放行后续对话。"
+            )
+            logger.warning("Usage soft alert (%s): %s", turn_id, msg)
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "system.error",
+                    SystemErrorPayload(
+                        code="USAGE_SOFT_ALERT",
+                        message=msg,
+                        recoverable=True,
+                    ),
+                    turn_id=turn_id,
+                )
+            )
+
     async def _run_turn(
         self,
         conn: ClientConnection,
@@ -571,6 +716,8 @@ class Hub:
         seq = 0
         collected_spoken: List[str] = []
         artifact_id_to_burn = ""
+        cancel_event = asyncio.Event()
+        self._turn_cancel_events[turn_id] = cancel_event
 
         try:
             await conn.send_envelope(
@@ -684,6 +831,7 @@ class Hub:
             rolling_summary = ""
             core_facts: List[MemoryFact] = []
             recalled_memories = []
+            recalled_skills: List[MemorySkill] = []
             retrieval_ms = 0.0
 
             if self.memory_backend is not None:
@@ -714,6 +862,8 @@ class Hub:
                     for item in recalled_memories:
                         if item.item_type == "fact":
                             await self.memory_backend.touch_fact(item.item_id)
+                if self.skill_manager is not None:
+                    recalled_skills = await self.skill_manager.recall_skills(user_text)
             else:
                 categories_map = {}
                 recent_messages = self.memory_store.get_messages(conn.client_id, limit=16)
@@ -727,14 +877,112 @@ class Hub:
                 recalled_memories=recalled_memories,
                 context_store=self.context_store,
                 categories=categories_map if self.memory_backend is not None else None,
+                recalled_skills=recalled_skills,
                 retrieval_ms=retrieval_ms,
             )
             self.last_build_stats = built.stats
             messages = built.messages
 
-            async for chunk in self.llm_router.stream_chat(messages, profile_name=profile.name):
-                events = parser.feed(chunk)
-                seq = await self._emit_parser_events(conn, turn_id, events, seq, collected_spoken)
+            turn_usages: List[LLMUsage] = []
+            trace_steps: List[ToolTraceStep] = []
+
+            use_tools = bool(
+                self.config.tools.enabled
+                and len(self.tool_registry) > 0
+                and (
+                    profile.provider != "mock"
+                    or type(self.llm_router).complete_with_tools is not LLMRouter.complete_with_tools
+                )
+            )
+
+            if use_tools:
+                async def _on_text_delta(chunk: str) -> None:
+                    nonlocal seq
+                    events = parser.feed(chunk)
+                    seq = await self._emit_parser_events(
+                        conn, turn_id, events, seq, collected_spoken
+                    )
+
+                async def _on_status(
+                    status: str,
+                    tool_name: str,
+                    label: str,
+                    step: Optional[int],
+                    max_steps: Optional[int],
+                ) -> None:
+                    await conn.send_envelope(
+                        make_envelope(
+                            "brain",
+                            "output.tool_status",
+                            OutputToolStatusPayload(
+                                status=status,  # type: ignore[arg-type]
+                                tool=tool_name,
+                                label=label,
+                                step=step,
+                                max_steps=max_steps,
+                            ),
+                            turn_id=turn_id,
+                        )
+                    )
+                    if status == "running":
+                        await conn.send_envelope(
+                            make_envelope(
+                                "brain",
+                                "avatar.state",
+                                AvatarStatePayload(
+                                    emotion="thinking",
+                                    intensity=0.75,
+                                    activity="tool_running",
+                                ),
+                                turn_id=turn_id,
+                            )
+                        )
+
+                async def _on_approval(
+                    tool_name: str,
+                    risk_level: RiskLevel,
+                    summary: str,
+                    details: Dict[str, Any],
+                    timeout_sec: int,
+                ) -> tuple[bool, bool]:
+                    return await self._request_tool_approval(
+                        conn=conn,
+                        turn_id=turn_id,
+                        tool_name=tool_name,
+                        risk_level=risk_level,
+                        summary=summary,
+                        details=details,
+                        timeout_sec=timeout_sec,
+                    )
+
+                tool_ctx = ToolExecutionContext(
+                    turn_id=turn_id,
+                    session_id=active_session_id,
+                    config=self.config,
+                    llm_router=self.llm_router,
+                    memory_backend=self.memory_backend,
+                    cancel_event=cancel_event,
+                    session_approved_tools=self._session_approved_tools,
+                    on_status=_on_status,
+                    on_approval=_on_approval,
+                )
+                loop_res = await self.tool_executor.run(
+                    messages=messages,
+                    registry=self.tool_registry,
+                    ctx=tool_ctx,
+                    profile_name=profile.name,
+                    on_text_delta=_on_text_delta,
+                )
+                trace_steps = loop_res.trace_steps
+                turn_usages = loop_res.usages
+            else:
+                async for chunk in self.llm_router.stream_chat(messages, profile_name=profile.name):
+                    events = parser.feed(chunk)
+                    seq = await self._emit_parser_events(
+                        conn, turn_id, events, seq, collected_spoken
+                    )
+                if self.llm_router.last_usage is not None:
+                    turn_usages.append(self.llm_router.last_usage)
 
             tail_events = parser.finish()
             seq = await self._emit_parser_events(conn, turn_id, tail_events, seq, collected_spoken)
@@ -742,6 +990,68 @@ class Hub:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             assistant_reply = "".join(collected_spoken).strip()
             scene_summary = self.context_store.get_window_summary()
+
+            if self.memory_backend is not None:
+                await self._record_usage_and_alert(
+                    conn=conn,
+                    turn_id=turn_id,
+                    session_id=active_session_id,
+                    turn_usages=turn_usages,
+                )
+                actionable_steps = [
+                    s for s in trace_steps if s.tool_name != "work_history_inspect"
+                ]
+                if actionable_steps:
+                    import json as _json
+
+                    trace_payload = [
+                        {
+                            "step": s.step,
+                            "tool": s.tool_name,
+                            "args": s.arguments,
+                            "risk": s.risk_level,
+                            "status": s.status,
+                            "summary": s.summary,
+                            "elapsed_ms": s.elapsed_ms,
+                        }
+                        for s in actionable_steps
+                    ]
+                    work_status = (
+                        "error"
+                        if any(s.status in ("error", "blocked") for s in actionable_steps)
+                        and not any(s.status == "ok" for s in actionable_steps)
+                        else "completed"
+                    )
+                    await self.memory_backend.add_work_history(
+                        WorkHistoryRecord(
+                            work_id=new_work_id(),
+                            session_id=active_session_id,
+                            turn_id=turn_id,
+                            goal=user_text[:200],
+                            result_summary=assistant_reply[:300] or "已完成工具执行",
+                            trace_json=_json.dumps(trace_payload, ensure_ascii=False),
+                            step_count=len(actionable_steps),
+                            status=work_status,
+                        )
+                    )
+                    if self.skill_manager is not None:
+                        self.skill_manager.schedule_learn_from_trace(
+                            user_text=user_text,
+                            trace_steps=actionable_steps,
+                            final_summary=assistant_reply[:300],
+                        )
+                        if recalled_skills:
+                            had_tool_error = any(s.status == "error" for s in actionable_steps)
+                            if not had_tool_error and any(s.status == "ok" for s in actionable_steps):
+                                await self.skill_manager.record_feedback(
+                                    recalled_skills[0].skill_id, success=True
+                                )
+                            elif had_tool_error and not any(
+                                s.status == "ok" for s in actionable_steps
+                            ):
+                                await self.skill_manager.record_feedback(
+                                    recalled_skills[0].skill_id, success=False
+                                )
 
             if self.memory_backend is not None and active_session_id:
                 user_rec = await self.memory_backend.append_message(
@@ -866,6 +1176,7 @@ class Hub:
                 )
             )
         finally:
+            self._turn_cancel_events.pop(turn_id, None)
             if artifact_id_to_burn:
                 self.artifact_store.delete(artifact_id_to_burn)
             if conn.active_turn_id == turn_id:

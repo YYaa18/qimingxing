@@ -69,6 +69,12 @@
     "output.card": {
       "$ref": "#/$defs/OutputCardPayload"
     },
+    "tool.approval_request": {
+      "$ref": "#/$defs/ToolApprovalRequestPayload"
+    },
+    "tool.approval_response": {
+      "$ref": "#/$defs/ToolApprovalResponsePayload"
+    },
     "avatar.state": {
       "$ref": "#/$defs/AvatarStatePayload"
     }
@@ -514,6 +520,30 @@
           "default": "",
           "title": "Label",
           "type": "string"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "max_steps": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Steps"
         }
       },
       "required": [
@@ -845,6 +875,82 @@
         "active_profile"
       ],
       "title": "SystemWelcomePayload",
+      "type": "object"
+    },
+    "ToolApprovalRequestPayload": {
+      "properties": {
+        "approval_id": {
+          "title": "Approval Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "risk_level": {
+          "default": "confirm",
+          "enum": [
+            "safe",
+            "confirm",
+            "blocked"
+          ],
+          "title": "Risk Level",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "timeout_sec": {
+          "default": 60,
+          "title": "Timeout Sec",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "approval_id",
+        "turn_id",
+        "tool_name",
+        "summary"
+      ],
+      "title": "ToolApprovalRequestPayload",
+      "type": "object"
+    },
+    "ToolApprovalResponsePayload": {
+      "properties": {
+        "approval_id": {
+          "title": "Approval Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "remember_for_session": {
+          "default": false,
+          "title": "Remember For Session",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "approval_id",
+        "turn_id",
+        "approved"
+      ],
+      "title": "ToolApprovalResponsePayload",
       "type": "object"
     }
   }

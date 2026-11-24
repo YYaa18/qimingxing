@@ -11,11 +11,16 @@ from brain.memory.models import (
     MemoryCategory,
     MemoryEpisode,
     MemoryFact,
+    MemorySkill,
     MessageRecord,
     SessionRecord,
+    SkillStatus,
+    UsageLedgerRecord,
+    UsageSummary,
+    WorkHistoryRecord,
 )
 
-SNAPSHOT_SCHEMA_VERSION = "3.1"
+SNAPSHOT_SCHEMA_VERSION = "4.0"
 
 
 class MemoryBackend(ABC):
@@ -209,6 +214,64 @@ class MemoryBackend(ABC):
         embedding_model: str,
     ) -> List[Tuple[str, str, bytes]]:
         """Return active (item_id, item_type, embedding_blob) matching `embedding_model`."""
+
+    # --- M4: Procedural Skills, Work History & Usage Ledger ---
+
+    @abstractmethod
+    async def upsert_skill(self, skill: MemorySkill) -> MemorySkill:
+        """Insert or update a learned procedural skill and sync FTS index."""
+
+    @abstractmethod
+    async def get_skill(self, skill_id: str) -> Optional[MemorySkill]:
+        """Fetch a skill by ID."""
+
+    @abstractmethod
+    async def list_skills(
+        self,
+        *,
+        status: Optional[SkillStatus] = "active",
+        limit: int = 100,
+    ) -> List[MemorySkill]:
+        """List stored skills ordered by success rate / updated_at."""
+
+    @abstractmethod
+    async def search_skills(self, query_expr: str, *, limit: int = 5) -> List[MemorySkill]:
+        """Search active procedural skills via FTS5."""
+
+    @abstractmethod
+    async def record_skill_outcome(
+        self, skill_id: str, *, success: bool
+    ) -> Optional[MemorySkill]:
+        """Increment success/failure counters and auto-deprecate consistently failing skills."""
+
+    @abstractmethod
+    async def update_skill_status(self, skill_id: str, status: SkillStatus) -> bool:
+        """Mark a skill active or deprecated."""
+
+    @abstractmethod
+    async def add_work_history(self, record: WorkHistoryRecord) -> WorkHistoryRecord:
+        """Archive a multi-step tool/action execution trace without polluting main chat turns."""
+
+    @abstractmethod
+    async def get_work_history(self, work_id: str) -> Optional[WorkHistoryRecord]:
+        """Fetch a work history entry by ID."""
+
+    @abstractmethod
+    async def list_work_history(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[WorkHistoryRecord]:
+        """List recent work history records."""
+
+    @abstractmethod
+    async def add_usage_record(self, record: UsageLedgerRecord) -> UsageLedgerRecord:
+        """Append one real LLM API usage record to the usage ledger."""
+
+    @abstractmethod
+    async def get_usage_summary(self, *, since_ts: float = 0.0) -> UsageSummary:
+        """Aggregate token usage, cache hit rate, and estimated cost since `since_ts`."""
 
     # --- Lossless Migration Contract ---
 

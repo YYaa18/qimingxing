@@ -4,7 +4,8 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
@@ -12,6 +13,86 @@ from brain.config import AppConfig, ProfileConfig
 from protocol.models import ProfileInfo
 
 logger = logging.getLogger("qimingxing.llm_router")
+
+
+def estimate_cny_cost(
+    model: str,
+    prompt_tokens: int,
+    cache_hit_tokens: int,
+    completion_tokens: int,
+) -> float:
+    """Estimate RMB (CNY) API cost for soft usage alerts (does not enforce hard caps)."""
+    miss_tokens = max(0, prompt_tokens - max(0, cache_hit_tokens))
+    hit_tokens = max(0, min(prompt_tokens, cache_hit_tokens))
+    out_tokens = max(0, completion_tokens)
+    lower = (model or "").lower()
+    if "reasoner" in lower:
+        # DeepSeek reasoner reference rates
+        return (miss_tokens * 2.0 + hit_tokens * 0.2 + out_tokens * 8.0) / 1_000_000.0
+    if "gpt-4o" in lower or "claude" in lower:
+        return (miss_tokens * 18.0 + hit_tokens * 9.0 + out_tokens * 72.0) / 1_000_000.0
+    # Default DeepSeek Chat/Flash rates (approx CNY per 1M tokens)
+    return (miss_tokens * 2.0 + hit_tokens * 0.2 + out_tokens * 8.0) / 1_000_000.0
+
+
+@dataclass
+class LLMUsage:
+    prompt_tokens: int = 0
+    prompt_cache_hit_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_cny: float = 0.0
+    model: str = ""
+    profile: str = ""
+
+
+@dataclass
+class ToolCallRequest:
+    id: str
+    name: str
+    arguments_json: str
+
+    def parsed_arguments(self) -> Dict[str, Any]:
+        if not self.arguments_json or not self.arguments_json.strip():
+            return {}
+        try:
+            obj = json.loads(self.arguments_json)
+            return obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+
+@dataclass
+class LLMCompletionResult:
+    content: str = ""
+    tool_calls: List[ToolCallRequest] = field(default_factory=list)
+    finish_reason: str = "stop"
+    usage: LLMUsage = field(default_factory=LLMUsage)
+
+
+def _parse_usage(raw_usage: Dict[str, Any], model: str, profile_name: str) -> LLMUsage:
+    prompt_tokens = int(raw_usage.get("prompt_tokens", 0) or 0)
+    details = raw_usage.get("prompt_tokens_details") or {}
+    cache_hit = int(
+        raw_usage.get("prompt_cache_hit_tokens", 0)
+        or details.get("cached_tokens", 0)
+        or 0
+    )
+    completion_tokens = int(raw_usage.get("completion_tokens", 0) or 0)
+    total_tokens = int(
+        raw_usage.get("total_tokens", prompt_tokens + completion_tokens) or 0
+    )
+    return LLMUsage(
+        prompt_tokens=prompt_tokens,
+        prompt_cache_hit_tokens=cache_hit,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        estimated_cost_cny=estimate_cny_cost(
+            model, prompt_tokens, cache_hit, completion_tokens
+        ),
+        model=model,
+        profile=profile_name,
+    )
 
 
 class LLMError(Exception):
@@ -25,11 +106,12 @@ class LLMError(Exception):
 
 
 class LLMRouter:
-    """Multi-profile cloud LLM streaming router with hot-switch and cancellation."""
+    """Multi-profile cloud LLM streaming router with hot-switch, tool calling, and cancellation."""
 
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._active_profile: str = config.default_profile
+        self.last_usage: Optional[LLMUsage] = None
 
     @property
     def active_profile(self) -> str:
@@ -141,7 +223,9 @@ class LLMRouter:
             "messages": messages,
             "temperature": profile.temperature,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
+        self.last_usage = None
 
         timeout = httpx.Timeout(profile.timeout_seconds, connect=10.0)
         logged_reasoning = False
@@ -164,6 +248,10 @@ class LLMRouter:
                         chunk = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
+                    if isinstance(chunk.get("usage"), dict):
+                        self.last_usage = _parse_usage(
+                            chunk["usage"], profile.model, profile.name
+                        )
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
@@ -350,3 +438,162 @@ class LLMRouter:
         for i in range(0, len(text), step):
             await asyncio.sleep(delay)
             yield text[i : i + step]
+
+    async def complete_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        profile_name: Optional[str] = None,
+        on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> LLMCompletionResult:
+        """Execute a single chat completion round with native OpenAI tool calling support."""
+        profile = self.get_profile(profile_name)
+        started = time.perf_counter()
+        try:
+            if profile.provider == "mock":
+                chunks: List[str] = []
+                async for tok in self._stream_mock(messages, profile):
+                    chunks.append(tok)
+                    if on_text_delta is not None:
+                        await on_text_delta(tok)
+                full = "".join(chunks)
+                usage = LLMUsage(model=profile.model, profile=profile.name)
+                self.last_usage = usage
+                return LLMCompletionResult(content=full, finish_reason="stop", usage=usage)
+
+            if profile.provider == "openai_compatible":
+                res = await self._complete_openai_with_tools(
+                    messages, tools, profile, on_text_delta=on_text_delta
+                )
+                self.last_usage = res.usage
+                return res
+
+            # Fallback for non-OpenAI providers (e.g. Anthropic): stream text cleanly
+            chunks = []
+            async for tok in self.stream_chat(messages, profile_name=profile.name):
+                chunks.append(tok)
+                if on_text_delta is not None:
+                    await on_text_delta(tok)
+            usage = self.last_usage or LLMUsage(model=profile.model, profile=profile.name)
+            return LLMCompletionResult(content="".join(chunks), finish_reason="stop", usage=usage)
+        except asyncio.CancelledError:
+            raise
+        except LLMError:
+            raise
+        except httpx.TimeoutException as exc:
+            safe_msg = self._config.redact_secrets(f"上游模型请求超时 ({profile.model}): {exc}")
+            raise LLMError("LLM_TIMEOUT", safe_msg) from exc
+        except httpx.HTTPError as exc:
+            safe_msg = self._config.redact_secrets(f"上游模型网络错误 ({profile.model}): {exc}")
+            raise LLMError("LLM_NETWORK_ERROR", safe_msg) from exc
+        except Exception as exc:
+            safe_msg = self._config.redact_secrets(f"上游模型调用异常 ({profile.model}): {exc}")
+            raise LLMError("LLM_INTERNAL_ERROR", safe_msg) from exc
+        finally:
+            logger.debug(
+                "complete_with_tools profile=%s elapsed_ms=%d",
+                profile.name,
+                int((time.perf_counter() - started) * 1000),
+            )
+
+    async def _complete_openai_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        profile: ProfileConfig,
+        *,
+        on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> LLMCompletionResult:
+        if not profile.api_key:
+            raise LLMError(
+                "MISSING_API_KEY",
+                f"模型配置 {profile.name} ({profile.model}) 未设置 API Key 环境变量。",
+            )
+        if not profile.base_url:
+            raise LLMError("INVALID_CONFIG", f"模型配置 {profile.name} 缺少 base_url。")
+
+        url = f"{profile.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {profile.api_key}",
+            "Content-Type": "application/json",
+        }
+        body: Dict[str, Any] = {
+            "model": profile.model,
+            "messages": messages,
+            "temperature": profile.temperature,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+
+        timeout = httpx.Timeout(profile.timeout_seconds, connect=10.0)
+        content_parts: List[str] = []
+        tc_acc: Dict[int, Dict[str, Any]] = {}
+        finish_reason = "stop"
+        usage = LLMUsage(model=profile.model, profile=profile.name)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=body) as resp:
+                if resp.status_code >= 400:
+                    raw_err = (await resp.aread()).decode("utf-8", errors="replace")
+                    safe_err = self._config.redact_secrets(raw_err[:300])
+                    raise LLMError(
+                        f"UPSTREAM_HTTP_{resp.status_code}",
+                        f"上游 API 返回 HTTP {resp.status_code}: {safe_err}",
+                    )
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(chunk.get("usage"), dict):
+                        usage = _parse_usage(chunk["usage"], profile.model, profile.name)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if choice.get("finish_reason"):
+                        finish_reason = str(choice["finish_reason"])
+                    delta = choice.get("delta") or {}
+                    text_tok = delta.get("content")
+                    if text_tok:
+                        tok_str = str(text_tok)
+                        content_parts.append(tok_str)
+                        if on_text_delta is not None:
+                            await on_text_delta(tok_str)
+                    for tc_delta in delta.get("tool_calls") or []:
+                        idx = int(tc_delta.get("index", 0))
+                        entry = tc_acc.setdefault(
+                            idx, {"id": "", "name": "", "arguments": []}
+                        )
+                        if tc_delta.get("id"):
+                            entry["id"] = str(tc_delta["id"])
+                        fn = tc_delta.get("function") or {}
+                        if fn.get("name"):
+                            entry["name"] += str(fn["name"])
+                        if fn.get("arguments"):
+                            entry["arguments"].append(str(fn["arguments"]))
+
+        tool_calls = [
+            ToolCallRequest(
+                id=entry["id"] or f"call_{idx}",
+                name=entry["name"],
+                arguments_json="".join(entry["arguments"]),
+            )
+            for idx, entry in sorted(tc_acc.items(), key=lambda kv: kv[0])
+            if entry["name"]
+        ]
+        return LLMCompletionResult(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
+        )

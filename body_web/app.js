@@ -18,8 +18,15 @@
   const windowSummaryEl = document.getElementById("windowSummary");
   const captureIndicator = document.getElementById("captureIndicator");
   const captureLabel = document.getElementById("captureLabel");
+  const toolStatusBar = document.getElementById("toolStatusBar");
+  const toolStepBadge = document.getElementById("toolStepBadge");
+  const toolStatusLabel = document.getElementById("toolStatusLabel");
+  const emergencyStopBtn = document.getElementById("emergencyStopBtn");
   const permissionBanner = document.getElementById("permissionBanner");
   const permissionText = document.getElementById("permissionText");
+  const usageAlertBanner = document.getElementById("usageAlertBanner");
+  const usageAlertText = document.getElementById("usageAlertText");
+  const dismissUsageBtn = document.getElementById("dismissUsageBtn");
   const avatarFace = document.getElementById("avatarFace");
   const emotionBadge = document.getElementById("emotionBadge");
   const activityText = document.getElementById("activityText");
@@ -44,6 +51,7 @@
   let activeTurnId = null;
   let isGenerating = false;
   const bubbleByTurn = new Map();
+  const pendingApprovalCleanups = new Map();
 
   function initEmotionGrid() {
     emotionGrid.innerHTML = "";
@@ -124,6 +132,149 @@
     captureIndicator.classList.toggle("visible", visible);
   }
 
+  function setToolBar(visible, toolName = "", label = "", step = null, maxSteps = null) {
+    if (!toolStatusBar) return;
+    if (!visible) {
+      toolStatusBar.classList.remove("visible");
+      if (emergencyStopBtn) emergencyStopBtn.hidden = true;
+      return;
+    }
+    const stepText = step && maxSteps ? `步骤 ${step}/${maxSteps}` : "工具执行";
+    toolStepBadge.textContent = `${toolName || "tool"} · ${stepText}`;
+    toolStatusLabel.textContent = label || "执行中…";
+    toolStatusBar.classList.add("visible");
+    if (emergencyStopBtn) emergencyStopBtn.hidden = false;
+  }
+
+  function showUsageAlert(msg) {
+    if (!usageAlertBanner) return;
+    usageAlertText.textContent = msg;
+    usageAlertBanner.classList.add("visible");
+  }
+
+  function hideUsageAlert() {
+    if (!usageAlertBanner) return;
+    usageAlertBanner.classList.remove("visible");
+  }
+
+  function settlePendingApprovals(reasonLabel) {
+    for (const [aid, finishFn] of pendingApprovalCleanups.entries()) {
+      finishFn(reasonLabel);
+      pendingApprovalCleanups.delete(aid);
+    }
+  }
+
+  function renderApprovalCard(payload, turnId) {
+    clearEmptyHint(messagesEl);
+    const approvalId = payload.approval_id;
+    const timeoutSec = Math.max(5, Number(payload.timeout_sec || 60));
+    let remaining = timeoutSec;
+
+    const card = document.createElement("div");
+    card.className = "approval-card";
+
+    const head = document.createElement("div");
+    head.className = "approval-head";
+    const titleSpan = document.createElement("span");
+    titleSpan.textContent = `🔐 需要确认操作：${payload.tool_name || "tool"}`;
+    const timerSpan = document.createElement("span");
+    timerSpan.className = "approval-timer";
+    timerSpan.textContent = `剩余 ${remaining}s`;
+    head.appendChild(titleSpan);
+    head.appendChild(timerSpan);
+
+    const summaryEl = document.createElement("div");
+    summaryEl.className = "approval-summary";
+    summaryEl.textContent = payload.summary || "请确认是否允许执行该操作";
+
+    const detailsObj = payload.details || {};
+    const detailsText = detailsObj.command
+      ? `命令: ${detailsObj.command}\n目录: ${detailsObj.cwd || "~"}`
+      : JSON.stringify(detailsObj, null, 2);
+    const detailsEl = document.createElement("div");
+    detailsEl.className = "approval-details";
+    detailsEl.textContent = detailsText;
+
+    const actionsRow = document.createElement("div");
+    actionsRow.className = "approval-actions";
+
+    const approveBtn = document.createElement("button");
+    approveBtn.type = "button";
+    approveBtn.className = "btn";
+    approveBtn.textContent = "允许执行";
+
+    const rememberBtn = document.createElement("button");
+    rememberBtn.type = "button";
+    rememberBtn.className = "btn btn-secondary";
+    rememberBtn.textContent = "本会话记住并允许";
+
+    const denyBtn = document.createElement("button");
+    denyBtn.type = "button";
+    denyBtn.className = "btn btn-danger";
+    denyBtn.textContent = "拒绝";
+
+    const resultBadge = document.createElement("span");
+    resultBadge.className = "approval-result";
+
+    let timerId = null;
+    const lockCard = (statusLabel) => {
+      if (timerId) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+      approveBtn.disabled = true;
+      rememberBtn.disabled = true;
+      denyBtn.disabled = true;
+      timerSpan.textContent = statusLabel;
+      resultBadge.textContent = statusLabel;
+    };
+
+    pendingApprovalCleanups.set(approvalId, lockCard);
+
+    const submitDecision = (approved, rememberForSession, statusLabel) => {
+      pendingApprovalCleanups.delete(approvalId);
+      lockCard(statusLabel);
+      sendEnvelope(
+        "tool.approval_response",
+        {
+          approval_id: approvalId,
+          turn_id: turnId || payload.turn_id || activeTurnId || "",
+          approved,
+          remember_for_session: rememberForSession
+        },
+        turnId || activeTurnId
+      );
+    };
+
+    approveBtn.addEventListener("click", () => submitDecision(true, false, "✅ 已允许执行"));
+    rememberBtn.addEventListener("click", () =>
+      submitDecision(true, true, "✅ 已允许（本会话记住）")
+    );
+    denyBtn.addEventListener("click", () => submitDecision(false, false, "⛔ 已拒绝"));
+
+    timerId = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        pendingApprovalCleanups.delete(approvalId);
+        lockCard("⌛ 审批已超时拒绝");
+      } else {
+        timerSpan.textContent = `剩余 ${remaining}s`;
+      }
+    }, 1000);
+
+    actionsRow.appendChild(approveBtn);
+    actionsRow.appendChild(rememberBtn);
+    actionsRow.appendChild(denyBtn);
+    actionsRow.appendChild(resultBadge);
+
+    card.appendChild(head);
+    card.appendChild(summaryEl);
+    card.appendChild(detailsEl);
+    card.appendChild(actionsRow);
+    messagesEl.appendChild(card);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
   function setGenerating(flag) {
     isGenerating = flag;
     stopBtn.disabled = !flag;
@@ -132,6 +283,10 @@
     askScreenBtn.disabled = false;
     if (!flag) {
       setCaptureIndicator(false);
+      setToolBar(false);
+      settlePendingApprovals("已结束");
+    } else if (emergencyStopBtn) {
+      emergencyStopBtn.hidden = false;
     }
   }
 
@@ -377,6 +532,10 @@
       return;
     }
     if (type === "system.error") {
+      if (payload.code === "USAGE_SOFT_ALERT") {
+        showUsageAlert(payload.message || "已触发用量软提醒，可继续使用。");
+        return;
+      }
       showError(`[${payload.code || "ERROR"}] ${payload.message || "未知错误"}`);
       setGenerating(false);
       updateAvatar("warning", "idle");
@@ -428,6 +587,12 @@
       } else {
         setCaptureIndicator(false);
       }
+      setToolBar(true, payload.tool, payload.label, payload.step, payload.max_steps);
+      return;
+    }
+    if (type === "tool.approval_request") {
+      if (emergencyStopBtn) emergencyStopBtn.hidden = false;
+      renderApprovalCard(payload, turnId);
       return;
     }
 
@@ -437,6 +602,7 @@
   function cancelActiveTurn(reason = "user_cancelled") {
     if (!activeTurnId) return;
     const cancellingTurn = activeTurnId;
+    settlePendingApprovals("🚨 已急停取消");
     sendEnvelope("input.cancel", { reason }, cancellingTurn);
     const rec = bubbleByTurn.get(cancellingTurn);
     if (rec) rec.meta.textContent += " · [已打断]";
@@ -519,6 +685,16 @@
   stopBtn.addEventListener("click", () => {
     cancelActiveTurn("stop_button");
   });
+
+  if (emergencyStopBtn) {
+    emergencyStopBtn.addEventListener("click", () => {
+      cancelActiveTurn("kill_switch");
+    });
+  }
+
+  if (dismissUsageBtn) {
+    dismissUsageBtn.addEventListener("click", hideUsageAlert);
+  }
 
   clearChatBtn.addEventListener("click", () => {
     if (isGenerating && activeTurnId) {
