@@ -26,6 +26,10 @@ func _ready() -> void:
 	audio.amplitude_changed.connect(avatar.set_tts_amplitude)
 	audio.speaking_state_changed.connect(avatar.set_tts_speaking)
 
+	avatar.avatar_clicked.connect(func() -> void:
+		audio.play_earcon("done")
+		overlay.show_transient_status("我在呢～随时听候吩咐 ✨", 2.0)
+	)
 	avatar.files_dropped_queued.connect(overlay.queue_dropped_files)
 	overlay.passthrough_rects_changed.connect(avatar.set_ui_interactive_rects)
 	overlay.approval_decided.connect(_on_approval_decided)
