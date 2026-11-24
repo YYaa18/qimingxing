@@ -8,14 +8,23 @@ signal drop_queue_submitted(paths: Array[String])
 signal desktop_action_requested(action: String, path: String, media_type: String)
 
 const PIN_WINDOW_SCENE := preload("res://scenes/PinImageWindow.tscn")
+const VIEWPORT_WIDTH := 420.0
+const AVATAR_CENTER_X := 210.0
+const AVATAR_NECK_Y := 286.0
+const BUBBLE_MIN_W := 148.0
+const BUBBLE_MAX_W := 296.0
+const STACK_WIDTH := 340.0
 
 var _bubble_panel: PanelContainer
 var _bubble_label: RichTextLabel
 var _bubble_fade_timer: float = 0.0
+var _bubble_target_w: float = BUBBLE_MAX_W
 var _current_spoken: String = ""
 var _current_turn_id: String = ""
 var _in_turn: bool = false
+var _avatar_scale: float = 0.78
 
+var _stack: VBoxContainer
 var _approval_panel: PanelContainer
 var _approval_label: Label
 var _pending_approval_id: String = ""
@@ -58,13 +67,13 @@ func _make_card_style(bg: Color, border: Color) -> StyleBoxFlat:
 
 
 func _build_ui() -> void:
-	# 1. Transient 1-3 sentence speech bubble at top
+	# 1. Transient 1-3 sentence speech bubble anchored right above avatar head
 	_bubble_panel = PanelContainer.new()
 	_bubble_panel.add_theme_stylebox_override(
 		"panel", _make_card_style(Color(0.08, 0.11, 0.17, 0.90), Color(0.28, 0.78, 0.96, 0.65))
 	)
-	_bubble_panel.position = Vector2(20.0, 12.0)
-	_bubble_panel.custom_minimum_size = Vector2(380.0, 0.0)
+	_bubble_panel.position = Vector2((VIEWPORT_WIDTH - BUBBLE_MAX_W) * 0.5, 130.0)
+	_bubble_panel.custom_minimum_size = Vector2(BUBBLE_MAX_W, 0.0)
 	_bubble_panel.visible = false
 	add_child(_bubble_panel)
 
@@ -72,17 +81,19 @@ func _build_ui() -> void:
 	_bubble_label.fit_content = true
 	_bubble_label.scroll_active = false
 	_bubble_label.bbcode_enabled = false
+	_bubble_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_bubble_label.add_theme_font_size_override("normal_font_size", 13)
 	_bubble_label.add_theme_color_override("default_color", Color(0.94, 0.97, 1.0))
 	_bubble_panel.add_child(_bubble_label)
 
-	# Bottom capsule stack anchored below avatar
-	var stack := VBoxContainer.new()
-	stack.position = Vector2(20.0, 355.0)
-	stack.custom_minimum_size = Vector2(380.0, 0.0)
-	stack.add_theme_constant_override("separation", 6)
-	stack.mouse_filter = Control.MOUSE_FILTER_PASS
-	add_child(stack)
+	# Bottom capsule stack anchored cleanly under scaled avatar ring
+	_stack = VBoxContainer.new()
+	_stack.custom_minimum_size = Vector2(STACK_WIDTH, 0.0)
+	_stack.size = Vector2(STACK_WIDTH, 0.0)
+	_stack.add_theme_constant_override("separation", 6)
+	_stack.mouse_filter = Control.MOUSE_FILTER_PASS
+	add_child(_stack)
+	_reposition_stack()
 
 	# 2. Approval / Tool confirmation capsule
 	_approval_panel = PanelContainer.new()
@@ -90,7 +101,7 @@ func _build_ui() -> void:
 		"panel", _make_card_style(Color(0.20, 0.12, 0.06, 0.93), Color(1.0, 0.62, 0.22, 0.85))
 	)
 	_approval_panel.visible = false
-	stack.add_child(_approval_panel)
+	_stack.add_child(_approval_panel)
 
 	var app_row := HBoxContainer.new()
 	app_row.add_theme_constant_override("separation", 6)
@@ -118,7 +129,7 @@ func _build_ui() -> void:
 		"panel", _make_card_style(Color(0.08, 0.17, 0.22, 0.93), Color(0.36, 0.85, 0.98, 0.8))
 	)
 	_drop_panel.visible = false
-	stack.add_child(_drop_panel)
+	_stack.add_child(_drop_panel)
 
 	var drop_row := HBoxContainer.new()
 	drop_row.add_theme_constant_override("separation", 6)
@@ -145,7 +156,7 @@ func _build_ui() -> void:
 		"panel", _make_card_style(Color(0.09, 0.14, 0.19, 0.93), Color(0.45, 0.85, 0.65, 0.75))
 	)
 	_artifact_panel.visible = false
-	stack.add_child(_artifact_panel)
+	_stack.add_child(_artifact_panel)
 
 	var art_col := VBoxContainer.new()
 	art_col.add_theme_constant_override("separation", 4)
@@ -177,7 +188,7 @@ func _build_ui() -> void:
 	_controls_bar.alignment = BoxContainer.ALIGNMENT_CENTER
 	_controls_bar.add_theme_constant_override("separation", 4)
 	_controls_bar.visible = false
-	stack.add_child(_controls_bar)
+	_stack.add_child(_controls_bar)
 
 	_stop_btn = Button.new()
 	_stop_btn.text = "■ 急停"
@@ -192,6 +203,7 @@ func _process(delta: float) -> void:
 		_bubble_fade_timer -= delta
 		if _bubble_fade_timer <= 0.0:
 			_bubble_panel.visible = false
+			queue_redraw()
 			_emit_rects()
 
 
@@ -204,6 +216,7 @@ func on_turn_start(turn_id: String) -> void:
 	_bubble_panel.visible = false
 	_stop_btn.visible = true
 	_controls_bar.visible = not _dock_tucked
+	queue_redraw()
 	_emit_rects()
 
 
@@ -213,10 +226,7 @@ func on_text_delta(delta: String, is_final: bool) -> void:
 		var trimmed := _current_spoken.strip_edges()
 		if trimmed.length() > 180:
 			trimmed = "…" + trimmed.right(176)
-		_bubble_label.text = trimmed
-		_bubble_panel.visible = true
-		_bubble_fade_timer = 7.0 if is_final else 0.0
-		_emit_rects()
+		_show_bubble_text(trimmed, 7.0 if is_final else 0.0)
 	elif is_final and _bubble_panel.visible:
 		_bubble_fade_timer = 6.5
 
@@ -231,12 +241,75 @@ func on_turn_end() -> void:
 
 
 func show_transient_status(text: String, fade_sec: float = 4.5) -> void:
-	if text.strip_edges() == "":
+	var cleaned := text.strip_edges()
+	if cleaned == "":
 		return
-	_bubble_label.text = text.strip_edges()
+	_show_bubble_text(cleaned, fade_sec)
+
+
+func set_avatar_scale(sc: float) -> void:
+	_avatar_scale = clampf(sc, 0.50, 1.30)
+	_reposition_stack()
+	_reposition_bubble()
+
+
+func _reposition_stack() -> void:
+	if _stack == null:
+		return
+	var stack_x := (VIEWPORT_WIDTH - STACK_WIDTH) * 0.5
+	var stack_y := clampf(AVATAR_NECK_Y + 104.0 * _avatar_scale, 332.0, 424.0)
+	_stack.position = Vector2(stack_x, stack_y)
+	_emit_rects()
+
+
+func _show_bubble_text(text: String, fade_sec: float) -> void:
+	var width := BUBBLE_MAX_W
+	if text.find("\n") == -1:
+		var font := _bubble_label.get_theme_font("normal_font")
+		if font != null:
+			var single_w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+			width = clampf(single_w + 30.0, BUBBLE_MIN_W, BUBBLE_MAX_W)
+	_bubble_target_w = width
+	_bubble_panel.custom_minimum_size = Vector2(width, 0.0)
+	_bubble_panel.size = Vector2(width, 0.0)
+	_bubble_label.text = text
 	_bubble_panel.visible = true
 	_bubble_fade_timer = fade_sec
-	_emit_rects()
+	_reposition_bubble()
+	call_deferred("_reposition_bubble")
+
+
+func _reposition_bubble() -> void:
+	if _bubble_panel == null or not _bubble_panel.visible:
+		queue_redraw()
+		return
+	var min_sz := _bubble_panel.get_combined_minimum_size()
+	var w := clampf(maxf(_bubble_target_w, min_sz.x), BUBBLE_MIN_W, BUBBLE_MAX_W)
+	var h := maxf(min_sz.y, 32.0)
+	_bubble_panel.size = Vector2(w, h)
+	var head_top_y := AVATAR_NECK_Y - 130.0 * _avatar_scale
+	var x := (VIEWPORT_WIDTH - w) * 0.5
+	var y := clampf(head_top_y - h - 12.0, 8.0, 235.0)
+	_bubble_panel.position = Vector2(x, y)
+	queue_redraw()
+	_collect_and_emit_rects()
+
+
+func _draw() -> void:
+	if _bubble_panel == null or not _bubble_panel.visible or _bubble_panel.size.y <= 1.0:
+		return
+	var r := _bubble_panel.get_rect()
+	var base_y := r.position.y + r.size.y - 0.5
+	var tail_x := clampf(AVATAR_CENTER_X, r.position.x + 18.0, r.position.x + r.size.x - 18.0)
+	var head_top_y := AVATAR_NECK_Y - 130.0 * _avatar_scale
+	var tip_y := maxf(base_y + 9.0, minf(base_y + 13.0, head_top_y + 2.0))
+	var p_left := Vector2(tail_x - 7.0, base_y)
+	var p_right := Vector2(tail_x + 7.0, base_y)
+	var p_tip := Vector2(tail_x, tip_y)
+	draw_colored_polygon(PackedVector2Array([p_left, p_right, p_tip]), Color(0.08, 0.11, 0.17, 0.90))
+	var border_col := Color(0.28, 0.78, 0.96, 0.65)
+	draw_line(p_left, p_tip, border_col, 1.2, true)
+	draw_line(p_right, p_tip, border_col, 1.2, true)
 
 
 func show_approval_request(approval_id: String, turn_id: String, summary: String) -> void:

@@ -21,6 +21,7 @@ func _ready() -> void:
 
 	_load_audio_prefs()
 	tray.call("sync_toggles", avatar.call("is_roam_enabled"), audio.earcons_enabled, audio.call("is_ambient_enabled"))
+	overlay.call("set_avatar_scale", avatar.call("get_avatar_scale"))
 
 	ws.connected_changed.connect(func(ok: bool) -> void:
 		if ok:
@@ -42,6 +43,7 @@ func _ready() -> void:
 		tray.call("popup_at_cursor")
 	)
 	avatar.scale_changed.connect(func(sc: float) -> void:
+		overlay.call("set_avatar_scale", sc)
 		overlay.show_transient_status("当前大小: %d%%（可在托盘设置调整）" % int(round(sc * 100.0)), 1.8)
 	)
 	avatar.dock_state_changed.connect(func(edge: String, tucked: bool) -> void:
@@ -110,6 +112,7 @@ func _ensure_settings_window() -> Window:
 		_settings_win.prefs_applied.connect(_on_settings_prefs_applied)
 		_settings_win.scale_previewed.connect(func(sc: float) -> void:
 			avatar.set_avatar_scale(sc)
+			overlay.call("set_avatar_scale", sc)
 		)
 		_settings_win.reset_position_requested.connect(func() -> void:
 			avatar.call("reset_to_default_position")
@@ -141,6 +144,7 @@ func _on_settings_prefs_applied(
 	_auto_hide: bool
 ) -> void:
 	avatar.set_avatar_scale(avatar_scale)
+	overlay.call("set_avatar_scale", avatar_scale)
 	avatar.set_roam_enabled(roam_on)
 	audio.earcons_enabled = earcons_on
 	audio.set_ambient_enabled(ambient_on)
