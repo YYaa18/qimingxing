@@ -197,3 +197,38 @@ mcp_servers:
   #   timeout_sec: 30
   #   startup_timeout_sec: 15
   []
+
+# 流式语音闭环配置（DeepSeek 官方 ASR / TTS + 全局按住说话热键）
+audio:
+  enabled: true
+  asr:
+    provider: "deepseek"
+    base_url: "https://api.deepseek.com/v1"
+    api_key: "${DEEPSEEK_API_KEY}"
+    model: "deepseek-asr"
+    timeout_sec: 15
+  tts:
+    provider: "deepseek"
+    base_url: "https://api.deepseek.com/v1"
+    api_key: "${DEEPSEEK_API_KEY}"
+    model: "deepseek-tts"
+    voice: "stella"  # 可选 stella（女声） / tide（男声）
+    sample_rate: 24000
+    filter_markdown: true
+    timeout_sec: 20
+  ptt:
+    hotkey: "right_option"  # 支持 right_option / left_option / option+space / ctrl+space
+    sample_rate: 16000
+    max_record_sec: 60
+
+# 批量路径引用挂载与桌面按需收件箱（仅传路径与目录树，绝不读取全文，零后台轮询）
+batch_context:
+  inbox_dir: "~/Desktop/给启明星"
+  max_paths: 200
+  max_tree_depth: 3
+
+# Godot 4 桌面躯体联动偏好
+godot:
+  auto_hide_on_capture: true
+  earcons_enabled: true
+  ambient_duck_db: -12.0

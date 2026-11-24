@@ -30,6 +30,12 @@
     "system.privacy_state": {
       "$ref": "#/$defs/SystemPrivacyStatePayload"
     },
+    "system.capture_prepare": {
+      "$ref": "#/$defs/SystemCapturePreparePayload"
+    },
+    "system.capture_done": {
+      "$ref": "#/$defs/SystemCaptureDonePayload"
+    },
     "input.text": {
       "$ref": "#/$defs/InputTextPayload"
     },
@@ -38,6 +44,24 @@
     },
     "input.cancel": {
       "$ref": "#/$defs/InputCancelPayload"
+    },
+    "audio.input_start": {
+      "$ref": "#/$defs/AudioInputStartPayload"
+    },
+    "audio.input_chunk": {
+      "$ref": "#/$defs/AudioInputChunkPayload"
+    },
+    "audio.input_end": {
+      "$ref": "#/$defs/AudioInputEndPayload"
+    },
+    "audio.output_start": {
+      "$ref": "#/$defs/AudioOutputStartPayload"
+    },
+    "audio.output_chunk": {
+      "$ref": "#/$defs/AudioOutputChunkPayload"
+    },
+    "audio.output_end": {
+      "$ref": "#/$defs/AudioOutputEndPayload"
     },
     "context.window_changed": {
       "$ref": "#/$defs/ContextWindowChangedPayload"
@@ -72,6 +96,9 @@
     "output.card": {
       "$ref": "#/$defs/OutputCardPayload"
     },
+    "output.artifact_capsule": {
+      "$ref": "#/$defs/OutputArtifactCapsulePayload"
+    },
     "tool.approval_request": {
       "$ref": "#/$defs/ToolApprovalRequestPayload"
     },
@@ -83,6 +110,209 @@
     }
   },
   "$defs": {
+    "AudioInputChunkPayload": {
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "seq": {
+          "default": 1,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "data_b64": {
+          "default": "",
+          "title": "Data B64",
+          "type": "string"
+        },
+        "sample_rate": {
+          "default": 16000,
+          "title": "Sample Rate",
+          "type": "integer"
+        },
+        "channels": {
+          "default": 1,
+          "title": "Channels",
+          "type": "integer"
+        },
+        "format": {
+          "default": "pcm_s16le",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "title": "AudioInputChunkPayload",
+      "type": "object"
+    },
+    "AudioInputEndPayload": {
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "reason": {
+          "default": "ptt_released",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "title": "AudioInputEndPayload",
+      "type": "object"
+    },
+    "AudioInputStartPayload": {
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "sample_rate": {
+          "default": 16000,
+          "title": "Sample Rate",
+          "type": "integer"
+        },
+        "channels": {
+          "default": 1,
+          "title": "Channels",
+          "type": "integer"
+        },
+        "format": {
+          "default": "pcm_s16le",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "title": "AudioInputStartPayload",
+      "type": "object"
+    },
+    "AudioOutputChunkPayload": {
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "seq": {
+          "default": 1,
+          "title": "Seq",
+          "type": "integer"
+        },
+        "sentence_index": {
+          "default": 0,
+          "title": "Sentence Index",
+          "type": "integer"
+        },
+        "data_b64": {
+          "default": "",
+          "title": "Data B64",
+          "type": "string"
+        },
+        "sample_rate": {
+          "default": 24000,
+          "title": "Sample Rate",
+          "type": "integer"
+        },
+        "format": {
+          "default": "pcm_s16le",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "title": "AudioOutputChunkPayload",
+      "type": "object"
+    },
+    "AudioOutputEndPayload": {
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "finish_reason": {
+          "default": "completed",
+          "enum": [
+            "completed",
+            "cancelled",
+            "error"
+          ],
+          "title": "Finish Reason",
+          "type": "string"
+        }
+      },
+      "title": "AudioOutputEndPayload",
+      "type": "object"
+    },
+    "AudioOutputStartPayload": {
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "sample_rate": {
+          "default": 24000,
+          "title": "Sample Rate",
+          "type": "integer"
+        },
+        "channels": {
+          "default": 1,
+          "title": "Channels",
+          "type": "integer"
+        },
+        "format": {
+          "default": "pcm_s16le",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "title": "AudioOutputStartPayload",
+      "type": "object"
+    },
     "AvatarStatePayload": {
       "properties": {
         "emotion": {
@@ -177,6 +407,16 @@
         "lip_sync": {
           "default": false,
           "title": "Lip Sync",
+          "type": "boolean"
+        },
+        "pin_image": {
+          "default": false,
+          "title": "Pin Image",
+          "type": "boolean"
+        },
+        "auto_hide": {
+          "default": false,
+          "title": "Auto Hide",
           "type": "boolean"
         }
       },
@@ -451,6 +691,55 @@
         "text"
       ],
       "title": "InputTextPayload",
+      "type": "object"
+    },
+    "OutputArtifactCapsulePayload": {
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "media_type": {
+          "default": "file",
+          "enum": [
+            "text",
+            "pdf",
+            "image",
+            "video",
+            "file"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "actions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Actions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "title",
+        "path"
+      ],
+      "title": "OutputArtifactCapsulePayload",
       "type": "object"
     },
     "OutputCardPayload": {
@@ -738,6 +1027,47 @@
       "title": "SensesCaptureRequestPayload",
       "type": "object"
     },
+    "SystemCaptureDonePayload": {
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "turn_id"
+      ],
+      "title": "SystemCaptureDonePayload",
+      "type": "object"
+    },
+    "SystemCapturePreparePayload": {
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "hide_ms": {
+          "default": 150,
+          "title": "Hide Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_id",
+        "turn_id"
+      ],
+      "title": "SystemCapturePreparePayload",
+      "type": "object"
+    },
     "SystemConfigSetPayload": {
       "properties": {
         "profile": {
@@ -788,6 +1118,23 @@
           ],
           "title": "Role",
           "type": "string"
+        },
+        "client_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "body_godot",
+                "body_web",
+                "senses"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Type"
         },
         "capabilities": {
           "$ref": "#/$defs/ClientCapabilities"

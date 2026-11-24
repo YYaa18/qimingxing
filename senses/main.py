@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import websockets
 
@@ -17,17 +18,28 @@ if str(_REPO_ROOT) not in sys.path:
 
 from brain.config import load_config  # noqa: E402
 from protocol.models import (  # noqa: E402
+    AudioInputChunkPayload,
+    AudioInputEndPayload,
+    AudioInputStartPayload,
     ClientCapabilities,
     ContextScreenRefPayload,
+    InputCancelPayload,
     PermissionStatus,
     SensesCaptureRequestPayload,
     SystemHelloPayload,
     SystemPingPayload,
     SystemPrivacyStatePayload,
     make_envelope,
-    now_ms,
+    new_turn_id,
     parse_envelope,
     parse_payload,
+)
+from senses.audio import (  # noqa: E402
+    AudioCapturer,
+    HotkeyListener,
+    MacOSPTTListener,
+    SoundDeviceMicCapturer,
+    check_macos_audio_permissions,
 )
 from senses.privacy_guard import PrivacyGuard  # noqa: E402
 from senses.screen_capture import ScreenCapture  # noqa: E402
@@ -53,11 +65,26 @@ class SensesAgent:
         screen_capture: Optional[ScreenCapture] = None,
         poll_interval: float = 1.2,
         debounce_seconds: float = 0.5,
+        audio_enabled: Optional[bool] = None,
+        ptt_hotkey: Optional[str] = None,
+        audio_sample_rate: Optional[int] = None,
+        max_record_sec: Optional[int] = None,
+        hotkey_listener: Optional[HotkeyListener] = None,
+        audio_capturer: Optional[AudioCapturer] = None,
     ) -> None:
         self.ws_url = ws_url
         self.provider = window_provider or create_window_provider()
-        if privacy_guard is None:
+        cfg = None
+        if (
+            privacy_guard is None
+            or audio_enabled is None
+            or ptt_hotkey is None
+            or audio_sample_rate is None
+            or max_record_sec is None
+        ):
             cfg = load_config()
+        if privacy_guard is None:
+            assert cfg is not None
             self.guard = PrivacyGuard(
                 mode=cfg.privacy.default_mode,
                 blocked_apps=cfg.privacy.blocked_apps,
@@ -68,6 +95,31 @@ class SensesAgent:
         self.capture = screen_capture or ScreenCapture(brain_http_base=http_base)
         self.poll_interval = poll_interval
         self.debounce_seconds = debounce_seconds
+        self.audio_enabled = (
+            audio_enabled if audio_enabled is not None else (cfg.audio.enabled if cfg else True)
+        )
+        self.ptt_hotkey = (
+            ptt_hotkey if ptt_hotkey is not None else (cfg.audio.ptt.hotkey if cfg else "right_option")
+        )
+        self.audio_sample_rate = (
+            audio_sample_rate
+            if audio_sample_rate is not None
+            else (cfg.audio.ptt.sample_rate if cfg else 16000)
+        )
+        self.max_record_sec = (
+            max_record_sec
+            if max_record_sec is not None
+            else (cfg.audio.ptt.max_record_sec if cfg else 60)
+        )
+        self._hotkey_listener = hotkey_listener
+        self._audio_capturer = audio_capturer
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._active_ws: Optional[Any] = None
+        self._audio_out_queue: Optional[asyncio.Queue[str]] = None
+        self._audio_active = False
+        self._audio_turn_id: Optional[str] = None
+        self._audio_seq = 0
+        self._max_record_timer: Optional[asyncio.TimerHandle] = None
         self._last_sent_key: Optional[tuple[str, str, bool]] = None
         self._pending_key: Optional[tuple[str, str]] = None
         self._pending_since: float = 0.0
@@ -225,41 +277,213 @@ class SensesAgent:
             elif isinstance(payload, SensesCaptureRequestPayload):
                 asyncio.create_task(self.handle_capture_request(ws, payload))
 
-    async def run_forever(self) -> None:
-        attempt = 0
+    def _get_audio_capturer(self) -> AudioCapturer:
+        if self._audio_capturer is None:
+            self._audio_capturer = SoundDeviceMicCapturer(sample_rate=self.audio_sample_rate)
+        return self._audio_capturer
+
+    def _get_hotkey_listener(self) -> HotkeyListener:
+        if self._hotkey_listener is None:
+            self._hotkey_listener = MacOSPTTListener(self.ptt_hotkey)
+        return self._hotkey_listener
+
+    def _enqueue_audio_chunk_threadsafe(self, pcm_bytes: bytes) -> None:
+        loop = self._loop
+        if loop is None:
+            self._push_pcm_chunk(pcm_bytes)
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            self._push_pcm_chunk(pcm_bytes)
+        else:
+            loop.call_soon_threadsafe(self._push_pcm_chunk, pcm_bytes)
+
+    def _push_pcm_chunk(self, pcm_bytes: bytes) -> None:
+        if not self._audio_active or not self._audio_turn_id or not pcm_bytes:
+            return
+        self._audio_seq += 1
+        env = make_envelope(
+            "senses",
+            "audio.input_chunk",
+            AudioInputChunkPayload(
+                turn_id=self._audio_turn_id,
+                seq=self._audio_seq,
+                data_b64=base64.b64encode(pcm_bytes).decode("ascii"),
+                sample_rate=self.audio_sample_rate,
+                channels=1,
+                format="pcm_s16le",
+            ),
+            turn_id=self._audio_turn_id,
+        )
+        if self._audio_out_queue is not None:
+            self._audio_out_queue.put_nowait(env.model_dump_json())
+
+    async def trigger_ptt_press(self, ws: Optional[Any] = None) -> Optional[str]:
+        target_ws = ws or self._active_ws
+        if target_ws is None or not self.audio_enabled:
+            return None
+        if self._audio_active:
+            return self._audio_turn_id
+
+        tid = new_turn_id()
+        self._audio_turn_id = tid
+        self._audio_seq = 0
+        self._audio_active = True
+        if self._audio_out_queue is None:
+            self._audio_out_queue = asyncio.Queue()
+
+        # Instant barge-in cancellation followed by audio stream start
+        cancel_env = make_envelope(
+            "senses", "input.cancel", InputCancelPayload(reason="ptt_barge_in")
+        )
+        await target_ws.send(cancel_env.model_dump_json())
+        start_env = make_envelope(
+            "senses",
+            "audio.input_start",
+            AudioInputStartPayload(
+                turn_id=tid,
+                sample_rate=self.audio_sample_rate,
+                channels=1,
+                format="pcm_s16le",
+            ),
+            turn_id=tid,
+        )
+        await target_ws.send(start_env.model_dump_json())
+
+        self._get_audio_capturer().start(self._enqueue_audio_chunk_threadsafe)
+        try:
+            loop = asyncio.get_running_loop()
+            if self._max_record_timer is not None:
+                self._max_record_timer.cancel()
+            self._max_record_timer = loop.call_later(
+                max(5, int(self.max_record_sec)),
+                lambda: asyncio.create_task(
+                    self.trigger_ptt_release(target_ws, reason="max_duration")
+                ),
+            )
+        except Exception:
+            pass
+        logger.info("PTT press started voice turn=%s hotkey=%s", tid, self.ptt_hotkey)
+        return tid
+
+    async def trigger_ptt_release(
+        self, ws: Optional[Any] = None, *, reason: str = "ptt_released"
+    ) -> None:
+        if self._max_record_timer is not None:
+            self._max_record_timer.cancel()
+            self._max_record_timer = None
+        if not self._audio_active:
+            return
+
+        tid = self._audio_turn_id
+        self._get_audio_capturer().stop()
+        self._audio_active = False
+        self._audio_turn_id = None
+
+        target_ws = ws or self._active_ws
+        if target_ws is None or not tid:
+            return
+
+        if self._audio_out_queue is not None:
+            while not self._audio_out_queue.empty():
+                raw = self._audio_out_queue.get_nowait()
+                await target_ws.send(raw)
+
+        end_env = make_envelope(
+            "senses",
+            "audio.input_end",
+            AudioInputEndPayload(turn_id=tid, reason=reason),
+            turn_id=tid,
+        )
+        await target_ws.send(end_env.model_dump_json())
+        logger.info("PTT release finalized voice turn=%s reason=%s", tid, reason)
+
+    async def audio_sender_loop(self, ws: Any) -> None:
+        if self._audio_out_queue is None:
+            self._audio_out_queue = asyncio.Queue()
         while True:
-            try:
-                async with websockets.connect(self.ws_url) as ws:
-                    attempt = 0
-                    hello_env = make_envelope("senses", "system.hello", self._build_hello_payload())
-                    await ws.send(hello_env.model_dump_json())
-                    welcome_raw = await ws.recv()
-                    logger.info(
-                        "Connected to Brain (%s): %s",
-                        self.provider.platform_name,
-                        json.loads(welcome_raw).get("type"),
+            raw_json = await self._audio_out_queue.get()
+            await ws.send(raw_json)
+
+    async def run_forever(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._audio_out_queue = asyncio.Queue()
+
+        ptt_started = False
+        if self.audio_enabled:
+            perm = await asyncio.to_thread(check_macos_audio_permissions)
+            if not perm.microphone or not perm.accessibility:
+                logger.warning("语音/全局热键权限提示: %s", perm.hint)
+            listener = self._get_hotkey_listener()
+
+            def _on_press() -> None:
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self.trigger_ptt_press())
                     )
 
-                    tasks = [
-                        asyncio.create_task(self.poll_windows_loop(ws)),
-                        asyncio.create_task(self.heartbeat_loop(ws)),
-                        asyncio.create_task(self.recv_loop(ws)),
-                    ]
-                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-                    for t in pending:
-                        t.cancel()
-                    for t in done:
-                        exc = t.exception()
-                        if exc is not None:
-                            raise exc
-            except KeyboardInterrupt:
-                logger.info("Stopping SensesAgent.")
-                return
+            def _on_release() -> None:
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self.trigger_ptt_release())
+                    )
+
+            try:
+                listener.start(on_press=_on_press, on_release=_on_release)
+                ptt_started = True
             except Exception as exc:
-                attempt += 1
-                delay = min(1.0 * (2 ** (attempt - 1)), 5.0)
-                logger.warning("Senses disconnected (%s). Reconnecting in %.1fs...", exc, delay)
-                await asyncio.sleep(delay)
+                logger.warning("启动全局热键监听失败（不影响桌面感知）: %s", exc)
+
+        attempt = 0
+        try:
+            while True:
+                try:
+                    async with websockets.connect(self.ws_url) as ws:
+                        attempt = 0
+                        self._active_ws = ws
+                        hello_env = make_envelope("senses", "system.hello", self._build_hello_payload())
+                        await ws.send(hello_env.model_dump_json())
+                        welcome_raw = await ws.recv()
+                        logger.info(
+                            "Connected to Brain (%s): %s",
+                            self.provider.platform_name,
+                            json.loads(welcome_raw).get("type"),
+                        )
+
+                        tasks = [
+                            asyncio.create_task(self.poll_windows_loop(ws)),
+                            asyncio.create_task(self.heartbeat_loop(ws)),
+                            asyncio.create_task(self.recv_loop(ws)),
+                            asyncio.create_task(self.audio_sender_loop(ws)),
+                        ]
+                        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+                        for t in pending:
+                            t.cancel()
+                        for t in done:
+                            exc = t.exception()
+                            if exc is not None:
+                                raise exc
+                except KeyboardInterrupt:
+                    logger.info("Stopping SensesAgent.")
+                    return
+                except Exception as exc:
+                    self._active_ws = None
+                    if self._audio_active:
+                        self._get_audio_capturer().stop()
+                        self._audio_active = False
+                        self._audio_turn_id = None
+                    attempt += 1
+                    delay = min(1.0 * (2 ** (attempt - 1)), 5.0)
+                    logger.warning("Senses disconnected (%s). Reconnecting in %.1fs...", exc, delay)
+                    await asyncio.sleep(delay)
+        finally:
+            self._active_ws = None
+            self._get_audio_capturer().stop()
+            if ptt_started and self._hotkey_listener is not None:
+                self._hotkey_listener.stop()
 
 
 def main() -> None:
@@ -267,12 +491,14 @@ def main() -> None:
     parser.add_argument("--ws-url", default="ws://127.0.0.1:18790/ws", help="Brain WebSocket URL")
     parser.add_argument("--http-base", default="http://127.0.0.1:18790", help="Brain HTTP base URL")
     parser.add_argument("--poll-interval", type=float, default=1.2, help="Window poll interval in seconds")
+    parser.add_argument("--hotkey", default=None, help="Override configured Push-to-Talk hotkey")
     args = parser.parse_args()
 
     agent = SensesAgent(
         ws_url=args.ws_url,
         http_base=args.http_base,
         poll_interval=args.poll_interval,
+        ptt_hotkey=args.hotkey,
     )
     try:
         asyncio.run(agent.run_forever())

@@ -12,6 +12,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 
 from brain.artifact_store import ArtifactStore
+from brain.audio import ASRProvider, TTSProvider
 from brain.config import AppConfig, load_config
 from brain.context_builder import ContextBuilder
 from brain.context_store import ContextStore
@@ -25,6 +26,7 @@ from brain.memory.extractor import MemoryExtractor
 from brain.memory.retrieval import MemoryRetriever
 from brain.scheduler import TaskScheduler
 from brain.screen_router import ScreenUnderstandingRouter
+from brain.tools.desktop_io import CommandRunner, execute_desktop_action
 from brain.tools.mcp_client import MCPClientManager
 from protocol.models import PROTOCOL_VERSION
 
@@ -50,6 +52,9 @@ def create_app(
     screen_router: Optional[ScreenUnderstandingRouter] = None,
     mcp_manager: Optional[MCPClientManager] = None,
     scheduler: Optional[TaskScheduler] = None,
+    asr_provider: Optional[ASRProvider] = None,
+    tts_provider: Optional[TTSProvider] = None,
+    desktop_command_runner: Optional[CommandRunner] = None,
     capture_timeout_seconds: float = 3.5,
 ) -> FastAPI:
     _config_injected = config is not None
@@ -89,6 +94,8 @@ def create_app(
         intent_detector=intent_detector,
         screen_router=screen_router,
         skill_manager=skill_manager,
+        asr_provider=asr_provider,
+        tts_provider=tts_provider,
         capture_timeout_seconds=capture_timeout_seconds,
     )
     active_mcp = mcp_manager or MCPClientManager(cfg)
@@ -296,6 +303,83 @@ def create_app(
             }
         )
 
+    @app.post("/api/context/attach_paths")
+    async def attach_paths(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=403, detail="Path attachment is restricted to localhost."
+            )
+
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+
+        raw_paths = body.get("paths") or []
+        if not isinstance(raw_paths, list):
+            raise HTTPException(status_code=400, detail="`paths` must be a list.")
+        source = str(body.get("source") or "manual").strip() or "manual"
+        append = bool(body.get("append", True))
+
+        res = hub.attach_context_paths(
+            [str(p) for p in raw_paths], source=source, append=append
+        )
+        if res.accepted_paths:
+            await hub.broadcast_tool_notice(
+                "batch_context",
+                f"已接收 {len(res.accepted_paths)} 个本地路径（共 {res.total_entries} 条引用，来源: {source}）",
+            )
+        return JSONResponse(
+            {
+                "status": "ok",
+                "source": res.source,
+                "accepted": len(res.accepted_paths),
+                "filtered": len(res.filtered_paths),
+                "missing": len(res.missing_paths),
+                "total_entries": res.total_entries,
+                "pending_roots": hub.batch_path_store.pending_count(),
+                "accepted_paths": res.accepted_paths,
+                "filtered_paths": res.filtered_paths,
+                "manifest_preview": res.manifest_text,
+            }
+        )
+
+    @app.post("/api/desktop/open_action")
+    async def desktop_open_action(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=403, detail="Desktop open actions are restricted to localhost."
+            )
+
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+
+        action = str(body.get("action") or "")
+        path = str(body.get("path") or "")
+        try:
+            result = await asyncio.to_thread(
+                execute_desktop_action, action, path, runner=desktop_command_runner
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            safe_err = cfg.redact_secrets(f"{type(exc).__name__}: {exc}")
+            raise HTTPException(status_code=500, detail=safe_err) from exc
+
+        return JSONResponse(result)
+
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(_REPO_ROOT / "body_web" / "index.html")
@@ -315,8 +399,14 @@ def create_app(
         logger.info("WebSocket connected: client=%s", conn.client_id)
         try:
             while True:
-                raw_text = await websocket.receive_text()
-                await hub.handle_raw_message(conn, raw_text)
+                msg = await websocket.receive()
+                msg_type = msg.get("type")
+                if msg_type == "websocket.disconnect":
+                    break
+                if msg.get("text") is not None:
+                    await hub.handle_raw_message(conn, msg["text"])
+                elif msg.get("bytes") is not None:
+                    await hub.handle_raw_bytes(conn, msg["bytes"])
         except WebSocketDisconnect:
             pass
         finally:

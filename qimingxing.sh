@@ -9,13 +9,17 @@ PORT="${QIMINGXING_PORT:-18790}"
 if [[ "${PORT}" == "18790" ]]; then
   BRAIN_PID_FILE="${RUN_DIR}/brain.pid"
   SENSES_PID_FILE="${RUN_DIR}/senses.pid"
+  GODOT_PID_FILE="${RUN_DIR}/godot.pid"
   BRAIN_LOG="${RUN_DIR}/brain.log"
   SENSES_LOG="${RUN_DIR}/senses.log"
+  GODOT_LOG="${RUN_DIR}/godot.log"
 else
   BRAIN_PID_FILE="${RUN_DIR}/brain.${PORT}.pid"
   SENSES_PID_FILE="${RUN_DIR}/senses.${PORT}.pid"
+  GODOT_PID_FILE="${RUN_DIR}/godot.${PORT}.pid"
   BRAIN_LOG="${RUN_DIR}/brain.${PORT}.log"
   SENSES_LOG="${RUN_DIR}/senses.${PORT}.log"
+  GODOT_LOG="${RUN_DIR}/godot.${PORT}.log"
 fi
 
 BASE_HTTP="http://${HOST}:${PORT}"
@@ -187,27 +191,96 @@ stop_component() {
   echo "✅ ${name} 已强制停止并清理 PID 文件"
 }
 
+find_godot_bin() {
+  if [[ -n "${QIMINGXING_GODOT_BIN:-}" ]] && [[ -x "${QIMINGXING_GODOT_BIN}" ]]; then
+    echo "${QIMINGXING_GODOT_BIN}"
+    return 0
+  fi
+  for cand in \
+    "$(command -v godot 2>/dev/null || true)" \
+    "$(command -v godot4 2>/dev/null || true)" \
+    "/Applications/Godot.app/Contents/MacOS/Godot" \
+    "${HOME}/Applications/Godot.app/Contents/MacOS/Godot"; do
+    if [[ -n "${cand}" ]] && [[ -x "${cand}" ]]; then
+      echo "${cand}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+start_godot() {
+  local existing_pid
+  existing_pid="$(read_pid "${GODOT_PID_FILE}")"
+  if is_pid_running "${existing_pid}"; then
+    echo "✅ Godot 真身已在运行 (PID ${existing_pid})"
+    return 0
+  fi
+  rm -f "${GODOT_PID_FILE}"
+
+  local godot_bin=""
+  if ! godot_bin="$(find_godot_bin)"; then
+    echo "ℹ️  未检测到 Godot 4 可执行程序（可用 QIMINGXING_GODOT_BIN 指定路径）。"
+    echo "   请安装 Godot 4 后打开 ${ROOT_DIR}/body_godot/project.godot 启动桌面真身。"
+    return 0
+  fi
+
+  echo "✨ 启动 Godot 4 桌面真身 (${godot_bin})..."
+  (
+    cd "${ROOT_DIR}"
+    QIMINGXING_WS_URL="${BASE_WS}" QIMINGXING_HTTP_BASE="${BASE_HTTP}" \
+      nohup "${godot_bin}" --path "${ROOT_DIR}/body_godot" >"${GODOT_LOG}" 2>&1 &
+    echo $! > "${GODOT_PID_FILE}"
+  )
+  sleep 0.5
+  local gpid
+  gpid="$(read_pid "${GODOT_PID_FILE}")"
+  if is_pid_running "${gpid}"; then
+    echo "✅ Godot 4 桌面真身启动成功 (PID ${gpid})"
+  else
+    echo "⚠️  Godot 4 桌面真身启动失败，请检查日志: ${GODOT_LOG}" >&2
+  fi
+}
+
 cmd_start() {
   local no_open=0
+  local with_godot=0
   for arg in "$@"; do
     if [[ "${arg}" == "--no-open" ]]; then
       no_open=1
+    elif [[ "${arg}" == "--with-godot" ]]; then
+      with_godot=1
     fi
   done
 
   ensure_venv
   start_brain
   start_senses
+  if (( with_godot == 1 )); then
+    start_godot
+  fi
 
   echo ""
   echo "🌟 启明星已就绪: ${BASE_HTTP}/"
   echo "   日志文件: ${BRAIN_LOG} | ${SENSES_LOG}"
-  if (( no_open == 0 )) && command -v open >/dev/null 2>&1; then
+  if (( no_open == 0 )) && (( with_godot == 0 )) && command -v open >/dev/null 2>&1; then
     open "${BASE_HTTP}/"
   fi
 }
 
 cmd_stop() {
+  local gpid
+  gpid="$(read_pid "${GODOT_PID_FILE}")"
+  if is_pid_running "${gpid}"; then
+    echo "🛑 正在停止 Godot 真身 (PID: ${gpid})..."
+    kill "${gpid}" 2>/dev/null || true
+    sleep 0.4
+    if is_pid_running "${gpid}"; then
+      kill -9 "${gpid}" 2>/dev/null || true
+    fi
+  fi
+  rm -f "${GODOT_PID_FILE}"
+
   stop_component "Senses" "${SENSES_PID_FILE}" "senses.main"
   stop_component "Brain" "${BRAIN_PID_FILE}" "brain.main"
 }
@@ -258,6 +331,15 @@ cmd_status() {
     echo "Health: 不可达 (${BASE_HTTP}/health)"
   fi
 
+  local gpid
+  gpid="$(read_pid "${GODOT_PID_FILE}")"
+  if is_pid_running "${gpid}"; then
+    echo "Godot : 运行中 (PID ${gpid}, kill -0=存活)"
+  else
+    rm -f "${GODOT_PID_FILE}"
+    echo "Godot : 未启动（可用 ./qimingxing.sh start --with-godot 拉起）"
+  fi
+
   if [[ "$(uname -s)" == "Darwin" ]]; then
     echo "macOS 权限提示: 切换终端或启动器会改变录屏权限归属（系统设置 -> 隐私与安全性 -> 录屏与系统录音）"
   fi
@@ -283,11 +365,11 @@ usage() {
 用法: ./qimingxing.sh <command> [options]
 
 Commands:
-  start [--no-open]    一键启动 Brain + Senses，并在浏览器打开界面
-  stop                 一键停止 Senses 与 Brain
-  restart [--no-open]  重启全部服务
-  status               查看 Brain / Senses 运行状态与健康检查
-  logs                 实时查看后台日志
+  start [--no-open] [--with-godot]    一键启动 Brain + Senses（可选同步拉起 Godot 桌面真身）
+  stop                                一键停止 Godot、Senses 与 Brain
+  restart [--no-open] [--with-godot]  重启全部服务
+  status                              查看 Brain / Senses / Godot 运行状态与健康检查
+  logs                                实时查看后台日志
 EOF
 }
 

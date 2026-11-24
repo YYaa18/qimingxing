@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket
 from pydantic import ValidationError
 
 from brain.artifact_store import ArtifactStore
+from brain.audio import (
+    ASRProvider,
+    DeepSeekASRProvider,
+    DeepSeekTTSProvider,
+    SentenceChunker,
+    TTSProvider,
+    estimate_tts_cost_cny,
+)
 from brain.config import AppConfig
 from brain.context_builder import BuildStats, ContextBuilder
 from brain.context_store import ContextStore
@@ -31,9 +42,24 @@ from brain.memory.retrieval import MemoryRetriever
 from brain.memory.skills import SkillManager
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
-from brain.tools import ToolExecutionContext, ToolExecutor, ToolRegistry, build_default_tool_registry
+from brain.tools import (
+    BatchPathContextStore,
+    ToolExecutionContext,
+    ToolExecutor,
+    ToolRegistry,
+    actions_for_media_type,
+    build_default_tool_registry,
+    infer_media_type,
+)
 from brain.tools.base import ToolTraceStep
+from brain.tools.desktop_io import AttachPathsResult
 from protocol.models import (
+    AudioInputChunkPayload,
+    AudioInputEndPayload,
+    AudioInputStartPayload,
+    AudioOutputChunkPayload,
+    AudioOutputEndPayload,
+    AudioOutputStartPayload,
     AvatarStatePayload,
     CardAction,
     ClientCapabilities,
@@ -45,6 +71,7 @@ from protocol.models import (
     InputActionPayload,
     InputCancelPayload,
     InputTextPayload,
+    OutputArtifactCapsulePayload,
     OutputCardPayload,
     OutputProactiveNoticePayload,
     OutputTextDeltaPayload,
@@ -56,6 +83,8 @@ from protocol.models import (
     RiskLevel,
     SensesCaptureRequestPayload,
     SourceRole,
+    SystemCaptureDonePayload,
+    SystemCapturePreparePayload,
     SystemConfigSetPayload,
     SystemErrorPayload,
     SystemHelloPayload,
@@ -74,8 +103,20 @@ from protocol.models import (
 
 logger = logging.getLogger("qimingxing.hub")
 
-SERVER_VERSION = "0.5.0-mvp5"
+SERVER_VERSION = "0.6.0-mvp6"
 CAPTURE_TIMEOUT_SECONDS = 3.5
+_MAX_TTS_CHARS_PER_TURN = 600
+
+
+@dataclass
+class _AudioInputBuffer:
+    turn_id: str
+    source_client_id: str
+    sample_rate: int = 16000
+    channels: int = 1
+    pcm_chunks: List[bytes] = field(default_factory=list)
+    total_bytes: int = 0
+    max_bytes: int = 16000 * 2 * 60
 
 
 @dataclass
@@ -84,6 +125,7 @@ class ClientConnection:
     websocket: WebSocket
     role: Optional[SourceRole] = None
     client_name: str = "unknown"
+    client_type: Optional[str] = None
     capabilities: ClientCapabilities = field(default_factory=ClientCapabilities)
     active_turn_id: Optional[str] = None
     active_task: Optional[asyncio.Task[None]] = None
@@ -114,6 +156,9 @@ class Hub:
         tool_registry: Optional[ToolRegistry] = None,
         tool_executor: Optional[ToolExecutor] = None,
         skill_manager: Optional[SkillManager] = None,
+        asr_provider: Optional[ASRProvider] = None,
+        tts_provider: Optional[TTSProvider] = None,
+        batch_path_store: Optional[BatchPathContextStore] = None,
         capture_timeout_seconds: float = CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
         self.llm_router = llm_router
@@ -165,6 +210,15 @@ class Hub:
             )
         else:
             self.skill_manager = None
+        self.asr_provider: ASRProvider = asr_provider or DeepSeekASRProvider(
+            self.config.audio.asr
+        )
+        self.tts_provider: TTSProvider = tts_provider or DeepSeekTTSProvider(
+            self.config.audio.tts
+        )
+        self.batch_path_store: BatchPathContextStore = (
+            batch_path_store or BatchPathContextStore()
+        )
         self.capture_timeout_seconds = capture_timeout_seconds
 
         self.clients: Dict[str, ClientConnection] = {}
@@ -176,6 +230,9 @@ class Hub:
         self._pending_captures: Dict[str, asyncio.Future[ContextScreenRefPayload]] = {}
         self._pending_approvals: Dict[str, tuple[str, asyncio.Future[ToolApprovalResponsePayload]]] = {}
         self._turn_cancel_events: Dict[str, asyncio.Event] = {}
+        self._active_audio_inputs: Dict[str, _AudioInputBuffer] = {}
+        self._latest_audio_turn_by_client: Dict[str, str] = {}
+        self._tts_tasks: Dict[str, asyncio.Task[None]] = {}
         self._session_approved_tools: set[str] = set()
         self.last_build_stats: Optional[BuildStats] = None
 
@@ -245,6 +302,9 @@ class Hub:
         if isinstance(payload, SystemHelloPayload):
             conn.role = payload.role
             conn.client_name = payload.client_name
+            conn.client_type = payload.client_type or (
+                "body_web" if payload.role == "body" else "senses"
+            )
             conn.capabilities = payload.capabilities
             if payload.role == "senses":
                 raw_payload = env.payload or {}
@@ -254,11 +314,13 @@ class Hub:
                     self.senses_permissions = PermissionStatus.model_validate(perms)
                 self.senses_permission_hint = str(raw_payload.get("permission_hint", ""))
             logger.info(
-                "Handshake hello: client=%s role=%s name=%s avatar_mode=%s",
+                "Handshake hello: client=%s role=%s type=%s name=%s audio_out=%s auto_hide=%s",
                 conn.client_id,
                 conn.role,
+                conn.client_type,
                 conn.client_name,
-                conn.capabilities.avatar_mode,
+                conn.capabilities.audio_output,
+                conn.capabilities.auto_hide,
             )
             await self._send_welcome(conn)
             await self._send_privacy_state(conn)
@@ -341,7 +403,21 @@ class Hub:
                 target_turn,
                 payload.reason,
             )
-            await self._cancel_active_turn(conn, notify=True, target_turn_id=target_turn)
+            await self._cancel_active_turn_or_bodies(
+                conn, notify=True, target_turn_id=target_turn
+            )
+            return
+
+        if isinstance(payload, AudioInputStartPayload):
+            await self._handle_audio_input_start(conn, env, payload)
+            return
+
+        if isinstance(payload, AudioInputChunkPayload):
+            await self._handle_audio_input_chunk(conn, env, payload)
+            return
+
+        if isinstance(payload, AudioInputEndPayload):
+            await self._handle_audio_input_end(conn, env, payload)
             return
 
         if isinstance(payload, InputTextPayload):
@@ -445,6 +521,37 @@ class Hub:
                 except Exception:
                     logger.debug("Failed sending welcome broadcast to %s", client.client_id)
 
+    async def _cancel_active_turn_or_bodies(
+        self,
+        sender_conn: ClientConnection,
+        *,
+        notify: bool,
+        target_turn_id: Optional[str] = None,
+    ) -> None:
+        if sender_conn.role == "senses":
+            for client in list(self.clients.values()):
+                if client.role == "body":
+                    await self._cancel_active_turn(
+                        client, notify=notify, target_turn_id=target_turn_id
+                    )
+            return
+        await self._cancel_active_turn(
+            sender_conn, notify=notify, target_turn_id=target_turn_id
+        )
+
+    async def _cancel_tts_for_turn(self, turn_id: Optional[str]) -> None:
+        if not turn_id:
+            return
+        tts_task = self._tts_tasks.pop(turn_id, None)
+        if tts_task is not None and not tts_task.done():
+            tts_task.cancel()
+            try:
+                await tts_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
     async def _cancel_active_turn(
         self,
         conn: ClientConnection,
@@ -457,6 +564,8 @@ class Hub:
         if task is None or task.done():
             conn.active_task = None
             conn.active_turn_id = None
+            if target_turn_id or old_turn_id:
+                await self._cancel_tts_for_turn(target_turn_id or old_turn_id)
             return
 
         if target_turn_id and old_turn_id and target_turn_id != old_turn_id:
@@ -468,6 +577,7 @@ class Hub:
         for aid, (pending_tid, fut) in list(self._pending_approvals.items()):
             if pending_tid == old_turn_id and not fut.done():
                 fut.cancel()
+        await self._cancel_tts_for_turn(old_turn_id)
         task.cancel()
         try:
             await task
@@ -495,6 +605,378 @@ class Hub:
                     turn_id=old_turn_id,
                 )
             )
+
+    def _get_primary_body_conn(
+        self, fallback_conn: Optional[ClientConnection] = None
+    ) -> Optional[ClientConnection]:
+        bodies = [c for c in self.clients.values() if c.role == "body"]
+        for c in bodies:
+            if c.client_type == "body_godot" or c.capabilities.audio_output:
+                return c
+        if bodies:
+            return bodies[0]
+        return fallback_conn
+
+    def _get_tts_target_conns(self, primary_conn: ClientConnection) -> List[ClientConnection]:
+        targets: List[ClientConnection] = []
+        seen: set[str] = set()
+        for c in (primary_conn, *self.clients.values()):
+            if c.client_id in seen:
+                continue
+            seen.add(c.client_id)
+            if c.role == "body" and c.capabilities.audio_output:
+                targets.append(c)
+        return targets
+
+    def attach_context_paths(
+        self,
+        raw_paths: List[str],
+        *,
+        source: str = "manual",
+        append: bool = True,
+    ) -> AttachPathsResult:
+        return self.batch_path_store.attach(
+            raw_paths,
+            source=source,
+            append=append,
+            max_paths=self.config.batch_context.max_paths,
+            max_tree_depth=self.config.batch_context.max_tree_depth,
+        )
+
+    async def broadcast_tool_notice(self, tool: str, label: str) -> None:
+        env = make_envelope(
+            "brain",
+            "output.tool_status",
+            OutputToolStatusPayload(status="completed", tool=tool, label=label),
+        )
+        for client in list(self.clients.values()):
+            if client.role in ("body", None):
+                try:
+                    await client.send_envelope(env)
+                except Exception:
+                    logger.debug("Failed broadcasting tool notice to %s", client.client_id)
+
+    async def emit_artifact_capsule(
+        self,
+        conn: ClientConnection,
+        *,
+        turn_id: Optional[str],
+        path: str,
+        title: Optional[str] = None,
+    ) -> None:
+        p = Path(os.path.abspath(os.path.expanduser(path)))
+        mtype = infer_media_type(p)
+        actions = actions_for_media_type(mtype)
+        payload = OutputArtifactCapsulePayload(
+            turn_id=turn_id,
+            title=title or p.name or "产物文件",
+            path=str(p),
+            media_type=mtype,
+            actions=actions,
+        )
+        await conn.send_envelope(
+            make_envelope("brain", "output.artifact_capsule", payload, turn_id=turn_id)
+        )
+
+    async def handle_raw_bytes(self, conn: ClientConnection, raw_bytes: bytes) -> None:
+        """Accept raw binary WS PCM chunk routed to client's active audio input session."""
+        tid = self._latest_audio_turn_by_client.get(conn.client_id)
+        if not tid:
+            return
+        buf = self._active_audio_inputs.get(tid)
+        if buf is None:
+            return
+        remaining = max(0, buf.max_bytes - buf.total_bytes)
+        if remaining > 0 and raw_bytes:
+            sliced = raw_bytes[:remaining]
+            buf.pcm_chunks.append(sliced)
+            buf.total_bytes += len(sliced)
+
+    async def _handle_audio_input_start(
+        self,
+        conn: ClientConnection,
+        env: Envelope,
+        payload: AudioInputStartPayload,
+    ) -> None:
+        # Barge-in immediately on any active speech / turn
+        await self._cancel_active_turn_or_bodies(conn, notify=True, target_turn_id=None)
+        tid = payload.turn_id or env.turn_id or new_turn_id()
+        sr = max(8000, int(payload.sample_rate or self.config.audio.ptt.sample_rate))
+        ch = max(1, int(payload.channels or 1))
+        max_bytes = sr * ch * 2 * max(5, int(self.config.audio.ptt.max_record_sec))
+        self._active_audio_inputs[tid] = _AudioInputBuffer(
+            turn_id=tid,
+            source_client_id=conn.client_id,
+            sample_rate=sr,
+            channels=ch,
+            max_bytes=max_bytes,
+        )
+        self._latest_audio_turn_by_client[conn.client_id] = tid
+        target = self._get_primary_body_conn(fallback_conn=conn)
+        if target is not None:
+            try:
+                await target.send_envelope(
+                    make_envelope(
+                        "brain",
+                        "avatar.state",
+                        AvatarStatePayload(emotion="neutral", intensity=0.8, activity="thinking"),
+                        turn_id=tid,
+                    )
+                )
+            except Exception:
+                pass
+
+    async def _handle_audio_input_chunk(
+        self,
+        conn: ClientConnection,
+        env: Envelope,
+        payload: AudioInputChunkPayload,
+    ) -> None:
+        tid = payload.turn_id or env.turn_id or self._latest_audio_turn_by_client.get(conn.client_id)
+        if not tid:
+            return
+        buf = self._active_audio_inputs.get(tid)
+        if buf is None or not payload.data_b64:
+            return
+        try:
+            chunk = base64.b64decode(payload.data_b64)
+        except Exception:
+            return
+        remaining = max(0, buf.max_bytes - buf.total_bytes)
+        if remaining > 0 and chunk:
+            sliced = chunk[:remaining]
+            buf.pcm_chunks.append(sliced)
+            buf.total_bytes += len(sliced)
+
+    async def _handle_audio_input_end(
+        self,
+        conn: ClientConnection,
+        env: Envelope,
+        payload: AudioInputEndPayload,
+    ) -> None:
+        tid = payload.turn_id or env.turn_id or self._latest_audio_turn_by_client.get(conn.client_id)
+        if not tid:
+            return
+        buf = self._active_audio_inputs.pop(tid, None)
+        if self._latest_audio_turn_by_client.get(conn.client_id) == tid:
+            self._latest_audio_turn_by_client.pop(conn.client_id, None)
+        if buf is None:
+            return
+
+        target = self._get_primary_body_conn(fallback_conn=conn)
+        if target is None:
+            return
+
+        if not self.config.audio.enabled:
+            await self._emit_direct_guidance(
+                target,
+                tid,
+                "语音功能当前已在配置中关闭。",
+                emotion="neutral",
+            )
+            return
+
+        pcm_bytes = b"".join(buf.pcm_chunks)
+        if not pcm_bytes:
+            await target.send_envelope(
+                make_envelope(
+                    "brain",
+                    "avatar.state",
+                    AvatarStatePayload(emotion="neutral", intensity=0.5, activity="idle"),
+                    turn_id=tid,
+                )
+            )
+            return
+
+        await target.send_envelope(
+            make_envelope(
+                "brain",
+                "output.tool_status",
+                OutputToolStatusPayload(status="running", tool="asr", label="正在识别语音…"),
+                turn_id=tid,
+            )
+        )
+        try:
+            asr_res = await self.asr_provider.transcribe_pcm(
+                pcm_bytes, sample_rate=buf.sample_rate, channels=buf.channels
+            )
+        except Exception as exc:
+            safe_err = self.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            logger.warning("ASR transcription failed (falling back to text bubble): %s", safe_err)
+            await target.send_envelope(
+                make_envelope(
+                    "brain",
+                    "output.tool_status",
+                    OutputToolStatusPayload(status="error", tool="asr", label="语音识别失败，请改用文字或重试"),
+                    turn_id=tid,
+                )
+            )
+            await target.send_envelope(
+                make_envelope(
+                    "brain",
+                    "avatar.state",
+                    AvatarStatePayload(emotion="confused", intensity=0.7, activity="idle"),
+                    turn_id=tid,
+                )
+            )
+            return
+
+        if self.memory_backend is not None and asr_res.estimated_cost_cny > 0:
+            active_session_id = ""
+            try:
+                sess = await self.memory_backend.get_or_create_active_session()
+                active_session_id = sess.session_id
+            except Exception:
+                pass
+            await self._record_usage_and_alert(
+                conn=target,
+                turn_id=tid,
+                session_id=active_session_id,
+                turn_usages=[
+                    LLMUsage(
+                        profile="audio_asr",
+                        model=self.config.audio.asr.model,
+                        estimated_cost_cny=asr_res.estimated_cost_cny,
+                    )
+                ],
+            )
+
+        transcript = (asr_res.text or "").strip()
+        if not transcript:
+            await target.send_envelope(
+                make_envelope(
+                    "brain",
+                    "output.tool_status",
+                    OutputToolStatusPayload(status="completed", tool="asr", label="未检测到清晰语音"),
+                    turn_id=tid,
+                )
+            )
+            await target.send_envelope(
+                make_envelope(
+                    "brain",
+                    "avatar.state",
+                    AvatarStatePayload(emotion="neutral", intensity=0.5, activity="idle"),
+                    turn_id=tid,
+                )
+            )
+            return
+
+        await target.send_envelope(
+            make_envelope(
+                "brain",
+                "output.tool_status",
+                OutputToolStatusPayload(status="completed", tool="asr", label=f"我听到：「{transcript[:60]}」"),
+                turn_id=tid,
+            )
+        )
+        await self._start_turn(target, tid, transcript, force_screen=False)
+
+    async def _run_tts_worker(
+        self,
+        *,
+        turn_id: str,
+        targets: List[ClientConnection],
+        queue: asyncio.Queue[Optional[str]],
+        cancel_event: asyncio.Event,
+        session_id: str,
+        usage_conn: ClientConnection,
+    ) -> None:
+        started = False
+        seq = 0
+        sentence_index = 0
+        finish_reason: str = "completed"
+        sample_rate = max(8000, int(self.config.audio.tts.sample_rate or 24000))
+
+        try:
+            while True:
+                sentence = await queue.get()
+                if sentence is None:
+                    break
+                if cancel_event.is_set():
+                    finish_reason = "cancelled"
+                    break
+
+                if not started:
+                    start_env = make_envelope(
+                        "brain",
+                        "audio.output_start",
+                        AudioOutputStartPayload(
+                            turn_id=turn_id,
+                            sample_rate=sample_rate,
+                            channels=1,
+                            format="pcm_s16le",
+                        ),
+                        turn_id=turn_id,
+                    )
+                    for t in targets:
+                        await t.send_envelope(start_env)
+                    started = True
+
+                async for pcm_chunk in self.tts_provider.synthesize_pcm_stream(
+                    sentence, voice=self.config.audio.tts.voice
+                ):
+                    if cancel_event.is_set():
+                        finish_reason = "cancelled"
+                        raise asyncio.CancelledError
+                    if not pcm_chunk:
+                        continue
+                    seq += 1
+                    chunk_env = make_envelope(
+                        "brain",
+                        "audio.output_chunk",
+                        AudioOutputChunkPayload(
+                            turn_id=turn_id,
+                            seq=seq,
+                            sentence_index=sentence_index,
+                            data_b64=base64.b64encode(pcm_chunk).decode("ascii"),
+                            sample_rate=sample_rate,
+                            format="pcm_s16le",
+                        ),
+                        turn_id=turn_id,
+                    )
+                    for t in targets:
+                        await t.send_envelope(chunk_env)
+
+                if self.memory_backend is not None:
+                    tts_cost = estimate_tts_cost_cny(sentence)
+                    if tts_cost > 0:
+                        await self._record_usage_and_alert(
+                            conn=usage_conn,
+                            turn_id=turn_id,
+                            session_id=session_id,
+                            turn_usages=[
+                                LLMUsage(
+                                    profile="audio_tts",
+                                    model=self.config.audio.tts.model,
+                                    estimated_cost_cny=tts_cost,
+                                )
+                            ],
+                        )
+                sentence_index += 1
+        except asyncio.CancelledError:
+            finish_reason = "cancelled"
+            raise
+        except Exception as exc:
+            finish_reason = "error"
+            safe_err = self.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            logger.warning("TTS synthesis degraded gracefully (%s): %s", turn_id, safe_err)
+        finally:
+            self._tts_tasks.pop(turn_id, None)
+            if started:
+                end_env = make_envelope(
+                    "brain",
+                    "audio.output_end",
+                    AudioOutputEndPayload(
+                        turn_id=turn_id,
+                        finish_reason=finish_reason,  # type: ignore[arg-type]
+                    ),
+                    turn_id=turn_id,
+                )
+                for t in targets:
+                    try:
+                        await t.send_envelope(end_env)
+                    except Exception:
+                        pass
 
     async def broadcast_proactive_notice(
         self, notice: OutputProactiveNoticePayload
@@ -571,6 +1053,30 @@ class Hub:
         )
 
         try:
+            auto_hide_bodies = [
+                c
+                for c in self.clients.values()
+                if c.role == "body" and c.capabilities.auto_hide
+            ]
+            hid_bodies = False
+            if self.config.godot.auto_hide_on_capture and auto_hide_bodies:
+                prep_env = make_envelope(
+                    "brain",
+                    "system.capture_prepare",
+                    SystemCapturePreparePayload(
+                        request_id=req_id, turn_id=turn_id, hide_ms=150
+                    ),
+                    turn_id=turn_id,
+                )
+                for body_conn in auto_hide_bodies:
+                    try:
+                        await body_conn.send_envelope(prep_env)
+                        hid_bodies = True
+                    except Exception:
+                        pass
+                if hid_bodies:
+                    await asyncio.sleep(0.15)
+
             await senses_conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -591,6 +1097,19 @@ class Hub:
             return None, "获取桌面画面超时了（超过 3.5 秒），暂时没能看到你的屏幕，你可以稍后再试一次。"
         finally:
             self._pending_captures.pop(req_id, None)
+            if self.config.godot.auto_hide_on_capture:
+                done_env = make_envelope(
+                    "brain",
+                    "system.capture_done",
+                    SystemCaptureDonePayload(request_id=req_id, turn_id=turn_id),
+                    turn_id=turn_id,
+                )
+                for body_conn in list(self.clients.values()):
+                    if body_conn.role == "body" and body_conn.capabilities.auto_hide:
+                        try:
+                            await body_conn.send_envelope(done_env)
+                        except Exception:
+                            pass
 
     async def _emit_direct_guidance(
         self,
@@ -693,7 +1212,12 @@ class Hub:
             return
         turn_tokens = 0
         for u in turn_usages:
-            if u.total_tokens <= 0 and u.prompt_tokens <= 0 and u.completion_tokens <= 0:
+            if (
+                u.total_tokens <= 0
+                and u.prompt_tokens <= 0
+                and u.completion_tokens <= 0
+                and u.estimated_cost_cny <= 0
+            ):
                 continue
             turn_tokens += u.total_tokens or (u.prompt_tokens + u.completion_tokens)
             await self.memory_backend.add_usage_record(
@@ -937,6 +1461,10 @@ class Hub:
                     else:
                         user_content = [{"type": "text", "text": str(user_content)}] + extra_image_parts
 
+            attached_manifest = self.batch_path_store.consume_for_l3()
+            if attached_manifest:
+                extra_l3_sections.append(attached_manifest)
+
             active_session_id = ""
             rolling_summary = ""
             core_facts: List[MemoryFact] = []
@@ -997,6 +1525,40 @@ class Hub:
             turn_usages: List[LLMUsage] = []
             trace_steps: List[ToolTraceStep] = []
 
+            tts_targets = (
+                self._get_tts_target_conns(conn) if self.config.audio.enabled else []
+            )
+            chunker: Optional[SentenceChunker] = (
+                SentenceChunker() if tts_targets else None
+            )
+            tts_queue: Optional[asyncio.Queue[Optional[str]]] = (
+                asyncio.Queue() if tts_targets else None
+            )
+            tts_chars_sent = 0
+            tts_task: Optional[asyncio.Task[None]] = None
+            if tts_targets and tts_queue is not None:
+                tts_task = asyncio.create_task(
+                    self._run_tts_worker(
+                        turn_id=turn_id,
+                        targets=tts_targets,
+                        queue=tts_queue,
+                        cancel_event=cancel_event,
+                        session_id=active_session_id,
+                        usage_conn=conn,
+                    )
+                )
+                self._tts_tasks[turn_id] = tts_task
+
+            def _enqueue_tts_delta(delta_text: str) -> None:
+                nonlocal tts_chars_sent
+                if chunker is None or tts_queue is None:
+                    return
+                for sent in chunker.feed(delta_text):
+                    if tts_chars_sent >= _MAX_TTS_CHARS_PER_TURN:
+                        break
+                    tts_queue.put_nowait(sent)
+                    tts_chars_sent += len(sent)
+
             use_tools = bool(
                 self.config.tools.enabled
                 and len(self.tool_registry) > 0
@@ -1011,7 +1573,7 @@ class Hub:
                     nonlocal seq
                     events = parser.feed(chunk)
                     seq = await self._emit_parser_events(
-                        conn, turn_id, events, seq, collected_spoken
+                        conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta
                     )
 
                 async def _on_status(
@@ -1091,13 +1653,36 @@ class Hub:
                 async for chunk in self.llm_router.stream_chat(messages, profile_name=profile.name):
                     events = parser.feed(chunk)
                     seq = await self._emit_parser_events(
-                        conn, turn_id, events, seq, collected_spoken
+                        conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta
                     )
                 if self.llm_router.last_usage is not None:
                     turn_usages.append(self.llm_router.last_usage)
 
             tail_events = parser.finish()
-            seq = await self._emit_parser_events(conn, turn_id, tail_events, seq, collected_spoken)
+            seq = await self._emit_parser_events(
+                conn, turn_id, tail_events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta
+            )
+
+            if chunker is not None and tts_queue is not None:
+                for sent in chunker.flush():
+                    if tts_chars_sent >= _MAX_TTS_CHARS_PER_TURN:
+                        break
+                    tts_queue.put_nowait(sent)
+                    tts_chars_sent += len(sent)
+                tts_queue.put_nowait(None)
+
+            for s in trace_steps:
+                if s.status == "ok" and any(
+                    k in s.tool_name.lower() for k in ("write", "create", "save", "export", "generate")
+                ):
+                    raw_out_path = str(s.arguments.get("path") or "").strip()
+                    if raw_out_path and os.path.isfile(os.path.expanduser(raw_out_path)):
+                        try:
+                            await self.emit_artifact_capsule(
+                                conn, turn_id=turn_id, path=raw_out_path
+                            )
+                        except Exception:
+                            pass
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             assistant_reply = "".join(collected_spoken).strip()
@@ -1198,6 +1783,9 @@ class Hub:
                         conn.client_id, "assistant", assistant_reply, scene_summary=scene_summary
                     )
 
+            if tts_task is not None:
+                await tts_task
+
             await conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -1289,6 +1877,7 @@ class Hub:
             )
         finally:
             self._turn_cancel_events.pop(turn_id, None)
+            await self._cancel_tts_for_turn(turn_id)
             if artifact_id_to_burn:
                 self.artifact_store.delete(artifact_id_to_burn)
             for aid in artifacts_to_burn:
@@ -1304,6 +1893,7 @@ class Hub:
         events: list,
         seq: int,
         collected_spoken: List[str],
+        on_spoken_delta: Optional[Any] = None,
     ) -> int:
         for ev in events:
             if isinstance(ev, EmotionEvent):
@@ -1322,6 +1912,8 @@ class Hub:
             elif isinstance(ev, TextEvent):
                 seq += 1
                 collected_spoken.append(ev.delta)
+                if on_spoken_delta is not None:
+                    on_spoken_delta(ev.delta)
                 await conn.send_envelope(
                     make_envelope(
                         "brain",

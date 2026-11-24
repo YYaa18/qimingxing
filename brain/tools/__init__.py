@@ -5,6 +5,16 @@ from typing import Optional
 from brain.config import AppConfig
 from brain.tools.base import Tool, ToolExecutionContext, ToolResult, ToolTraceStep
 from brain.tools.clipboard_tool import ClipboardTool
+from brain.tools.desktop_io import (
+    BatchPathContextStore,
+    FinderGetSelectionTool,
+    InboxScanTool,
+    actions_for_media_type,
+    build_path_manifest,
+    execute_desktop_action,
+    infer_media_type,
+    is_sensitive_path,
+)
 from brain.tools.executor import ToolExecutor, ToolLoopResult
 from brain.tools.history_tool import WorkHistoryInspectTool
 from brain.tools.mcp_client import MCPClientManager, MCPServerStatus, MCPToolAdapter
@@ -39,6 +49,11 @@ def build_default_tool_registry(
         registry.register(ShellTool(config.tools.shell))
 
     registry.register(ClipboardTool())
+    registry.register(FinderGetSelectionTool(
+        max_paths=config.batch_context.max_paths,
+        max_tree_depth=config.batch_context.max_tree_depth,
+    ))
+    registry.register(InboxScanTool(config))
     registry.register(WorkHistoryInspectTool())
     registry.register(ScheduleTaskTool())
     registry.register(ListTasksTool())
@@ -47,9 +62,12 @@ def build_default_tool_registry(
 
 
 __all__ = [
+    "BatchPathContextStore",
     "CancelTaskTool",
     "ClipboardTool",
     "DeepSeekSearchProvider",
+    "FinderGetSelectionTool",
+    "InboxScanTool",
     "ListTasksTool",
     "MCPClientManager",
     "MCPServerStatus",
@@ -67,6 +85,11 @@ __all__ = [
     "WebFetchTool",
     "WebSearchTool",
     "WorkHistoryInspectTool",
+    "actions_for_media_type",
     "build_default_tool_registry",
+    "build_path_manifest",
+    "execute_desktop_action",
+    "infer_media_type",
+    "is_sensitive_path",
     "truncate_head_tail",
 ]

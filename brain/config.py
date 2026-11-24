@@ -234,6 +234,56 @@ class MCPServerConfig:
 
 
 @dataclass
+class AudioASRConfig:
+    provider: str = "deepseek"
+    base_url: str = "https://api.deepseek.com/v1"
+    api_key: str = ""
+    model: str = "deepseek-asr"
+    timeout_sec: float = 15.0
+
+
+@dataclass
+class AudioTTSConfig:
+    provider: str = "deepseek"
+    base_url: str = "https://api.deepseek.com/v1"
+    api_key: str = ""
+    model: str = "deepseek-tts"
+    voice: str = "stella"
+    sample_rate: int = 24000
+    filter_markdown: bool = True
+    timeout_sec: float = 20.0
+
+
+@dataclass
+class AudioPTTConfig:
+    hotkey: str = "right_option"
+    sample_rate: int = 16000
+    max_record_sec: int = 60
+
+
+@dataclass
+class AudioConfig:
+    enabled: bool = True
+    asr: AudioASRConfig = field(default_factory=AudioASRConfig)
+    tts: AudioTTSConfig = field(default_factory=AudioTTSConfig)
+    ptt: AudioPTTConfig = field(default_factory=AudioPTTConfig)
+
+
+@dataclass
+class BatchContextConfig:
+    inbox_dir: str = "~/Desktop/给启明星"
+    max_paths: int = 200
+    max_tree_depth: int = 3
+
+
+@dataclass
+class GodotConfig:
+    auto_hide_on_capture: bool = True
+    earcons_enabled: bool = True
+    ambient_duck_db: float = -12.0
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     default_profile: str = "mock_local"
@@ -245,6 +295,9 @@ class AppConfig:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     mcp_servers: List[MCPServerConfig] = field(default_factory=list)
+    audio: AudioConfig = field(default_factory=AudioConfig)
+    batch_context: BatchContextConfig = field(default_factory=BatchContextConfig)
+    godot: GodotConfig = field(default_factory=GodotConfig)
     _secrets: List[str] = field(default_factory=list, repr=False)
 
     def collect_secrets(self) -> List[str]:
@@ -255,6 +308,10 @@ class AppConfig:
             secrets.append(self.memory.embedding.api_key)
         if self.tools.web_search.api_key:
             secrets.append(self.tools.web_search.api_key)
+        if self.audio.asr.api_key:
+            secrets.append(self.audio.asr.api_key)
+        if self.audio.tts.api_key:
+            secrets.append(self.audio.tts.api_key)
         for srv in self.mcp_servers:
             for val in srv.env.values():
                 if val:
@@ -503,6 +560,53 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
             )
         )
 
+    audio_raw = raw.get("audio") or {}
+    asr_raw = audio_raw.get("asr") or {}
+    tts_raw = audio_raw.get("tts") or {}
+    ptt_raw = audio_raw.get("ptt") or {}
+    ds_fallback_key = ocr_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    asr_key = _expand_env_vars(str(asr_raw.get("api_key", "") or "")) or ds_fallback_key
+    tts_key = _expand_env_vars(str(tts_raw.get("api_key", "") or "")) or ds_fallback_key
+    audio = AudioConfig(
+        enabled=bool(audio_raw.get("enabled", True)),
+        asr=AudioASRConfig(
+            provider=str(asr_raw.get("provider", "deepseek")),
+            base_url=str(asr_raw.get("base_url", "https://api.deepseek.com/v1") or "").rstrip("/"),
+            api_key=asr_key,
+            model=str(asr_raw.get("model", "deepseek-asr")),
+            timeout_sec=float(asr_raw.get("timeout_sec", 15.0)),
+        ),
+        tts=AudioTTSConfig(
+            provider=str(tts_raw.get("provider", "deepseek")),
+            base_url=str(tts_raw.get("base_url", "https://api.deepseek.com/v1") or "").rstrip("/"),
+            api_key=tts_key,
+            model=str(tts_raw.get("model", "deepseek-tts")),
+            voice=str(tts_raw.get("voice", "stella")),
+            sample_rate=int(tts_raw.get("sample_rate", 24000)),
+            filter_markdown=bool(tts_raw.get("filter_markdown", True)),
+            timeout_sec=float(tts_raw.get("timeout_sec", 20.0)),
+        ),
+        ptt=AudioPTTConfig(
+            hotkey=str(ptt_raw.get("hotkey", "right_option") or "right_option"),
+            sample_rate=int(ptt_raw.get("sample_rate", 16000)),
+            max_record_sec=int(ptt_raw.get("max_record_sec", 60)),
+        ),
+    )
+
+    batch_raw = raw.get("batch_context") or {}
+    batch_context = BatchContextConfig(
+        inbox_dir=str(batch_raw.get("inbox_dir", "~/Desktop/给启明星")),
+        max_paths=int(batch_raw.get("max_paths", 200)),
+        max_tree_depth=int(batch_raw.get("max_tree_depth", 3)),
+    )
+
+    godot_raw = raw.get("godot") or {}
+    godot = GodotConfig(
+        auto_hide_on_capture=bool(godot_raw.get("auto_hide_on_capture", True)),
+        earcons_enabled=bool(godot_raw.get("earcons_enabled", True)),
+        ambient_duck_db=float(godot_raw.get("ambient_duck_db", -12.0)),
+    )
+
     return AppConfig(
         server=server,
         default_profile=default_profile,
@@ -514,4 +618,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         tools=tools,
         scheduler=scheduler,
         mcp_servers=mcp_servers,
+        audio=audio,
+        batch_context=batch_context,
+        godot=godot,
     )

@@ -5,7 +5,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PROTOCOL_VERSION = "1.0"
 
@@ -77,12 +77,40 @@ class ClientCapabilities(ProtocolModel):
     ui_cards: List[str] = Field(default_factory=lambda: ["markdown", "spoiler_steps"])
     audio_output: bool = False
     lip_sync: bool = False
+    pin_image: bool = False
+    auto_hide: bool = False
 
 
 class SystemHelloPayload(ProtocolModel):
     client_name: str
     role: SourceRole
+    client_type: Optional[Literal["body_godot", "body_web", "senses"]] = None
     capabilities: ClientCapabilities = Field(default_factory=ClientCapabilities)
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _coerce_capability_flags(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            flags = {str(v).strip() for v in value}
+            has_audio = ("audio_out" in flags) or ("audio_output" in flags)
+            return {
+                "audio_output": has_audio,
+                "lip_sync": ("lip_sync" in flags) or has_audio,
+                "pin_image": "pin_image" in flags,
+                "auto_hide": "auto_hide" in flags,
+            }
+        return value
+
+
+class SystemCapturePreparePayload(ProtocolModel):
+    request_id: str
+    turn_id: str
+    hide_ms: int = 150
+
+
+class SystemCaptureDonePayload(ProtocolModel):
+    request_id: str
+    turn_id: str
 
 
 class ProfileInfo(ProtocolModel):
@@ -277,6 +305,63 @@ class OutputCardPayload(ProtocolModel):
     actions: List[CardAction] = Field(default_factory=list)
 
 
+class OutputArtifactCapsulePayload(ProtocolModel):
+    turn_id: Optional[str] = None
+    title: str
+    path: str
+    media_type: Literal["text", "pdf", "image", "video", "file"] = "file"
+    actions: List[str] = Field(
+        default_factory=lambda: ["quick_look", "copy_file", "reveal"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# audio.* payloads (streaming voice input/output)
+# ---------------------------------------------------------------------------
+
+
+class AudioInputStartPayload(ProtocolModel):
+    turn_id: Optional[str] = None
+    sample_rate: int = 16000
+    channels: int = 1
+    format: str = "pcm_s16le"
+
+
+class AudioInputChunkPayload(ProtocolModel):
+    turn_id: Optional[str] = None
+    seq: int = 1
+    data_b64: str = ""
+    sample_rate: int = 16000
+    channels: int = 1
+    format: str = "pcm_s16le"
+
+
+class AudioInputEndPayload(ProtocolModel):
+    turn_id: Optional[str] = None
+    reason: str = "ptt_released"
+
+
+class AudioOutputStartPayload(ProtocolModel):
+    turn_id: Optional[str] = None
+    sample_rate: int = 24000
+    channels: int = 1
+    format: str = "pcm_s16le"
+
+
+class AudioOutputChunkPayload(ProtocolModel):
+    turn_id: Optional[str] = None
+    seq: int = 1
+    sentence_index: int = 0
+    data_b64: str = ""
+    sample_rate: int = 24000
+    format: str = "pcm_s16le"
+
+
+class AudioOutputEndPayload(ProtocolModel):
+    turn_id: Optional[str] = None
+    finish_reason: Literal["completed", "cancelled", "error"] = "completed"
+
+
 # ---------------------------------------------------------------------------
 # avatar.* payloads
 # ---------------------------------------------------------------------------
@@ -302,9 +387,17 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "system.error": SystemErrorPayload,
     "system.privacy_set": SystemPrivacySetPayload,
     "system.privacy_state": SystemPrivacyStatePayload,
+    "system.capture_prepare": SystemCapturePreparePayload,
+    "system.capture_done": SystemCaptureDonePayload,
     "input.text": InputTextPayload,
     "input.action": InputActionPayload,
     "input.cancel": InputCancelPayload,
+    "audio.input_start": AudioInputStartPayload,
+    "audio.input_chunk": AudioInputChunkPayload,
+    "audio.input_end": AudioInputEndPayload,
+    "audio.output_start": AudioOutputStartPayload,
+    "audio.output_chunk": AudioOutputChunkPayload,
+    "audio.output_end": AudioOutputEndPayload,
     "context.window_changed": ContextWindowChangedPayload,
     "context.game_state": ContextGameStatePayload,
     "context.ocr_snippet": ContextOcrSnippetPayload,
@@ -316,6 +409,7 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "output.tool_status": OutputToolStatusPayload,
     "output.proactive_notice": OutputProactiveNoticePayload,
     "output.card": OutputCardPayload,
+    "output.artifact_capsule": OutputArtifactCapsulePayload,
     "tool.approval_request": ToolApprovalRequestPayload,
     "tool.approval_response": ToolApprovalResponsePayload,
     "avatar.state": AvatarStatePayload,
