@@ -232,11 +232,15 @@ app = create_app()
 
 
 def main() -> None:
+    import os
     cfg = load_config()
+    host = os.environ.get("QIMINGXING_HOST") or cfg.server.host
+    port_env = os.environ.get("QIMINGXING_PORT")
+    port = int(port_env) if port_env else cfg.server.port
     uvicorn.run(
         "brain.main:app",
-        host=cfg.server.host,
-        port=cfg.server.port,
+        host=host,
+        port=port,
         reload=False,
         log_level="info",
     )

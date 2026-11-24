@@ -9,3 +9,4 @@ config.yaml
 .DS_Store
 *.log
 data/*.db*
+.run/

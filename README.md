@@ -39,7 +39,20 @@ export DEEPSEEK_API_KEY="your-key"
 python -m protocol.export_schema
 ```
 
-### 4. 启动服务与联调
+### 4. 一键启动与关闭（推荐）
+
+```bash
+# 一键后台启动 Brain + 桌面感官 Senses，并自动在浏览器打开 http://127.0.0.1:18790/
+./qimingxing.sh start
+
+# 查看运行状态 / 实时日志 / 重启 / 一键关闭
+./qimingxing.sh status
+./qimingxing.sh logs
+./qimingxing.sh restart
+./qimingxing.sh stop
+```
+
+如需分终端手动启动：
 
 1. 启动大脑（Brain）：
 
