@@ -10,6 +10,7 @@ from brain.memory.models import (
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
+    FeedbackRecord,
     MemoryCategory,
     MemoryEpisode,
     MemoryFact,
@@ -253,6 +254,10 @@ class MemoryBackend(ABC):
     @abstractmethod
     async def update_skill_status(self, skill_id: str, status: SkillStatus) -> bool:
         """Mark a skill active or deprecated."""
+
+    @abstractmethod
+    async def add_feedback(self, record: FeedbackRecord) -> FeedbackRecord:
+        """Persist explicit user feedback (thumbs up/down) for later evaluation."""
 
     @abstractmethod
     async def add_work_history(self, record: WorkHistoryRecord) -> WorkHistoryRecord:

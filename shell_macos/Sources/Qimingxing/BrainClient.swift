@@ -707,6 +707,24 @@ final class BrainClient: ObservableObject {
         }
     }
 
+    func sendFeedback(turnId: String, rating: String, prompt: String, answer: String) async {
+        guard let url = URL(string: "\(httpBase)/api/feedback") else { return }
+        let payload: [String: Any] = [
+            "turn_id": turnId,
+            "rating": rating,
+            "profile": activeProfile,
+            "prompt": prompt,
+            "answer": answer,
+            "source": "shell_macos"
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
     func testProvider(_ payload: [String: Any]) async -> (Bool, String) {
         guard let url = URL(string: "\(httpBase)/api/config/test_provider"),
               let body = try? JSONSerialization.data(withJSONObject: payload)

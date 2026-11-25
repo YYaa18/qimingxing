@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -32,6 +33,7 @@ from brain.llm_router import LLMRouter, probe_provider_connectivity
 from brain.memory import MemoryBackend, create_memory_backend
 from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from brain.memory.extractor import MemoryExtractor
+from brain.memory.models import FeedbackRecord
 from brain.memory.retrieval import MemoryRetriever
 from brain.scheduler import TaskScheduler
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
@@ -578,6 +580,46 @@ def create_app(
                 "settings": get_sanitized_settings(fresh_cfg),
             }
         )
+
+    @app.post("/api/feedback")
+    async def submit_feedback(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=403, detail="Feedback is restricted to localhost."
+            )
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+        rating = str(body.get("rating") or "").strip().lower()
+        if rating not in ("up", "down"):
+            raise HTTPException(status_code=400, detail="rating must be 'up' or 'down'.")
+
+        backend = hub.memory_backend
+        if backend is None:
+            raise HTTPException(status_code=503, detail="memory_backend_unavailable")
+        session_id = ""
+        try:
+            session = await backend.get_or_create_active_session()
+            session_id = session.session_id
+        except Exception:
+            session_id = ""
+        record = await backend.add_feedback(
+            FeedbackRecord(
+                feedback_id=0,
+                turn_id=str(body.get("turn_id") or "")[:160],
+                rating=rating,
+                session_id=session_id,
+                profile=str(body.get("profile") or "")[:120],
+                prompt=str(body.get("prompt") or "")[:4000],
+                answer=str(body.get("answer") or "")[:8000],
+                source=str(body.get("source") or "shell_macos")[:80],
+            )
+        )
+        return JSONResponse({"status": "ok", "feedback_id": record.feedback_id})
 
     @app.post("/api/config/test_provider")
     async def test_provider(request: Request) -> JSONResponse:

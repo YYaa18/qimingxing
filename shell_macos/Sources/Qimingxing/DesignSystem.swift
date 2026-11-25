@@ -317,6 +317,67 @@ struct GlobeSpinner: View {
     }
 }
 
+// MARK: - Fast tooltips
+
+/// A lightweight tooltip that appears after a short hover delay, instead of
+/// waiting for the system HelpTag (which can take seconds).
+private struct QMXFastTooltip: ViewModifier {
+    let text: String
+    @State private var visible = false
+    @State private var hoverTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .top) {
+                if visible {
+                    Text(text)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(QMXTheme.surfaceRaised)
+                        )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+                        )
+                        .fixedSize()
+                        .offset(y: -26)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onHover { hovering in
+                hoverTask?.cancel()
+                if hovering {
+                    hoverTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 160_000_000)
+                        if Task.isCancelled { return }
+                        withAnimation(.easeOut(duration: 0.10)) {
+                            visible = true
+                        }
+                    }
+                } else {
+                    withAnimation(.easeOut(duration: 0.08)) {
+                        visible = false
+                    }
+                }
+            }
+            .onDisappear {
+                hoverTask?.cancel()
+                visible = false
+            }
+    }
+}
+
+extension View {
+    func qmxTooltip(_ text: String) -> some View {
+        modifier(QMXFastTooltip(text: text))
+    }
+}
+
 // MARK: - Emotion badge
 
 /// Native expression indicator for the latest answer. The model's emotion

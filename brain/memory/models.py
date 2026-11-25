@@ -13,6 +13,7 @@ SessionStatus = Literal["active", "archived"]
 MutationOp = Literal["ADD", "UPDATE", "DELETE", "NONE"]
 CategoryTier = Literal["core", "episodic", "chitchat"]
 SkillStatus = Literal["active", "deprecated"]
+FeedbackRating = Literal["up", "down"]
 TaskType = Literal["reminder", "llm_summary"]
 ScheduleKind = Literal["once", "daily", "interval"]
 TaskStatus = Literal["active", "paused", "completed", "cancelled"]
@@ -323,6 +324,19 @@ class MemorySkill:
     failure_count: int = 0
     status: SkillStatus = "active"
     updated_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class FeedbackRecord:
+    feedback_id: int
+    turn_id: str
+    rating: FeedbackRating
+    session_id: str = ""
+    profile: str = ""
+    prompt: str = ""
+    answer: str = ""
+    source: str = ""
+    created_at: float = field(default_factory=time.time)
 
 
 @dataclass

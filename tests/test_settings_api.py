@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import yaml
 from fastapi.testclient import TestClient
 
-from brain.config import load_config
+from brain.config import AppConfig, load_config
 from brain.main import create_app
 
 
@@ -141,3 +142,32 @@ def test_settings_api_masks_keys_saves_0600_and_hot_reloads(tmp_path: Path) -> N
     assert reloaded.profiles["deepseek_flash"].api_key == "sk-updated-newkey-9999"
     assert reloaded.ocr.api_key == "sk-updated-newkey-9999"
     assert reloaded.audio.tts.api_key == "sk-updated-newkey-9999"
+
+
+def test_feedback_endpoint_appends_jsonl(tmp_path: Path) -> None:
+    cfg = AppConfig()
+    cfg.memory.sqlite_path = str(tmp_path / "memory.db")
+    app = create_app(config=cfg)
+
+    with TestClient(app) as client:
+        res = client.post(
+            "/api/feedback",
+            json={
+                "turn_id": "turn_feedback",
+                "rating": "up",
+                "profile": "mock_local",
+                "prompt": "介绍一下你自己",
+                "answer": "我是启明星。",
+            },
+        )
+        assert res.status_code == 200
+        assert res.json()["status"] == "ok"
+
+        bad = client.post("/api/feedback", json={"turn_id": "t", "rating": "meh"})
+        assert bad.status_code == 400
+
+    with sqlite3.connect(tmp_path / "memory.db") as conn:
+        row = conn.execute(
+            "SELECT turn_id, rating, answer FROM message_feedback"
+        ).fetchone()
+    assert row == ("turn_feedback", "up", "我是启明星。")

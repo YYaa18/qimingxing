@@ -59,6 +59,7 @@
 - 输入：22pt；占位符由 `NSTextView` 自身绘制，与光标同基线。
 - 辅助：12pt secondary。
 - 工作区链接：12pt，“完整记录已放入工作区 →”。
+- 回答完成后底部提供复制、赞、踩：复制完整回答正文；赞/踩只对最新一轮生效。
 - 不使用气泡、头像、消息 meta、时间戳列表。
 
 ### 2.4 呼吸边框
@@ -183,6 +184,15 @@
 - Shell 本地 JSON：`~/Library/Application Support/Qimingxing/workspace.json`。
 - 0600 权限；写入防抖 0.5s；最多保留 500 条。
 - Brain/SQLite 仍是会话与记忆的事实源；Workspace 是本地工作视图，后续可同步 Markdown/Wiki。
+
+---
+
+### 4.10 反馈与价值评测
+
+- `POST /api/feedback`（仅 localhost）接收 `turn_id / rating(up|down) / profile / prompt / answer`。
+- 写入记忆库 SQLite 的 `message_feedback` 表（auto-increment `feedback_id`、`turn_id`、`session_id`、`rating`、`profile`、`prompt`、`answer`、`source`、`created_at`）。
+- 表由 `CREATE TABLE IF NOT EXISTS` 在启动时自动补齐，已有数据库无需手动迁移；`turn_id` 与 `created_at` 建索引，便于按回合/时间检索并与 `messages` 关联。
+- 当前用于沉淀真实偏好样本；后续可接入排序/评测与技能蒸馏，不在本轮自动改变回答策略。
 
 ---
 

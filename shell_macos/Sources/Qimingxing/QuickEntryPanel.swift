@@ -351,6 +351,8 @@ struct QuickEntryRootView: View {
     @State private var appeared = QMXTheme.isHeadlessDump
     @State private var answerContentHeight: CGFloat = 0
     @State private var finalAnswerHeight: CGFloat = 0
+    @State private var copiedAnswer = false
+    @State private var answerRating: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let chatWidth: CGFloat = 760
@@ -410,6 +412,8 @@ struct QuickEntryRootView: View {
         .onChange(of: latestTurn?.id) { _ in
             answerContentHeight = 0
             finalAnswerHeight = 0
+            copiedAnswer = false
+            answerRating = nil
         }
         .onChange(of: answerFontSize) { _ in
             answerContentHeight = 0
@@ -603,6 +607,34 @@ struct QuickEntryRootView: View {
 
             EmotionBadge(emotion: brainClient.emotion)
 
+            if let turn = latestTurn, !turn.answer.isEmpty, !turn.isStreaming {
+                HStack(spacing: 2) {
+                    Button {
+                        copyAnswer(turn.answer)
+                    } label: {
+                        Image(systemName: copiedAnswer ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(copiedAnswer ? QMXTheme.success : QMXTheme.textSecondary)
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.qmxIcon)
+                    .qmxTooltip(copiedAnswer ? "已复制" : "复制回答")
+
+                    feedbackButton(
+                        symbol: "hand.thumbsup",
+                        active: answerRating == "up",
+                        help: "有帮助",
+                        action: { rateAnswer("up", turn: turn) }
+                    )
+                    feedbackButton(
+                        symbol: "hand.thumbsdown",
+                        active: answerRating == "down",
+                        help: "没帮助",
+                        action: { rateAnswer("down", turn: turn) }
+                    )
+                }
+            }
+
             Spacer()
 
             Button {
@@ -749,6 +781,44 @@ struct QuickEntryRootView: View {
         brainClient.phase == .connected &&
         (!inputState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
          !inputState.stagedAttachments.isEmpty)
+    }
+
+    private func copyAnswer(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        copiedAnswer = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            copiedAnswer = false
+        }
+    }
+
+    private func rateAnswer(_ rating: String, turn: LiveTurn) {
+        answerRating = rating
+        Task {
+            await brainClient.sendFeedback(
+                turnId: turn.id,
+                rating: rating,
+                prompt: turn.prompt,
+                answer: turn.answer
+            )
+        }
+    }
+
+    private func feedbackButton(
+        symbol: String,
+        active: Bool,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: active ? "\(symbol).fill" : symbol)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(active ? QMXTheme.accent : QMXTheme.textSecondary)
+                .frame(width: 26, height: 26)
+        }
+        .buttonStyle(.qmxIcon)
+        .qmxTooltip(help)
     }
 
     private func submitMessage() {

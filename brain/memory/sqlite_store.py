@@ -16,6 +16,7 @@ from brain.memory.models import (
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
+    FeedbackRecord,
     MemoryCategory,
     MemoryEpisode,
     MemoryFact,
@@ -58,6 +59,24 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_msg
     ON messages(session_id, msg_id);
+
+CREATE TABLE IF NOT EXISTS message_feedback (
+    feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    rating TEXT NOT NULL,
+    profile TEXT NOT NULL DEFAULT '',
+    prompt TEXT NOT NULL DEFAULT '',
+    answer TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_turn
+    ON message_feedback(turn_id);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_created
+    ON message_feedback(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS memory_facts (
     fact_id TEXT PRIMARY KEY,
@@ -1041,6 +1060,30 @@ class SQLiteMemoryStore(MemoryBackend):
                 self._sync_fts_entry(conn, skill_id, "skill", None)
             conn.commit()
             return True
+
+    async def add_feedback(self, record: FeedbackRecord) -> FeedbackRecord:
+        async with self._lock:
+            conn = self._ensure_conn()
+            cur = conn.execute(
+                """
+                INSERT INTO message_feedback (
+                    turn_id, session_id, rating, profile, prompt, answer, source, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.turn_id,
+                    record.session_id,
+                    record.rating,
+                    record.profile,
+                    record.prompt,
+                    record.answer,
+                    record.source,
+                    record.created_at,
+                ),
+            )
+            conn.commit()
+            record.feedback_id = int(cur.lastrowid)
+            return record
 
     async def add_work_history(self, record: WorkHistoryRecord) -> WorkHistoryRecord:
         async with self._lock:
