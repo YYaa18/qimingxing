@@ -30,6 +30,12 @@
     "system.privacy_state": {
       "$ref": "#/$defs/SystemPrivacyStatePayload"
     },
+    "system.shortcuts_sync": {
+      "$ref": "#/$defs/SystemShortcutsSyncPayload"
+    },
+    "system.hotkey_triggered": {
+      "$ref": "#/$defs/SystemHotkeyTriggeredPayload"
+    },
     "system.capture_prepare": {
       "$ref": "#/$defs/SystemCapturePreparePayload"
     },
@@ -105,8 +111,26 @@
     "tool.approval_response": {
       "$ref": "#/$defs/ToolApprovalResponsePayload"
     },
+    "tool.approval_resolved": {
+      "$ref": "#/$defs/ToolApprovalResolvedPayload"
+    },
     "avatar.state": {
       "$ref": "#/$defs/AvatarStatePayload"
+    },
+    "task.status": {
+      "$ref": "#/$defs/TaskStatusPayload"
+    },
+    "ui.command": {
+      "$ref": "#/$defs/UICommandPayload"
+    },
+    "ui.command_result": {
+      "$ref": "#/$defs/UICommandResultPayload"
+    },
+    "ui.state": {
+      "$ref": "#/$defs/UIStatePayload"
+    },
+    "ui.set_state": {
+      "$ref": "#/$defs/UISetStatePayload"
     }
   },
   "$defs": {
@@ -417,6 +441,21 @@
         "auto_hide": {
           "default": false,
           "title": "Auto Hide",
+          "type": "boolean"
+        },
+        "mirror_turns": {
+          "default": false,
+          "title": "Mirror Turns",
+          "type": "boolean"
+        },
+        "native_approvals": {
+          "default": false,
+          "title": "Native Approvals",
+          "type": "boolean"
+        },
+        "native_desktop": {
+          "default": false,
+          "title": "Native Desktop",
           "type": "boolean"
         }
       },
@@ -937,6 +976,30 @@
           "default": "",
           "title": "Model",
           "type": "string"
+        },
+        "origin_client_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin Client Id"
+        },
+        "origin_client_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin Client Type"
         }
       },
       "required": [
@@ -1125,6 +1188,8 @@
               "enum": [
                 "body_godot",
                 "body_web",
+                "body_macos",
+                "body_windows",
                 "senses"
               ],
               "type": "string"
@@ -1136,6 +1201,30 @@
           "default": null,
           "title": "Client Type"
         },
+        "platform": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Platform"
+        },
+        "app_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "App Version"
+        },
         "capabilities": {
           "$ref": "#/$defs/ClientCapabilities"
         }
@@ -1145,6 +1234,40 @@
         "role"
       ],
       "title": "SystemHelloPayload",
+      "type": "object"
+    },
+    "SystemHotkeyTriggeredPayload": {
+      "properties": {
+        "action": {
+          "enum": [
+            "chat_input",
+            "cancel",
+            "toggle_dock",
+            "settings"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "hotkey": {
+          "default": "",
+          "title": "Hotkey",
+          "type": "string"
+        },
+        "permission_hint": {
+          "default": "",
+          "title": "Permission Hint",
+          "type": "string"
+        },
+        "active_window_summary": {
+          "default": "",
+          "title": "Active Window Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "SystemHotkeyTriggeredPayload",
       "type": "object"
     },
     "SystemPingPayload": {
@@ -1228,22 +1351,43 @@
         },
         "permissions": {
           "$ref": "#/$defs/PermissionStatus"
-        },
-        "permission_hint": {
-          "default": "",
-          "title": "Permission Hint",
-          "type": "string"
-        },
-        "active_window_summary": {
-          "default": "",
-          "title": "Active Window Summary",
-          "type": "string"
         }
       },
       "required": [
         "mode"
       ],
       "title": "SystemPrivacyStatePayload",
+      "type": "object"
+    },
+    "SystemShortcutsSyncPayload": {
+      "properties": {
+        "ptt_hotkey": {
+          "default": "right_option",
+          "title": "Ptt Hotkey",
+          "type": "string"
+        },
+        "chat_input_hotkey": {
+          "default": "option+space",
+          "title": "Chat Input Hotkey",
+          "type": "string"
+        },
+        "cancel_hotkey": {
+          "default": "option+esc",
+          "title": "Cancel Hotkey",
+          "type": "string"
+        },
+        "toggle_dock_hotkey": {
+          "default": "option+h",
+          "title": "Toggle Dock Hotkey",
+          "type": "string"
+        },
+        "settings_hotkey": {
+          "default": "option+k",
+          "title": "Settings Hotkey",
+          "type": "string"
+        }
+      },
+      "title": "SystemShortcutsSyncPayload",
       "type": "object"
     },
     "SystemWelcomePayload": {
@@ -1267,6 +1411,9 @@
           },
           "title": "Profiles",
           "type": "array"
+        },
+        "shortcuts": {
+          "$ref": "#/$defs/SystemShortcutsSyncPayload"
         }
       },
       "required": [
@@ -1274,6 +1421,59 @@
         "active_profile"
       ],
       "title": "SystemWelcomePayload",
+      "type": "object"
+    },
+    "TaskStatusPayload": {
+      "properties": {
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "progress_pct": {
+          "default": 0,
+          "title": "Progress Pct",
+          "type": "integer"
+        },
+        "current_step": {
+          "default": "",
+          "title": "Current Step",
+          "type": "string"
+        },
+        "active_count": {
+          "default": 0,
+          "title": "Active Count",
+          "type": "integer"
+        },
+        "result_summary": {
+          "default": "",
+          "title": "Result Summary",
+          "type": "string"
+        },
+        "artifact_path": {
+          "default": "",
+          "title": "Artifact Path",
+          "type": "string"
+        },
+        "error_message": {
+          "default": "",
+          "title": "Error Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "status"
+      ],
+      "title": "TaskStatusPayload",
       "type": "object"
     },
     "ToolApprovalRequestPayload": {
@@ -1324,6 +1524,39 @@
       "title": "ToolApprovalRequestPayload",
       "type": "object"
     },
+    "ToolApprovalResolvedPayload": {
+      "properties": {
+        "approval_id": {
+          "title": "Approval Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "answered_by": {
+          "default": "",
+          "title": "Answered By",
+          "type": "string"
+        },
+        "answer_text": {
+          "default": "",
+          "title": "Answer Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_id",
+        "turn_id",
+        "approved"
+      ],
+      "title": "ToolApprovalResolvedPayload",
+      "type": "object"
+    },
     "ToolApprovalResponsePayload": {
       "properties": {
         "approval_id": {
@@ -1342,6 +1575,11 @@
           "default": false,
           "title": "Remember For Session",
           "type": "boolean"
+        },
+        "answer_text": {
+          "default": "",
+          "title": "Answer Text",
+          "type": "string"
         }
       },
       "required": [
@@ -1350,6 +1588,145 @@
         "approved"
       ],
       "title": "ToolApprovalResponsePayload",
+      "type": "object"
+    },
+    "UICommandPayload": {
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "target": {
+          "enum": [
+            "avatar",
+            "shell",
+            "senses",
+            "all"
+          ],
+          "title": "Target",
+          "type": "string"
+        },
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "args": {
+          "additionalProperties": true,
+          "title": "Args",
+          "type": "object"
+        }
+      },
+      "required": [
+        "command_id",
+        "target",
+        "action"
+      ],
+      "title": "UICommandPayload",
+      "type": "object"
+    },
+    "UICommandResultPayload": {
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "error": {
+          "default": "",
+          "title": "Error",
+          "type": "string"
+        },
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        }
+      },
+      "required": [
+        "command_id",
+        "ok"
+      ],
+      "title": "UICommandResultPayload",
+      "type": "object"
+    },
+    "UISetStatePayload": {
+      "properties": {
+        "origin": {
+          "default": "",
+          "title": "Origin",
+          "type": "string"
+        },
+        "patch": {
+          "additionalProperties": true,
+          "title": "Patch",
+          "type": "object"
+        }
+      },
+      "title": "UISetStatePayload",
+      "type": "object"
+    },
+    "UIStatePayload": {
+      "properties": {
+        "avatar_enabled": {
+          "default": false,
+          "title": "Avatar Enabled",
+          "type": "boolean"
+        },
+        "avatar_scale": {
+          "default": 1.0,
+          "title": "Avatar Scale",
+          "type": "number"
+        },
+        "roam": {
+          "default": true,
+          "title": "Roam",
+          "type": "boolean"
+        },
+        "earcons": {
+          "default": true,
+          "title": "Earcons",
+          "type": "boolean"
+        },
+        "ambient": {
+          "default": false,
+          "title": "Ambient",
+          "type": "boolean"
+        },
+        "docked": {
+          "default": false,
+          "title": "Docked",
+          "type": "boolean"
+        },
+        "active_profile": {
+          "default": "",
+          "title": "Active Profile",
+          "type": "string"
+        },
+        "privacy_mode": {
+          "default": "meta_only",
+          "enum": [
+            "off",
+            "meta_only",
+            "full_on_demand"
+          ],
+          "title": "Privacy Mode",
+          "type": "string"
+        },
+        "shortcuts": {
+          "$ref": "#/$defs/SystemShortcutsSyncPayload"
+        },
+        "pending_approvals": {
+          "items": {
+            "$ref": "#/$defs/ToolApprovalRequestPayload"
+          },
+          "title": "Pending Approvals",
+          "type": "array"
+        }
+      },
+      "title": "UIStatePayload",
       "type": "object"
     }
   }

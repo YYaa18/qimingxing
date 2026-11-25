@@ -16,6 +16,15 @@ SkillStatus = Literal["active", "deprecated"]
 TaskType = Literal["reminder", "llm_summary"]
 ScheduleKind = Literal["once", "daily", "interval"]
 TaskStatus = Literal["active", "paused", "completed", "cancelled"]
+BackgroundTaskStatus = Literal[
+    "queued",
+    "running",
+    "waiting_approval",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+]
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
@@ -47,6 +56,10 @@ def new_task_id() -> str:
 
 def new_notice_id() -> str:
     return f"notice_{uuid.uuid4().hex[:12]}"
+
+
+def new_bg_task_id() -> str:
+    return f"bg_{uuid.uuid4().hex[:12]}"
 
 
 def tokenize_for_fts(text: str) -> str:
@@ -363,3 +376,21 @@ class ScheduledTaskRecord:
     last_run_at: Optional[float] = None
     status: TaskStatus = "active"
     created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class BackgroundTaskRecord:
+    task_id: str
+    title: str
+    goal_prompt: str
+    source_session_id: str = ""
+    status: BackgroundTaskStatus = "queued"
+    progress_pct: int = 0
+    current_step: str = ""
+    result_summary: str = ""
+    artifact_path: str = ""
+    error_message: str = ""
+    slot_used: str = "bg_task"
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None

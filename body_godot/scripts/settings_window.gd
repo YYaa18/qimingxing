@@ -26,6 +26,7 @@ var _pending_provider_patches: Dictionary = {}
 var _is_syncing_ui: bool = false
 
 # Navigation & Right Chrome
+var _shell: HBoxContainer
 var _tabs: TabContainer
 var _nav_buttons: Array[Button] = []
 var _nav_meta: Array = []
@@ -47,9 +48,11 @@ var _ambient_sw: Control
 var _auto_hide_sw: Control
 
 # Tab 1: 模型与路由
+var _routing_scroll: ScrollContainer
 var _slot_widgets: Dictionary = {} # slot_key -> {prov_opt, model_edit, preset_menu, voice_opt?}
 var _providers_list_box: VBoxContainer
 var _prov_editor_card: PanelContainer
+var _prov_editor_title: Label
 var _prov_id_edit: LineEdit
 var _prov_label_edit: LineEdit
 var _prov_url_edit: LineEdit
@@ -139,7 +142,13 @@ func _ready() -> void:
 		_mcp_poll_timer.stop()
 		visible = false
 	)
+	size_changed.connect(_sync_shell_layout)
 	_build_ui()
+
+
+func _sync_shell_layout() -> void:
+	if _shell != null:
+		_shell.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
 
 func open_settings(
@@ -151,6 +160,14 @@ func open_settings(
 	initial_tab: int = 0
 ) -> void:
 	http_base = cur_http_base.trim_suffix("/")
+	min_size = Vector2i(820, 560)
+	var target_size := Vector2i(maxi(size.x, 880), maxi(size.y, 620))
+	size = target_size
+	var usable := DisplayServer.screen_get_usable_rect()
+	position = Vector2i(
+		usable.position.x + maxi(0, (usable.size.x - target_size.x) / 2),
+		usable.position.y + maxi(0, (usable.size.y - target_size.y) / 2)
+	)
 	_is_syncing_ui = true
 	_scale_slider.value = cur_scale * 100.0
 	_scale_val_label.text = "%d%%" % int(round(cur_scale * 100.0))
@@ -164,6 +181,7 @@ func open_settings(
 	_is_syncing_ui = false
 
 	visible = true
+	call_deferred("_sync_shell_layout")
 	grab_focus()
 	_fetch_backend_settings()
 	_fetch_mcp_servers()
@@ -349,6 +367,7 @@ func _style_slider(slider: HSlider) -> void:
 
 func _build_ui() -> void:
 	var shell := HBoxContainer.new()
+	_shell = shell
 	shell.set_anchors_preset(Control.PRESET_FULL_RECT)
 	shell.add_theme_constant_override("separation", 0)
 	add_child(shell)
@@ -612,6 +631,7 @@ func _build_tab_appearance() -> void:
 
 func _build_tab_routing() -> void:
 	var t2 := _make_page_scroll("模型与路由")
+	_routing_scroll = t2.get_parent().get_parent() as ScrollContainer
 	t2.add_theme_constant_override("separation", 7)
 
 	# Upper Card: 5-Slot Capability Routing
@@ -714,22 +734,23 @@ func _build_tab_routing() -> void:
 	_make_card_header(prov_card, "服务商与密钥池")
 	prov_card.add_child(UITokens.make_divider())
 
-	_providers_list_box = VBoxContainer.new()
-	_providers_list_box.add_theme_constant_override("separation", 4)
-	prov_card.add_child(_providers_list_box)
-
-	# Inline Collapsible Provider Editor
+	# Inline Collapsible Provider Editor (placed at top of card for immediate visibility)
 	_prov_editor_card = PanelContainer.new()
 	_prov_editor_card.visible = false
 	_prov_editor_card.add_theme_stylebox_override(
 		"panel",
-		UITokens.make_capsule_style(10, UITokens.SURFACE_PRIMARY, UITokens.BORDER_HAIRLINE, 12, 10, 0)
+		UITokens.make_capsule_style(10, UITokens.SURFACE_ELEVATED, UITokens.ACCENT_CYAN_BORDER, 12, 10, 0)
 	)
 	prov_card.add_child(_prov_editor_card)
 
 	var pe_col := VBoxContainer.new()
 	pe_col.add_theme_constant_override("separation", 8)
 	_prov_editor_card.add_child(pe_col)
+
+	_prov_editor_title = Label.new()
+	_prov_editor_title.add_theme_font_size_override("font_size", 13)
+	_prov_editor_title.add_theme_color_override("font_color", UITokens.ACCENT_CYAN)
+	pe_col.add_child(_prov_editor_title)
 
 	_prov_id_edit = LineEdit.new()
 	_prov_id_edit.placeholder_text = "英文标识（如 deepseek / my_proxy）"
@@ -769,6 +790,10 @@ func _build_tab_routing() -> void:
 		_prov_editor_card.visible = false
 	)
 	pe_actions.add_child(pe_done)
+
+	_providers_list_box = VBoxContainer.new()
+	_providers_list_box.add_theme_constant_override("separation", 4)
+	prov_card.add_child(_providers_list_box)
 
 
 func _build_tab_voice_privacy() -> void:
@@ -1112,16 +1137,21 @@ func _rebuild_providers_pool() -> void:
 func _open_provider_editor(pid: String) -> void:
 	var pdict: Dictionary = _providers_data.get(pid, {})
 	var patch: Dictionary = _pending_provider_patches.get(pid, {})
+	var label_txt := str(patch.get("label", pdict.get("label", pid)))
 	_prov_editing_is_new = false
 	_prov_id_edit.text = pid
 	_prov_id_edit.editable = false
-	_prov_label_edit.text = str(patch.get("label", pdict.get("label", pid)))
+	_prov_label_edit.text = label_txt
 	_prov_url_edit.text = str(patch.get("base_url", pdict.get("base_url", "")))
 	var pending_key := str(patch.get("api_key", ""))
 	_prov_key_edit.text = pending_key
 	var masked := str(pdict.get("key_masked", ""))
 	_prov_key_edit.placeholder_text = ("当前密钥 %s（留空保留原值）" % masked) if masked != "" else "输入 API Key（本地服务可留空）"
+	if _prov_editor_title != null:
+		_prov_editor_title.text = "正在编辑：%s（输入 API Key 后点击右下角「保存并生效」）" % label_txt
 	_prov_editor_card.visible = true
+	_set_status("正在编辑 %s，输入 API Key 后点击右下角「保存并生效」" % label_txt, UITokens.ACCENT_CYAN)
+	call_deferred("_reveal_provider_editor", false)
 
 
 func _open_new_provider_editor() -> void:
@@ -1132,8 +1162,20 @@ func _open_new_provider_editor() -> void:
 	_prov_url_edit.text = ""
 	_prov_key_edit.text = ""
 	_prov_key_edit.placeholder_text = "输入 API Key（本地服务可留空）"
+	if _prov_editor_title != null:
+		_prov_editor_title.text = "新增服务商（填写后点击右下角「保存并生效」）"
 	_prov_editor_card.visible = true
-	_prov_id_edit.call_deferred("grab_focus")
+	_set_status("正在新增服务商，填写完成后点击右下角「保存并生效」", UITokens.ACCENT_CYAN)
+	call_deferred("_reveal_provider_editor", true)
+
+
+func _reveal_provider_editor(focus_id: bool) -> void:
+	if _routing_scroll != null and _prov_editor_card != null and _prov_editor_card.visible:
+		_routing_scroll.ensure_control_visible(_prov_editor_card)
+	if focus_id and _prov_id_edit != null:
+		_prov_id_edit.grab_focus()
+	elif _prov_key_edit != null:
+		_prov_key_edit.grab_focus()
 
 
 func _commit_provider_editor_patch() -> void:

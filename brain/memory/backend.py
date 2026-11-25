@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from brain.memory.models import (
+    BackgroundTaskRecord,
+    BackgroundTaskStatus,
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
@@ -24,7 +26,7 @@ from brain.memory.models import (
     WorkHistoryRecord,
 )
 
-SNAPSHOT_SCHEMA_VERSION = "5.0"
+SNAPSHOT_SCHEMA_VERSION = "6.0"
 
 
 class MemoryBackend(ABC):
@@ -314,6 +316,54 @@ class MemoryBackend(ABC):
         last_run_at: Optional[float] = None,
     ) -> Optional[ScheduledTaskRecord]:
         """Update status and timestamps of a scheduled task."""
+
+    # --- GA 1.0: Background Long Tasks ---
+
+    @abstractmethod
+    async def add_background_task(
+        self, task: BackgroundTaskRecord
+    ) -> BackgroundTaskRecord:
+        """Persist a new background task record."""
+
+    @abstractmethod
+    async def get_background_task(
+        self, task_id: str
+    ) -> Optional[BackgroundTaskRecord]:
+        """Fetch a background task record by ID."""
+
+    @abstractmethod
+    async def list_background_tasks(
+        self,
+        *,
+        status: Optional[BackgroundTaskStatus] = None,
+        limit: int = 50,
+    ) -> List[BackgroundTaskRecord]:
+        """List background tasks ordered by created_at descending."""
+
+    @abstractmethod
+    async def update_background_task(
+        self,
+        task_id: str,
+        *,
+        status: Optional[BackgroundTaskStatus] = None,
+        progress_pct: Optional[int] = None,
+        current_step: Optional[str] = None,
+        result_summary: Optional[str] = None,
+        artifact_path: Optional[str] = None,
+        error_message: Optional[str] = None,
+        slot_used: Optional[str] = None,
+        started_at: Optional[float] = None,
+        finished_at: Optional[float] = None,
+    ) -> Optional[BackgroundTaskRecord]:
+        """Update mutable fields of a background task record."""
+
+    @abstractmethod
+    async def mark_unfinished_background_tasks_interrupted(
+        self,
+        *,
+        reason: str = "服务重启，任务已中断",
+    ) -> int:
+        """Mark leftover queued/running/waiting_approval tasks as interrupted on startup."""
 
     # --- Lossless Migration Contract ---
 

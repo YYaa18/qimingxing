@@ -11,6 +11,8 @@ from typing import List, Optional, Tuple
 from brain.memory.backend import SNAPSHOT_SCHEMA_VERSION, MemoryBackend
 from brain.memory.models import (
     DEFAULT_MEMORY_CATEGORIES,
+    BackgroundTaskRecord,
+    BackgroundTaskStatus,
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
@@ -183,6 +185,26 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_due
     ON scheduled_tasks(status, next_run_at ASC);
+
+CREATE TABLE IF NOT EXISTS background_tasks (
+    task_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    goal_prompt TEXT NOT NULL,
+    source_session_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress_pct INTEGER NOT NULL DEFAULT 0,
+    current_step TEXT NOT NULL DEFAULT '',
+    result_summary TEXT NOT NULL DEFAULT '',
+    artifact_path TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    slot_used TEXT NOT NULL DEFAULT 'bg_task',
+    created_at REAL NOT NULL,
+    started_at REAL NULL,
+    finished_at REAL NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bg_tasks_status_created
+    ON background_tasks(status, created_at DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     item_id UNINDEXED,
@@ -1271,6 +1293,157 @@ class SQLiteMemoryStore(MemoryBackend):
             ).fetchone()
             return _row_to_scheduled_task(updated) if updated else None
 
+    # --- GA 1.0: Background Long Tasks ---
+
+    async def add_background_task(
+        self, task: BackgroundTaskRecord
+    ) -> BackgroundTaskRecord:
+        async with self._lock:
+            conn = self._ensure_conn()
+            conn.execute(
+                """
+                INSERT INTO background_tasks (
+                    task_id, title, goal_prompt, source_session_id, status,
+                    progress_pct, current_step, result_summary, artifact_path,
+                    error_message, slot_used, created_at, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.task_id,
+                    task.title,
+                    task.goal_prompt,
+                    task.source_session_id,
+                    task.status,
+                    int(task.progress_pct),
+                    task.current_step,
+                    task.result_summary,
+                    task.artifact_path,
+                    task.error_message,
+                    task.slot_used,
+                    task.created_at,
+                    task.started_at,
+                    task.finished_at,
+                ),
+            )
+            conn.commit()
+            return task
+
+    async def get_background_task(
+        self, task_id: str
+    ) -> Optional[BackgroundTaskRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM background_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return _row_to_background_task(row) if row else None
+
+    async def list_background_tasks(
+        self,
+        *,
+        status: Optional[BackgroundTaskStatus] = None,
+        limit: int = 50,
+    ) -> List[BackgroundTaskRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            if status is None:
+                rows = conn.execute(
+                    "SELECT * FROM background_tasks ORDER BY created_at DESC LIMIT ?",
+                    (max(1, limit),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM background_tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, max(1, limit)),
+                ).fetchall()
+            return [_row_to_background_task(r) for r in rows]
+
+    async def update_background_task(
+        self,
+        task_id: str,
+        *,
+        status: Optional[BackgroundTaskStatus] = None,
+        progress_pct: Optional[int] = None,
+        current_step: Optional[str] = None,
+        result_summary: Optional[str] = None,
+        artifact_path: Optional[str] = None,
+        error_message: Optional[str] = None,
+        slot_used: Optional[str] = None,
+        started_at: Optional[float] = None,
+        finished_at: Optional[float] = None,
+    ) -> Optional[BackgroundTaskRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            row = conn.execute(
+                "SELECT * FROM background_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            new_status = status if status is not None else row["status"]
+            new_progress = (
+                max(0, min(100, int(progress_pct)))
+                if progress_pct is not None
+                else int(row["progress_pct"])
+            )
+            new_step = current_step if current_step is not None else row["current_step"]
+            new_summary = (
+                result_summary if result_summary is not None else row["result_summary"]
+            )
+            new_artifact = (
+                artifact_path if artifact_path is not None else row["artifact_path"]
+            )
+            new_error = error_message if error_message is not None else row["error_message"]
+            new_slot = slot_used if slot_used is not None else row["slot_used"]
+            new_started = started_at if started_at is not None else row["started_at"]
+            new_finished = finished_at if finished_at is not None else row["finished_at"]
+            conn.execute(
+                """
+                UPDATE background_tasks
+                SET status = ?, progress_pct = ?, current_step = ?, result_summary = ?,
+                    artifact_path = ?, error_message = ?, slot_used = ?,
+                    started_at = ?, finished_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    new_status,
+                    new_progress,
+                    new_step,
+                    new_summary,
+                    new_artifact,
+                    new_error,
+                    new_slot,
+                    new_started,
+                    new_finished,
+                    task_id,
+                ),
+            )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM background_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return _row_to_background_task(updated) if updated else None
+
+    async def mark_unfinished_background_tasks_interrupted(
+        self,
+        *,
+        reason: str = "服务重启，任务已中断",
+    ) -> int:
+        async with self._lock:
+            conn = self._ensure_conn()
+            now = time.time()
+            cur = conn.execute(
+                """
+                UPDATE background_tasks
+                SET status = 'interrupted',
+                    error_message = CASE WHEN error_message = '' THEN ? ELSE error_message END,
+                    finished_at = COALESCE(finished_at, ?)
+                WHERE status IN ('queued', 'running', 'waiting_approval')
+                """,
+                (reason, now),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     # --- Lossless JSONL Snapshot Export / Import ---
 
     async def export_snapshot(self, output_path: Path) -> int:
@@ -1344,6 +1517,12 @@ class SQLiteMemoryStore(MemoryBackend):
                 for r in conn.execute("SELECT * FROM scheduled_tasks ORDER BY created_at ASC"):
                     f.write(
                         json.dumps({"_type": "scheduled_task", **dict(r)}, ensure_ascii=False)
+                        + "\n"
+                    )
+                    count += 1
+                for r in conn.execute("SELECT * FROM background_tasks ORDER BY created_at ASC"):
+                    f.write(
+                        json.dumps({"_type": "background_task", **dict(r)}, ensure_ascii=False)
                         + "\n"
                     )
                     count += 1
@@ -1610,6 +1789,33 @@ class SQLiteMemoryStore(MemoryBackend):
                             ),
                         )
                         count += 1
+                    elif rtype == "background_task":
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO background_tasks (
+                                task_id, title, goal_prompt, source_session_id, status,
+                                progress_pct, current_step, result_summary, artifact_path,
+                                error_message, slot_used, created_at, started_at, finished_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec["task_id"],
+                                rec["title"],
+                                rec.get("goal_prompt", ""),
+                                rec.get("source_session_id", ""),
+                                rec.get("status", "interrupted"),
+                                int(rec.get("progress_pct", 0)),
+                                rec.get("current_step", ""),
+                                rec.get("result_summary", ""),
+                                rec.get("artifact_path", ""),
+                                rec.get("error_message", ""),
+                                rec.get("slot_used", "bg_task"),
+                                rec["created_at"],
+                                rec.get("started_at"),
+                                rec.get("finished_at"),
+                            ),
+                        )
+                        count += 1
             conn.commit()
             return count
 
@@ -1699,6 +1905,25 @@ def _row_to_scheduled_task(row: sqlite3.Row) -> ScheduledTaskRecord:
     )
 
 
+def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
+    return BackgroundTaskRecord(
+        task_id=str(row["task_id"]),
+        title=str(row["title"]),
+        goal_prompt=str(row["goal_prompt"] or ""),
+        source_session_id=str(row["source_session_id"] or ""),
+        status=row["status"],  # type: ignore[arg-type]
+        progress_pct=int(row["progress_pct"] or 0),
+        current_step=str(row["current_step"] or ""),
+        result_summary=str(row["result_summary"] or ""),
+        artifact_path=str(row["artifact_path"] or ""),
+        error_message=str(row["error_message"] or ""),
+        slot_used=str(row["slot_used"] or "bg_task"),
+        created_at=float(row["created_at"]),
+        started_at=float(row["started_at"]) if row["started_at"] is not None else None,
+        finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
+    )
+
+
 def _row_to_category(row: sqlite3.Row) -> MemoryCategory:
     return MemoryCategory(
         category_key=str(row["category_key"]),
@@ -1770,4 +1995,23 @@ def _row_to_scheduled_task(row: sqlite3.Row) -> ScheduledTaskRecord:
         last_run_at=float(row["last_run_at"]) if row["last_run_at"] is not None else None,
         status=row["status"],  # type: ignore[arg-type]
         created_at=float(row["created_at"]),
+    )
+
+
+def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
+    return BackgroundTaskRecord(
+        task_id=str(row["task_id"]),
+        title=str(row["title"]),
+        goal_prompt=str(row["goal_prompt"] or ""),
+        source_session_id=str(row["source_session_id"] or ""),
+        status=row["status"],  # type: ignore[arg-type]
+        progress_pct=int(row["progress_pct"] or 0),
+        current_step=str(row["current_step"] or ""),
+        result_summary=str(row["result_summary"] or ""),
+        artifact_path=str(row["artifact_path"] or ""),
+        error_message=str(row["error_message"] or ""),
+        slot_used=str(row["slot_used"] or "bg_task"),
+        created_at=float(row["created_at"]),
+        started_at=float(row["started_at"]) if row["started_at"] is not None else None,
+        finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
     )

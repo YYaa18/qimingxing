@@ -316,6 +316,169 @@ async def _dispatch_checker(
             ]
             return score_subchecks(checks)
 
+    if checker == "bg_task_lifecycle":
+        import asyncio
+        from brain.config import ProfileConfig
+        from brain.llm_router import LLMCompletionResult, LLMRouter, LLMUsage
+        from brain.memory.models import BackgroundTaskRecord
+        from brain.task_runner import BackgroundTaskRunner
+        from brain.tools.registry import ToolRegistry
+
+        class _EvalLLM(LLMRouter):
+            async def complete_with_tools(self, messages, tools, *, profile_name=None, on_text_delta=None):
+                return LLMCompletionResult(
+                    content="后台分析完成：一切正常。",
+                    usage=LLMUsage(
+                        prompt_tokens=100,
+                        completion_tokens=30,
+                        total_tokens=130,
+                        estimated_cost_cny=0.0005,
+                        model="eval-mock",
+                        profile="mock_local",
+                        provider="mock",
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory(prefix="qmx_bg_eval_") as td:
+            cfg = AppConfig(
+                default_profile="mock_local",
+                profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="mock-v1")},
+            )
+            cfg.memory.sqlite_path = str(Path(td) / "bg_eval.db")
+            backend = create_memory_backend(cfg.memory)
+            await backend.initialize()
+            try:
+                await backend.add_background_task(
+                    BackgroundTaskRecord(task_id="bg_stale", title="遗留", goal_prompt="test", status="running")
+                )
+                runner = BackgroundTaskRunner(
+                    backend, _EvalLLM(cfg), cfg, ToolRegistry(), artifact_dir=Path(td) / "artifacts"
+                )
+                interrupted_cnt = await runner.initialize()
+                rec = await runner.submit(title="测试后台任务", goal_prompt="生成简报", source_session_id="sess_eval")
+                for _ in range(40):
+                    cur = await runner.get_task(rec.task_id)
+                    if cur and cur.status == "completed":
+                        break
+                    await asyncio.sleep(0.02)
+                done = await runner.get_task(rec.task_id)
+                stale = await backend.get_background_task("bg_stale")
+                works = await backend.list_work_history(limit=10)
+                usages = await backend.list_usage_records(limit=10)
+                checks = [
+                    ("interrupted_recovered", interrupted_cnt == 1 and stale is not None and stale.status == "interrupted"),
+                    ("completed_ok", done is not None and done.status == "completed"),
+                    ("artifact_written", done is not None and bool(done.artifact_path) and Path(done.artifact_path).exists()),
+                    ("work_history_archived", any(w.turn_id == rec.task_id for w in works)),
+                    ("usage_slot_bg_task", any(u.turn_id == rec.task_id and u.slot == "bg_task" for u in usages)),
+                ]
+                return score_subchecks(checks)
+            finally:
+                await backend.close()
+
+    if checker == "macos_osascript_safety":
+        from brain.tools.macos_apps import MacOSNotesSearchTool, run_osascript
+
+        seen_argv: List[str] = []
+        seen_script: List[str] = []
+
+        async def _mock_runner(script: str, argv: List[str], timeout: float):
+            seen_script.append(script)
+            seen_argv.extend(argv)
+            return 1, "", "execution error: Not authorized to send Apple events to Notes. (-1743)"
+
+        payload_arg = str(case.get("injection_query") or '"; rm -rf /; $(whoami) `id`')
+        rc, _, err = await run_osascript("function run(argv){return argv[0];}", [payload_arg], runner=_mock_runner)
+        tool = MacOSNotesSearchTool(runner=_mock_runner)
+        res = await tool.execute({"query": payload_arg}, ToolExecutionContext(turn_id="t", session_id="s", config=AppConfig()))
+        checks = [
+            ("argv_passed_without_interpolation", payload_arg in seen_argv and payload_arg not in seen_script[0]),
+            ("err_1743_chinese_guide", (not res.ok) and "-1743" in res.output and "自动化" in res.output),
+            ("nonzero_rc_captured", rc == 1 and "-1743" in err),
+        ]
+        return score_subchecks(checks)
+
+    if checker == "macos_browser_privacy":
+        from brain.tools.macos_apps import filter_browser_tabs
+
+        sample_tabs = [
+            {"browser": "Safari", "title": "Python Docs", "url": "https://docs.python.org/3/"},
+            {"browser": "Chrome", "title": "个人网银登录", "url": "https://ibanks.icbc.com.cn/"},
+            {"browser": "Arc", "title": "1Password Vault", "url": "https://my.1password.com/"},
+        ]
+        kept, filtered_cnt = filter_browser_tabs(sample_tabs, config=AppConfig())
+        checks = [
+            ("safe_tab_kept", len(kept) == 1 and kept[0]["title"] == "Python Docs"),
+            ("sensitive_tabs_stripped", filtered_cnt == 2),
+        ]
+        return score_subchecks(checks)
+
+    if checker == "macos_mail_no_send":
+        from brain.tools.macos_apps import MacOSMailDraftTool
+
+        apps_file = Path(__file__).resolve().parent / "tools" / "macos_apps.py"
+        src = apps_file.read_text(encoding="utf-8")
+        tool = MacOSMailDraftTool()
+        checks = [
+            ("zero_send_calls_in_source", ".send(" not in src and "send()" not in src),
+            ("draft_requires_confirm", tool.classify_risk({}) == "confirm"),
+        ]
+        return score_subchecks(checks)
+
+    if checker == "ws_origin_security":
+        from brain.main import is_allowed_ws_origin
+
+        checks = [
+            ("empty_origin_allowed", is_allowed_ws_origin("", 18790)),
+            ("localhost_origin_allowed", is_allowed_ws_origin("http://127.0.0.1:18790", 18790)),
+            ("evil_origin_rejected", not is_allowed_ws_origin("https://evil.example.com", 18790)),
+            ("wrong_port_rejected", not is_allowed_ws_origin("http://127.0.0.1:9999", 18790)),
+        ]
+        return score_subchecks(checks)
+
+    if checker == "sqlite_discipline_and_jsonl6":
+        import ast
+        from brain.memory.backend import SNAPSHOT_SCHEMA_VERSION
+        from brain.memory.models import BackgroundTaskRecord
+
+        root = Path(__file__).resolve().parent.parent
+        sqlite_importers: List[str] = []
+        for folder in ("brain", "protocol", "senses"):
+            for pyf in (root / folder).rglob("*.py"):
+                tree = ast.parse(pyf.read_text(encoding="utf-8"), filename=str(pyf))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import) and any(a.name == "sqlite3" for a in node.names):
+                        sqlite_importers.append(str(pyf.relative_to(root)))
+                    elif isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+                        sqlite_importers.append(str(pyf.relative_to(root)))
+
+        with tempfile.TemporaryDirectory(prefix="qmx_snap6_") as td:
+            cfg1 = AppConfig()
+            cfg1.memory.sqlite_path = str(Path(td) / "s1.db")
+            b1 = create_memory_backend(cfg1.memory)
+            await b1.initialize()
+            snap_path = Path(td) / "snap6.jsonl"
+            await b1.add_background_task(
+                BackgroundTaskRecord(task_id="bg_snap_1", title="快照任务", goal_prompt="goal", status="completed", progress_pct=100)
+            )
+            exported = await b1.export_snapshot(snap_path)
+            await b1.close()
+
+            cfg2 = AppConfig()
+            cfg2.memory.sqlite_path = str(Path(td) / "s2.db")
+            b2 = create_memory_backend(cfg2.memory)
+            await b2.initialize()
+            imported = await b2.import_snapshot(snap_path)
+            restored = await b2.get_background_task("bg_snap_1")
+            await b2.close()
+
+            checks = [
+                ("only_sqlite_store_imports_sqlite3", sqlite_importers == ["brain/memory/sqlite_store.py"]),
+                ("schema_version_6_0", SNAPSHOT_SCHEMA_VERSION == "6.0"),
+                ("snapshot_roundtrip_bg_task", exported >= 1 and imported == exported and restored is not None and restored.title == "快照任务"),
+            ]
+            return score_subchecks(checks)
+
     return "not_applicable", None, f"未知 checker '{checker}'，记为不适用"
 
 

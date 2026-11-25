@@ -62,6 +62,7 @@ class ToolExecutionContext:
         on_approval: Optional[ApprovalRequester] = None,
         on_ask_user: Optional[UserQuestionRequester] = None,
         usage_collector: Optional[List[LLMUsage]] = None,
+        task_runner: Any = None,
     ) -> None:
         self.turn_id = turn_id
         self.session_id = session_id
@@ -79,6 +80,7 @@ class ToolExecutionContext:
         self.usage_collector: List[LLMUsage] = (
             usage_collector if usage_collector is not None else []
         )
+        self.task_runner = task_runner
 
     def is_cancelled(self) -> bool:
         return self.cancel_event.is_set()

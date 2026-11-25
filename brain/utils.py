@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def get_app_version() -> str:
+    """Read unified application version from repository root `version.txt`."""
+    version_file = _REPO_ROOT / "version.txt"
+    try:
+        if version_file.exists():
+            val = version_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+    except OSError:
+        pass
+    return "1.0.0"
+
 
 def truncate_head_tail(
     text: str,

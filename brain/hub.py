@@ -53,6 +53,7 @@ from brain.tools import (
 )
 from brain.tools.base import ToolTraceStep
 from brain.tools.desktop_io import AttachPathsResult
+from brain.utils import get_app_version
 from protocol.models import (
     AudioInputChunkPayload,
     AudioInputEndPayload,
@@ -95,8 +96,14 @@ from protocol.models import (
     SystemPrivacyStatePayload,
     SystemShortcutsSyncPayload,
     SystemWelcomePayload,
+    TaskStatusPayload,
     ToolApprovalRequestPayload,
+    ToolApprovalResolvedPayload,
     ToolApprovalResponsePayload,
+    UICommandPayload,
+    UICommandResultPayload,
+    UISetStatePayload,
+    UIStatePayload,
     make_envelope,
     new_turn_id,
     parse_envelope,
@@ -105,9 +112,25 @@ from protocol.models import (
 
 logger = logging.getLogger("qimingxing.hub")
 
-SERVER_VERSION = "0.6.0-mvp6"
+SERVER_VERSION = get_app_version()
 CAPTURE_TIMEOUT_SECONDS = 3.5
 _MAX_TTS_CHARS_PER_TURN = 600
+_DANGEROUS_OPEN_EXTENSIONS = {
+    ".sh",
+    ".command",
+    ".app",
+    ".pkg",
+    ".dmg",
+    ".scpt",
+    ".applescript",
+    ".py",
+    ".rb",
+    ".pl",
+    ".exe",
+    ".bat",
+    ".ps1",
+    ".workflow",
+}
 
 
 @dataclass
@@ -128,6 +151,9 @@ class ClientConnection:
     role: Optional[SourceRole] = None
     client_name: str = "unknown"
     client_type: Optional[str] = None
+    platform: str = "unknown"
+    app_version: str = ""
+    ui_subscribed: bool = False
     capabilities: ClientCapabilities = field(default_factory=ClientCapabilities)
     active_turn_id: Optional[str] = None
     active_task: Optional[asyncio.Task[None]] = None
@@ -161,6 +187,7 @@ class Hub:
         asr_provider: Optional[ASRProvider] = None,
         tts_provider: Optional[TTSProvider] = None,
         batch_path_store: Optional[BatchPathContextStore] = None,
+        task_runner: Optional[Any] = None,
         capture_timeout_seconds: float = CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
         self.llm_router = llm_router
@@ -222,6 +249,7 @@ class Hub:
         self.batch_path_store: BatchPathContextStore = (
             batch_path_store or BatchPathContextStore()
         )
+        self.task_runner: Optional[Any] = task_runner
         self.capture_timeout_seconds = capture_timeout_seconds
 
         self.clients: Dict[str, ClientConnection] = {}
@@ -232,6 +260,9 @@ class Hub:
         self.senses_permission_hint: str = ""
         self._pending_captures: Dict[str, asyncio.Future[ContextScreenRefPayload]] = {}
         self._pending_approvals: Dict[str, tuple[str, asyncio.Future[ToolApprovalResponsePayload]]] = {}
+        self._pending_approval_requests: Dict[str, ToolApprovalRequestPayload] = {}
+        self._approval_responders: Dict[str, tuple[str, str]] = {}
+        self._command_requesters: Dict[str, str] = {}
         self._turn_cancel_events: Dict[str, asyncio.Event] = {}
         self._active_audio_inputs: Dict[str, _AudioInputBuffer] = {}
         self._latest_audio_turn_by_client: Dict[str, str] = {}
@@ -308,7 +339,19 @@ class Hub:
             conn.client_type = payload.client_type or (
                 "body_web" if payload.role == "body" else "senses"
             )
+            conn.platform = payload.platform or (
+                "macos"
+                if conn.client_type == "body_macos"
+                else ("windows" if conn.client_type == "body_windows" else "unknown")
+            )
+            conn.app_version = payload.app_version or ""
             conn.capabilities = payload.capabilities
+            conn.ui_subscribed = bool(
+                conn.client_type in ("body_macos", "body_windows")
+                or conn.capabilities.native_approvals
+                or conn.capabilities.native_desktop
+                or conn.capabilities.mirror_turns
+            )
             if payload.role == "senses":
                 raw_payload = env.payload or {}
                 self.senses_platform = str(raw_payload.get("platform", self.senses_platform))
@@ -317,16 +360,19 @@ class Hub:
                     self.senses_permissions = PermissionStatus.model_validate(perms)
                 self.senses_permission_hint = str(raw_payload.get("permission_hint", ""))
             logger.info(
-                "Handshake hello: client=%s role=%s type=%s name=%s audio_out=%s auto_hide=%s",
+                "Handshake hello: client=%s role=%s type=%s name=%s platform=%s audio_out=%s auto_hide=%s",
                 conn.client_id,
                 conn.role,
                 conn.client_type,
                 conn.client_name,
+                conn.platform,
                 conn.capabilities.audio_output,
                 conn.capabilities.auto_hide,
             )
             await self._send_welcome(conn)
             await self._send_privacy_state(conn)
+            if conn.ui_subscribed or (conn.role == "body" and self._pending_approval_requests):
+                await self._send_ui_state(conn)
             if payload.role == "senses":
                 await self._broadcast_privacy_state(exclude_client_id=conn.client_id)
             return
@@ -413,7 +459,32 @@ class Hub:
             if entry is not None:
                 _, fut = entry
                 if not fut.done():
+                    responder = conn.client_type or conn.client_name or conn.client_id
+                    self._approval_responders[payload.approval_id] = (
+                        responder,
+                        payload.answer_text or "",
+                    )
                     fut.set_result(payload)
+            return
+
+        if isinstance(payload, UISetStatePayload):
+            conn.ui_subscribed = True
+            await self._handle_ui_set_state(payload)
+            return
+
+        if isinstance(payload, UICommandPayload):
+            await self._handle_ui_command(conn, payload)
+            return
+
+        if isinstance(payload, UICommandResultPayload):
+            req_cid = self._command_requesters.pop(payload.command_id, None)
+            if req_cid and req_cid in self.clients:
+                try:
+                    await self.clients[req_cid].send_envelope(
+                        make_envelope("brain", "ui.command_result", payload)
+                    )
+                except Exception:
+                    pass
             return
 
         if isinstance(payload, InputCancelPayload):
@@ -654,6 +725,139 @@ class Hub:
                 )
             )
 
+    def _build_ui_state_payload(self) -> UIStatePayload:
+        return UIStatePayload(
+            avatar_enabled=self.config.ui.avatar_enabled,
+            avatar_scale=self.config.ui.avatar_scale,
+            roam=self.config.ui.roam,
+            earcons=self.config.ui.earcons,
+            ambient=self.config.ui.ambient,
+            docked=False,
+            active_profile=self.llm_router.active_profile,
+            privacy_mode=self.privacy_mode,
+            shortcuts=self._build_shortcuts_sync_payload(),
+            pending_approvals=list(self._pending_approval_requests.values()),
+        )
+
+    async def _send_ui_state(self, conn: ClientConnection) -> None:
+        await conn.send_envelope(
+            make_envelope("brain", "ui.state", self._build_ui_state_payload())
+        )
+
+    async def _broadcast_ui_state(self) -> None:
+        env = make_envelope("brain", "ui.state", self._build_ui_state_payload())
+        for client in list(self.clients.values()):
+            if client.role in ("body", None) and client.ui_subscribed:
+                try:
+                    await client.send_envelope(env)
+                except Exception:
+                    logger.debug("Failed broadcasting ui.state to %s", client.client_id)
+
+    async def _handle_ui_set_state(self, payload: UISetStatePayload) -> None:
+        patch = payload.patch or {}
+        if "avatar_enabled" in patch:
+            self.config.ui.avatar_enabled = bool(patch["avatar_enabled"])
+        if "avatar_scale" in patch and patch["avatar_scale"] is not None:
+            try:
+                val = float(patch["avatar_scale"])
+                self.config.ui.avatar_scale = max(0.5, min(1.5, val))
+            except (TypeError, ValueError):
+                pass
+        if "roam" in patch:
+            self.config.ui.roam = bool(patch["roam"])
+        if "earcons" in patch:
+            self.config.ui.earcons = bool(patch["earcons"])
+            self.config.godot.earcons_enabled = bool(patch["earcons"])
+        if "ambient" in patch:
+            self.config.ui.ambient = bool(patch["ambient"])
+        await self._broadcast_ui_state()
+
+    async def _handle_ui_command(
+        self, conn: ClientConnection, payload: UICommandPayload
+    ) -> None:
+        if payload.action == "open_path":
+            raw_path = str((payload.args or {}).get("path") or "").strip()
+            suffix = Path(raw_path).suffix.lower()
+            if suffix in _DANGEROUS_OPEN_EXTENSIONS:
+                await conn.send_envelope(
+                    make_envelope(
+                        "brain",
+                        "ui.command_result",
+                        UICommandResultPayload(
+                            command_id=payload.command_id,
+                            ok=False,
+                            error="dangerous_executable_blocked",
+                            data={"path": raw_path, "suffix": suffix},
+                        ),
+                    )
+                )
+                return
+
+        if payload.target == "all" and payload.action == "sync_state":
+            conn.ui_subscribed = True
+            await self._broadcast_ui_state()
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "ui.command_result",
+                    UICommandResultPayload(command_id=payload.command_id, ok=True),
+                )
+            )
+            return
+
+        target_conn: Optional[ClientConnection] = None
+        if payload.target == "avatar":
+            for c in self.clients.values():
+                if c.role == "body" and c.client_type == "body_godot":
+                    target_conn = c
+                    break
+        elif payload.target == "shell":
+            candidates = [
+                c
+                for c in self.clients.values()
+                if c.role == "body" and c.capabilities.native_desktop
+            ]
+            if conn.platform != "unknown":
+                for c in candidates:
+                    if c.platform == conn.platform:
+                        target_conn = c
+                        break
+            if target_conn is None and candidates:
+                target_conn = candidates[0]
+        elif payload.target == "senses":
+            target_conn = self._get_active_senses()
+
+        if target_conn is None:
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "ui.command_result",
+                    UICommandResultPayload(
+                        command_id=payload.command_id,
+                        ok=False,
+                        error="target_offline",
+                    ),
+                )
+            )
+            return
+
+        self._command_requesters[payload.command_id] = conn.client_id
+        try:
+            await target_conn.send_envelope(make_envelope("brain", "ui.command", payload))
+        except Exception:
+            self._command_requesters.pop(payload.command_id, None)
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "ui.command_result",
+                    UICommandResultPayload(
+                        command_id=payload.command_id,
+                        ok=False,
+                        error="target_send_failed",
+                    ),
+                )
+            )
+
     def _get_primary_body_conn(
         self, fallback_conn: Optional[ClientConnection] = None
     ) -> Optional[ClientConnection]:
@@ -666,6 +870,13 @@ class Hub:
         return fallback_conn
 
     def _get_tts_target_conns(self, primary_conn: ClientConnection) -> List[ClientConnection]:
+        godot_audio = [
+            c
+            for c in self.clients.values()
+            if c.role == "body" and c.client_type == "body_godot" and c.capabilities.audio_output
+        ]
+        if godot_audio:
+            return godot_audio
         targets: List[ClientConnection] = []
         seen: set[str] = set()
         for c in (primary_conn, *self.clients.values()):
@@ -712,6 +923,7 @@ class Hub:
         await self._broadcast_welcome_to_bodies()
         await self._broadcast_privacy_state()
         await self._broadcast_shortcuts_sync()
+        await self._broadcast_ui_state()
 
     async def broadcast_tool_notice(self, tool: str, label: str) -> None:
         env = make_envelope(
@@ -1076,6 +1288,43 @@ class Hub:
                 except Exception:
                     logger.debug("Failed broadcasting soft_alert to %s", client.client_id)
 
+    async def broadcast_task_status(self, payload: TaskStatusPayload) -> None:
+        env = make_envelope("brain", "task.status", payload, turn_id=payload.task_id)
+        for client in list(self.clients.values()):
+            if client.role in ("body", None):
+                try:
+                    await client.send_envelope(env)
+                except Exception:
+                    logger.debug("Failed broadcasting task.status to %s", client.client_id)
+
+    async def broadcast_artifact_capsule(
+        self, payload: OutputArtifactCapsulePayload
+    ) -> None:
+        env = make_envelope(
+            "brain", "output.artifact_capsule", payload, turn_id=payload.turn_id
+        )
+        for client in list(self.clients.values()):
+            if client.role in ("body", None):
+                try:
+                    await client.send_envelope(env)
+                except Exception:
+                    logger.debug("Failed broadcasting artifact_capsule to %s", client.client_id)
+
+    async def _send_with_mirrors(
+        self, origin_conn: ClientConnection, envelope: Envelope
+    ) -> None:
+        await origin_conn.send_envelope(envelope)
+        for client in list(self.clients.values()):
+            if (
+                client.client_id != origin_conn.client_id
+                and client.role == "body"
+                and client.capabilities.mirror_turns
+            ):
+                try:
+                    await client.send_envelope(envelope)
+                except Exception:
+                    pass
+
     async def _start_turn(
         self,
         conn: ClientConnection,
@@ -1234,92 +1483,211 @@ class Hub:
             )
         )
 
+    async def _broadcast_approval_request(
+        self,
+        req: ToolApprovalRequestPayload,
+        *,
+        origin_conn: Optional[ClientConnection],
+        broadcast_all_bodies: bool = False,
+    ) -> None:
+        env = make_envelope("brain", "tool.approval_request", req, turn_id=req.turn_id)
+        sent_ids: set[str] = set()
+        if origin_conn is not None:
+            await origin_conn.send_envelope(env)
+            sent_ids.add(origin_conn.client_id)
+        for client in list(self.clients.values()):
+            if client.client_id in sent_ids or client.role != "body":
+                continue
+            if broadcast_all_bodies or client.capabilities.native_approvals:
+                try:
+                    await client.send_envelope(env)
+                    sent_ids.add(client.client_id)
+                except Exception:
+                    logger.debug("Failed sending approval_request to %s", client.client_id)
+
+    async def _broadcast_approval_resolved(
+        self,
+        *,
+        approval_id: str,
+        turn_id: str,
+        approved: bool,
+        answered_by: str,
+        answer_text: str = "",
+    ) -> None:
+        env = make_envelope(
+            "brain",
+            "tool.approval_resolved",
+            ToolApprovalResolvedPayload(
+                approval_id=approval_id,
+                turn_id=turn_id,
+                approved=approved,
+                answered_by=answered_by,
+                answer_text=answer_text,
+            ),
+            turn_id=turn_id,
+        )
+        for client in list(self.clients.values()):
+            if client.role in ("body", None):
+                try:
+                    await client.send_envelope(env)
+                except Exception:
+                    logger.debug("Failed broadcasting approval_resolved to %s", client.client_id)
+
     async def _request_tool_approval(
         self,
         *,
-        conn: ClientConnection,
+        conn: Optional[ClientConnection],
         turn_id: str,
         tool_name: str,
         risk_level: RiskLevel,
         summary: str,
         details: Dict[str, Any],
         timeout_sec: int,
+        broadcast_all_bodies: bool = False,
     ) -> tuple[bool, bool]:
         approval_id = f"apr_{uuid.uuid4().hex[:10]}"
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[ToolApprovalResponsePayload] = loop.create_future()
+        req = ToolApprovalRequestPayload(
+            approval_id=approval_id,
+            turn_id=turn_id,
+            tool_name=tool_name,
+            risk_level=risk_level,
+            summary=summary,
+            details=details,
+            timeout_sec=timeout_sec,
+        )
         self._pending_approvals[approval_id] = (turn_id, fut)
+        self._pending_approval_requests[approval_id] = req
+        approved = False
+        answered_by = "timeout"
+        answer_text = ""
         try:
-            await conn.send_envelope(
-                make_envelope(
-                    "brain",
-                    "tool.approval_request",
-                    ToolApprovalRequestPayload(
-                        approval_id=approval_id,
-                        turn_id=turn_id,
-                        tool_name=tool_name,
-                        risk_level=risk_level,
-                        summary=summary,
-                        details=details,
-                        timeout_sec=timeout_sec,
-                    ),
-                    turn_id=turn_id,
-                )
+            await self._broadcast_approval_request(
+                req, origin_conn=conn, broadcast_all_bodies=broadcast_all_bodies
             )
             resp = await asyncio.wait_for(fut, timeout=max(1, timeout_sec))
-            return bool(resp.approved), bool(resp.remember_for_session)
+            approved = bool(resp.approved)
+            answered_by, answer_text = self._approval_responders.pop(
+                approval_id, ("body", resp.answer_text or "")
+            )
+            return approved, bool(resp.remember_for_session)
         except asyncio.TimeoutError:
             logger.info("Tool approval timed out approval_id=%s tool=%s", approval_id, tool_name)
             return False, False
+        except asyncio.CancelledError:
+            answered_by = "cancelled"
+            raise
         finally:
             self._pending_approvals.pop(approval_id, None)
+            self._pending_approval_requests.pop(approval_id, None)
+            self._approval_responders.pop(approval_id, None)
+            await self._broadcast_approval_resolved(
+                approval_id=approval_id,
+                turn_id=turn_id,
+                approved=approved,
+                answered_by=answered_by,
+                answer_text=answer_text,
+            )
 
     async def _request_user_clarification(
         self,
         *,
-        conn: ClientConnection,
+        conn: Optional[ClientConnection],
         turn_id: str,
         question: str,
         options: List[str],
         timeout_sec: int,
+        broadcast_all_bodies: bool = False,
     ) -> Optional[str]:
         approval_id = f"ask_{uuid.uuid4().hex[:10]}"
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[ToolApprovalResponsePayload] = loop.create_future()
-        self._pending_approvals[approval_id] = (turn_id, fut)
         clean_options = [str(o).strip() for o in options if str(o).strip()][:4]
+        req = ToolApprovalRequestPayload(
+            approval_id=approval_id,
+            turn_id=turn_id,
+            tool_name="ask_user",
+            risk_level="safe",
+            summary=question,
+            details={
+                "kind": "clarification",
+                "question": question,
+                "options": clean_options,
+                "allow_remember": False,
+            },
+            timeout_sec=timeout_sec,
+        )
+        self._pending_approvals[approval_id] = (turn_id, fut)
+        self._pending_approval_requests[approval_id] = req
+        approved = False
+        answered_by = "timeout"
+        answer_text = ""
         try:
-            await conn.send_envelope(
-                make_envelope(
-                    "brain",
-                    "tool.approval_request",
-                    ToolApprovalRequestPayload(
-                        approval_id=approval_id,
-                        turn_id=turn_id,
-                        tool_name="ask_user",
-                        risk_level="safe",
-                        summary=question,
-                        details={
-                            "kind": "clarification",
-                            "question": question,
-                            "options": clean_options,
-                            "allow_remember": False,
-                        },
-                        timeout_sec=timeout_sec,
-                    ),
-                    turn_id=turn_id,
-                )
+            await self._broadcast_approval_request(
+                req, origin_conn=conn, broadcast_all_bodies=broadcast_all_bodies
             )
             resp = await asyncio.wait_for(fut, timeout=max(1, timeout_sec))
             ans = (resp.answer_text or "").strip()
-            if resp.approved and ans:
+            approved = bool(resp.approved and ans)
+            answered_by, _ = self._approval_responders.pop(approval_id, ("body", ans))
+            answer_text = ans
+            if approved:
                 return ans
             return None
         except asyncio.TimeoutError:
             logger.info("Clarification request timed out approval_id=%s", approval_id)
             return None
+        except asyncio.CancelledError:
+            answered_by = "cancelled"
+            raise
         finally:
             self._pending_approvals.pop(approval_id, None)
+            self._pending_approval_requests.pop(approval_id, None)
+            self._approval_responders.pop(approval_id, None)
+            await self._broadcast_approval_resolved(
+                approval_id=approval_id,
+                turn_id=turn_id,
+                approved=approved,
+                answered_by=answered_by,
+                answer_text=answer_text,
+            )
+
+    async def request_background_approval(
+        self,
+        task_id: str,
+        tool_name: str,
+        risk_level: RiskLevel,
+        summary: str,
+        details: Dict[str, Any],
+        timeout_sec: int,
+    ) -> tuple[bool, bool]:
+        return await self._request_tool_approval(
+            conn=None,
+            turn_id=task_id,
+            tool_name=tool_name,
+            risk_level=risk_level,
+            summary=summary,
+            details=details,
+            timeout_sec=timeout_sec,
+            broadcast_all_bodies=True,
+        )
+
+    async def request_background_clarification(
+        self,
+        task_id: str,
+        question: str,
+        options: List[str],
+        timeout_sec: int,
+    ) -> Optional[str]:
+        return await self._request_user_clarification(
+            conn=None,
+            turn_id=task_id,
+            question=question,
+            options=options,
+            timeout_sec=timeout_sec,
+            broadcast_all_bodies=True,
+        )
 
     async def _record_usage_and_alert(
         self,
@@ -1408,7 +1776,8 @@ class Hub:
         self._turn_cancel_events[turn_id] = cancel_event
 
         try:
-            await conn.send_envelope(
+            await self._send_with_mirrors(
+                conn,
                 make_envelope(
                     "brain",
                     "output.turn_start",
@@ -1416,17 +1785,20 @@ class Hub:
                         profile=profile.name,
                         provider=profile.provider,
                         model=profile.model,
+                        origin_client_id=conn.client_id,
+                        origin_client_type=conn.client_type,
                     ),
                     turn_id=turn_id,
-                )
+                ),
             )
-            await conn.send_envelope(
+            await self._send_with_mirrors(
+                conn,
                 make_envelope(
                     "brain",
                     "avatar.state",
                     AvatarStatePayload(emotion="thinking", intensity=0.7, activity="thinking"),
                     turn_id=turn_id,
-                )
+                ),
             )
 
             wants_screen = force_screen or (
@@ -1776,6 +2148,7 @@ class Hub:
                     on_status=_on_status,
                     on_approval=_on_approval,
                     on_ask_user=_on_ask_user,
+                    task_runner=self.task_runner,
                 )
                 loop_res = await self.tool_executor.run(
                     messages=messages,
@@ -1927,29 +2300,32 @@ class Hub:
             if tts_task is not None:
                 await tts_task
 
-            await conn.send_envelope(
+            await self._send_with_mirrors(
+                conn,
                 make_envelope(
                     "brain",
                     "output.text_delta",
                     OutputTextDeltaPayload(seq=seq + 1, delta="", is_final=True),
                     turn_id=turn_id,
-                )
+                ),
             )
-            await conn.send_envelope(
+            await self._send_with_mirrors(
+                conn,
                 make_envelope(
                     "brain",
                     "output.turn_end",
                     OutputTurnEndPayload(finish_reason="completed", elapsed_ms=elapsed_ms),
                     turn_id=turn_id,
-                )
+                ),
             )
-            await conn.send_envelope(
+            await self._send_with_mirrors(
+                conn,
                 make_envelope(
                     "brain",
                     "avatar.state",
                     AvatarStatePayload(emotion="neutral", intensity=0.5, activity="idle"),
                     turn_id=turn_id,
-                )
+                ),
             )
         except asyncio.CancelledError:
             logger.info("Turn task cancelled cleanly turn_id=%s", turn_id)
@@ -2038,7 +2414,8 @@ class Hub:
     ) -> int:
         for ev in events:
             if isinstance(ev, EmotionEvent):
-                await conn.send_envelope(
+                await self._send_with_mirrors(
+                    conn,
                     make_envelope(
                         "brain",
                         "avatar.state",
@@ -2048,20 +2425,21 @@ class Hub:
                             activity="speaking",
                         ),
                         turn_id=turn_id,
-                    )
+                    ),
                 )
             elif isinstance(ev, TextEvent):
                 seq += 1
                 collected_spoken.append(ev.delta)
                 if on_spoken_delta is not None:
                     on_spoken_delta(ev.delta)
-                await conn.send_envelope(
+                await self._send_with_mirrors(
+                    conn,
                     make_envelope(
                         "brain",
                         "output.text_delta",
                         OutputTextDeltaPayload(seq=seq, delta=ev.delta, is_final=False),
                         turn_id=turn_id,
-                    )
+                    ),
                 )
             elif isinstance(ev, CardEvent):
                 actions = []

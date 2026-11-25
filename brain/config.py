@@ -381,6 +381,23 @@ class GodotConfig:
 
 
 @dataclass
+class UIConfig:
+    avatar_enabled: bool = False
+    avatar_scale: float = 1.0
+    roam: bool = True
+    earcons: bool = True
+    ambient: bool = False
+
+
+@dataclass
+class BackgroundTaskConfig:
+    enabled: bool = True
+    max_concurrency: int = 2
+    max_steps: int = 12
+    timeout_sec: int = 300
+
+
+@dataclass
 class ShortcutsConfig:
     ptt_hotkey: str = "right_option"
     chat_input_hotkey: str = "option+space"
@@ -407,6 +424,8 @@ class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     batch_context: BatchContextConfig = field(default_factory=BatchContextConfig)
     godot: GodotConfig = field(default_factory=GodotConfig)
+    ui: UIConfig = field(default_factory=UIConfig)
+    background_tasks: BackgroundTaskConfig = field(default_factory=BackgroundTaskConfig)
     shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
     _secrets: List[str] = field(default_factory=list, repr=False)
 
@@ -916,6 +935,27 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         ambient_duck_db=float(godot_raw.get("ambient_duck_db", -12.0)),
     )
 
+    ui_raw = raw.get("ui") or {}
+    if not isinstance(ui_raw, dict):
+        ui_raw = {}
+    ui = UIConfig(
+        avatar_enabled=bool(ui_raw.get("avatar_enabled", False)),
+        avatar_scale=max(0.5, min(1.5, float(ui_raw.get("avatar_scale", 1.0)))),
+        roam=bool(ui_raw.get("roam", True)),
+        earcons=bool(ui_raw.get("earcons", godot.earcons_enabled)),
+        ambient=bool(ui_raw.get("ambient", False)),
+    )
+
+    bg_raw = raw.get("background_tasks") or {}
+    if not isinstance(bg_raw, dict):
+        bg_raw = {}
+    background_tasks = BackgroundTaskConfig(
+        enabled=bool(bg_raw.get("enabled", True)),
+        max_concurrency=max(1, int(bg_raw.get("max_concurrency", 2))),
+        max_steps=max(1, int(bg_raw.get("max_steps", 12))),
+        timeout_sec=max(10, int(bg_raw.get("timeout_sec", 300))),
+    )
+
     shortcuts_raw = raw.get("shortcuts") or {}
     if not isinstance(shortcuts_raw, dict):
         shortcuts_raw = {}
@@ -1006,6 +1046,8 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         audio=audio,
         batch_context=batch_context,
         godot=godot,
+        ui=ui,
+        background_tasks=background_tasks,
         shortcuts=shortcuts,
     )
 
@@ -1112,6 +1154,19 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
             "auto_hide_on_capture": cfg.godot.auto_hide_on_capture,
             "earcons_enabled": cfg.godot.earcons_enabled,
             "ambient_duck_db": cfg.godot.ambient_duck_db,
+        },
+        "ui": {
+            "avatar_enabled": cfg.ui.avatar_enabled,
+            "avatar_scale": cfg.ui.avatar_scale,
+            "roam": cfg.ui.roam,
+            "earcons": cfg.ui.earcons,
+            "ambient": cfg.ui.ambient,
+        },
+        "background_tasks": {
+            "enabled": cfg.background_tasks.enabled,
+            "max_concurrency": cfg.background_tasks.max_concurrency,
+            "max_steps": cfg.background_tasks.max_steps,
+            "timeout_sec": cfg.background_tasks.timeout_sec,
         },
         "shortcuts": {
             "ptt_hotkey": cfg.shortcuts.ptt_hotkey,
@@ -1448,6 +1503,33 @@ def save_settings_to_yaml(
                     godot_sec[k] = bool(godot_up[k])
             if "ambient_duck_db" in godot_up and godot_up["ambient_duck_db"] is not None:
                 godot_sec["ambient_duck_db"] = float(godot_up["ambient_duck_db"])
+
+    ui_up = updates.get("ui")
+    if isinstance(ui_up, dict):
+        ui_sec = raw.setdefault("ui", {})
+        if isinstance(ui_sec, dict):
+            for k in ("avatar_enabled", "roam", "earcons", "ambient"):
+                if k in ui_up:
+                    ui_sec[k] = bool(ui_up[k])
+            if "avatar_scale" in ui_up and ui_up["avatar_scale"] is not None:
+                ui_sec["avatar_scale"] = max(0.5, min(1.5, float(ui_up["avatar_scale"])))
+            if "earcons" in ui_sec:
+                godot_sec = raw.setdefault("godot", {})
+                if isinstance(godot_sec, dict):
+                    godot_sec["earcons_enabled"] = bool(ui_sec["earcons"])
+
+    bg_up = updates.get("background_tasks")
+    if isinstance(bg_up, dict):
+        bg_sec = raw.setdefault("background_tasks", {})
+        if isinstance(bg_sec, dict):
+            if "enabled" in bg_up:
+                bg_sec["enabled"] = bool(bg_up["enabled"])
+            if "max_concurrency" in bg_up and bg_up["max_concurrency"] is not None:
+                bg_sec["max_concurrency"] = max(1, int(bg_up["max_concurrency"]))
+            if "max_steps" in bg_up and bg_up["max_steps"] is not None:
+                bg_sec["max_steps"] = max(1, int(bg_up["max_steps"]))
+            if "timeout_sec" in bg_up and bg_up["timeout_sec"] is not None:
+                bg_sec["timeout_sec"] = max(10, int(bg_up["timeout_sec"]))
 
     shortcuts_up = updates.get("shortcuts")
     if isinstance(shortcuts_up, dict):

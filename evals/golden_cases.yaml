@@ -90,3 +90,34 @@ cases:
     checker: settings_masked_key_preserve
     real_secret: "sk-real-key-eval-1234"
     masked_placeholder: "sk-r****1234"
+
+  - id: bg_task_lifecycle_01
+    category: background_tasks
+    title: "后台长任务异步执行、产物归档、bg_task 记账与重启中断恢复"
+    checker: bg_task_lifecycle
+
+  - id: macos_osascript_safety_01
+    category: macos_apps
+    title: "osascript 参数走 argv 防注入与 -1743 中文授权指引"
+    checker: macos_osascript_safety
+    injection_query: '"; rm -rf /; $(whoami) `id`'
+
+  - id: macos_browser_privacy_01
+    category: macos_apps
+    title: "浏览器标签页强制隐私黑名单剥离"
+    checker: macos_browser_privacy
+
+  - id: macos_mail_no_send_01
+    category: macos_apps
+    title: "邮件仅支持只读检索与本地草稿窗，静态核查零自动发送"
+    checker: macos_mail_no_send
+
+  - id: ws_origin_security_01
+    category: security_routing
+    title: "Brain WebSocket 握手强制校验 Origin 防御 CSWSH"
+    checker: ws_origin_security
+
+  - id: sqlite_discipline_jsonl6_01
+    category: storage_discipline
+    title: "全仓 AST 核查 sqlite3 唯一入口与 JSONL 6.0 无损迁移"
+    checker: sqlite_discipline_and_jsonl6

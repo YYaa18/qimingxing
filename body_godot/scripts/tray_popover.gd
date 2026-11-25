@@ -263,6 +263,30 @@ func open_near_rect(anchor_rect: Rect2) -> void:
 		_anim_tween.tween_property(_card, "scale", Vector2.ONE, 0.14)
 
 
+func open_at_cursor() -> void:
+	_sync_height()
+	var m := DisplayServer.mouse_get_position()
+	var usable := DisplayServer.screen_get_usable_rect()
+	var px := clampi(m.x + 6, usable.position.x + 8, usable.position.x + usable.size.x - size.x - 8)
+	var py := clampi(m.y + 6, usable.position.y + 8, usable.position.y + usable.size.y - size.y - 8)
+	position = Vector2i(px, py)
+
+	_suppress_focus_close_until_ms = Time.get_ticks_msec() + 260
+	if _anim_tween != null and _anim_tween.is_running():
+		_anim_tween.kill()
+
+	visible = true
+	grab_focus()
+	if _outer != null and _card != null:
+		_outer.modulate.a = 0.0
+		_card.pivot_offset = Vector2(0.0, 0.0)
+		_card.scale = Vector2(0.96, 0.96)
+		_anim_tween = create_tween().set_parallel(true)
+		_anim_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		_anim_tween.tween_property(_outer, "modulate:a", 1.0, 0.14)
+		_anim_tween.tween_property(_card, "scale", Vector2.ONE, 0.14)
+
+
 func hide_popover() -> void:
 	if not visible:
 		return

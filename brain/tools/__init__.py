@@ -5,6 +5,12 @@ from typing import Optional
 from brain.config import AppConfig
 from brain.tools.ask_user import AskUserTool
 from brain.tools.base import Tool, ToolExecutionContext, ToolResult, ToolTraceStep
+from brain.tools.bg_task_tools import (
+    BgTaskCancelTool,
+    BgTaskInspectTool,
+    BgTaskListTool,
+    BgTaskSubmitTool,
+)
 from brain.tools.clipboard_tool import ClipboardTool
 from brain.tools.desktop_io import (
     BatchPathContextStore,
@@ -18,6 +24,17 @@ from brain.tools.desktop_io import (
 )
 from brain.tools.executor import ToolExecutor, ToolLoopResult
 from brain.tools.history_tool import WorkHistoryInspectTool
+from brain.tools.macos_apps import (
+    MacOSBrowserTabsTool,
+    MacOSCalendarCreateTool,
+    MacOSCalendarListTool,
+    MacOSMailDraftTool,
+    MacOSMailSearchTool,
+    MacOSNotesCreateTool,
+    MacOSNotesSearchTool,
+    MacOSRemindersCreateTool,
+    MacOSRemindersListTool,
+)
 from brain.tools.mcp_client import MCPClientManager, MCPServerStatus, MCPToolAdapter
 from brain.tools.mcp_oauth import FileTokenStorage, MCPOAuthCoordinator
 from brain.tools.registry import ToolRegistry
@@ -61,12 +78,30 @@ def build_default_tool_registry(
     registry.register(ScheduleTaskTool())
     registry.register(ListTasksTool())
     registry.register(CancelTaskTool())
+    if config.background_tasks.enabled:
+        registry.register(BgTaskSubmitTool())
+        registry.register(BgTaskListTool())
+        registry.register(BgTaskCancelTool())
+        registry.register(BgTaskInspectTool())
+    registry.register(MacOSNotesSearchTool())
+    registry.register(MacOSNotesCreateTool())
+    registry.register(MacOSCalendarListTool())
+    registry.register(MacOSCalendarCreateTool())
+    registry.register(MacOSRemindersListTool())
+    registry.register(MacOSRemindersCreateTool())
+    registry.register(MacOSBrowserTabsTool())
+    registry.register(MacOSMailSearchTool())
+    registry.register(MacOSMailDraftTool())
     return registry
 
 
 __all__ = [
     "AskUserTool",
     "BatchPathContextStore",
+    "BgTaskCancelTool",
+    "BgTaskInspectTool",
+    "BgTaskListTool",
+    "BgTaskSubmitTool",
     "CancelTaskTool",
     "ClipboardTool",
     "DeepSeekSearchProvider",
@@ -78,6 +113,15 @@ __all__ = [
     "MCPOAuthCoordinator",
     "MCPServerStatus",
     "MCPToolAdapter",
+    "MacOSBrowserTabsTool",
+    "MacOSCalendarCreateTool",
+    "MacOSCalendarListTool",
+    "MacOSMailDraftTool",
+    "MacOSMailSearchTool",
+    "MacOSNotesCreateTool",
+    "MacOSNotesSearchTool",
+    "MacOSRemindersCreateTool",
+    "MacOSRemindersListTool",
     "ScheduleTaskTool",
     "SearchProvider",
     "ShellTool",

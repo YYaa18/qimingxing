@@ -136,6 +136,7 @@ class SensesAgent:
         self._pending_key: Optional[tuple[str, str]] = None
         self._pending_since: float = 0.0
         self._latest_raw_window: Optional[ActiveWindowInfo] = None
+        self._screen_perm_requested: bool = False
 
     def _build_hello_payload(self) -> dict:
         perm = self.provider.check_permission()
@@ -184,15 +185,23 @@ class SensesAgent:
 
         perm = await asyncio.to_thread(self.provider.check_permission)
         if not perm.screen_capture:
-            logger.warning("Capture request %s denied by OS permission", req.request_id)
-            ref = ContextScreenRefPayload(
-                request_id=req.request_id,
-                turn_id=req.turn_id,
-                status="permission_denied",
-                error_message=perm.permission_hint or "未授予系统屏幕录制权限。",
-            )
-            await ws.send(make_envelope("senses", "context.screen_ref", ref, turn_id=req.turn_id).model_dump_json())
-            return
+            if not self._screen_perm_requested:
+                self._screen_perm_requested = True
+                requester = getattr(self.provider, "request_screen_permission", None)
+                if callable(requester):
+                    granted = await asyncio.to_thread(requester)
+                    if granted:
+                        perm = await asyncio.to_thread(self.provider.check_permission)
+            if not perm.screen_capture:
+                logger.warning("Capture request %s denied by OS permission", req.request_id)
+                ref = ContextScreenRefPayload(
+                    request_id=req.request_id,
+                    turn_id=req.turn_id,
+                    status="permission_denied",
+                    error_message=perm.permission_hint or "未授予系统屏幕录制权限。",
+                )
+                await ws.send(make_envelope("senses", "context.screen_ref", ref, turn_id=req.turn_id).model_dump_json())
+                return
 
         try:
             img_bytes, width, height = await asyncio.to_thread(

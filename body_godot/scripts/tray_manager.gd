@@ -124,10 +124,11 @@ func open_popover() -> void:
 
 
 func popup_at_cursor() -> void:
-	if _menu == null:
-		return
-	_menu.position = DisplayServer.mouse_get_position()
-	_menu.popup()
+	var pop := _ensure_popover()
+	if pop.visible:
+		pop.call("hide_popover")
+	else:
+		pop.call("open_at_cursor")
 
 
 func sync_toggles(roam_on: bool, earcons_on: bool, ambient_on: bool) -> void:

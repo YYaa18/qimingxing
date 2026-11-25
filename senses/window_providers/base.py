@@ -5,14 +5,29 @@ from dataclasses import dataclass
 from typing import Optional
 
 SELF_WINDOW_MARKERS = ("启明星", "Qimingxing")
+SELF_PROCESS_MARKERS = (
+    "启明星",
+    "qimingxing",
+    "godot",
+    "com.qimingxing.desktop",
+    "org.godotengine.godot",
+)
 
 
-def detect_self_window(window_title: str) -> bool:
-    """Identify Qimingxing's own UI tab/window for anti-selfie context filtering."""
-    if not window_title:
-        return False
-    lower = window_title.lower()
-    return any(marker.lower() in lower for marker in SELF_WINDOW_MARKERS)
+def detect_self_window(
+    window_title: str,
+    app_name: str = "",
+    process_name: str = "",
+) -> bool:
+    """Identify Qimingxing's own UI tab/window/process for anti-selfie context filtering."""
+    for candidate in (window_title, app_name, process_name):
+        if not candidate:
+            continue
+        lower = candidate.lower()
+        markers = SELF_WINDOW_MARKERS if candidate is window_title else SELF_PROCESS_MARKERS
+        if any(marker.lower() in lower for marker in markers):
+            return True
+    return False
 
 
 @dataclass(frozen=True)

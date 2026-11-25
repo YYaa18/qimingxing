@@ -79,12 +79,19 @@ class ClientCapabilities(ProtocolModel):
     lip_sync: bool = False
     pin_image: bool = False
     auto_hide: bool = False
+    mirror_turns: bool = False
+    native_approvals: bool = False
+    native_desktop: bool = False
 
 
 class SystemHelloPayload(ProtocolModel):
     client_name: str
     role: SourceRole
-    client_type: Optional[Literal["body_godot", "body_web", "senses"]] = None
+    client_type: Optional[
+        Literal["body_godot", "body_web", "body_macos", "body_windows", "senses"]
+    ] = None
+    platform: Optional[str] = None
+    app_version: Optional[str] = None
     capabilities: ClientCapabilities = Field(default_factory=ClientCapabilities)
 
     @field_validator("capabilities", mode="before")
@@ -98,6 +105,9 @@ class SystemHelloPayload(ProtocolModel):
                 "lip_sync": ("lip_sync" in flags) or has_audio,
                 "pin_image": "pin_image" in flags,
                 "auto_hide": "auto_hide" in flags,
+                "mirror_turns": "mirror_turns" in flags,
+                "native_approvals": "native_approvals" in flags,
+                "native_desktop": "native_desktop" in flags,
             }
         return value
 
@@ -256,6 +266,8 @@ class OutputTurnStartPayload(ProtocolModel):
     profile: str
     provider: str = ""
     model: str = ""
+    origin_client_id: Optional[str] = None
+    origin_client_type: Optional[str] = None
 
 
 class OutputTurnEndPayload(ProtocolModel):
@@ -390,6 +402,63 @@ class AvatarStatePayload(ProtocolModel):
 
 
 # ---------------------------------------------------------------------------
+# GA 1.0 payloads: task.*, ui.*, tool.approval_resolved
+# ---------------------------------------------------------------------------
+
+
+class TaskStatusPayload(ProtocolModel):
+    task_id: str
+    title: str = ""
+    status: str
+    progress_pct: int = 0
+    current_step: str = ""
+    active_count: int = 0
+    result_summary: str = ""
+    artifact_path: str = ""
+    error_message: str = ""
+
+
+class UICommandPayload(ProtocolModel):
+    command_id: str
+    target: Literal["avatar", "shell", "senses", "all"]
+    action: str
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+
+class UICommandResultPayload(ProtocolModel):
+    command_id: str
+    ok: bool
+    error: str = ""
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class UIStatePayload(ProtocolModel):
+    avatar_enabled: bool = False
+    avatar_scale: float = 1.0
+    roam: bool = True
+    earcons: bool = True
+    ambient: bool = False
+    docked: bool = False
+    active_profile: str = ""
+    privacy_mode: PrivacyMode = "meta_only"
+    shortcuts: SystemShortcutsSyncPayload = Field(default_factory=SystemShortcutsSyncPayload)
+    pending_approvals: List[ToolApprovalRequestPayload] = Field(default_factory=list)
+
+
+class UISetStatePayload(ProtocolModel):
+    origin: str = ""
+    patch: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolApprovalResolvedPayload(ProtocolModel):
+    approval_id: str
+    turn_id: str
+    approved: bool
+    answered_by: str = ""
+    answer_text: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Registry & Helpers
 # ---------------------------------------------------------------------------
 
@@ -429,7 +498,13 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "output.artifact_capsule": OutputArtifactCapsulePayload,
     "tool.approval_request": ToolApprovalRequestPayload,
     "tool.approval_response": ToolApprovalResponsePayload,
+    "tool.approval_resolved": ToolApprovalResolvedPayload,
     "avatar.state": AvatarStatePayload,
+    "task.status": TaskStatusPayload,
+    "ui.command": UICommandPayload,
+    "ui.command_result": UICommandResultPayload,
+    "ui.state": UIStatePayload,
+    "ui.set_state": UISetStatePayload,
 }
 
 

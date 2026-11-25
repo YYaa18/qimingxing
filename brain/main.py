@@ -34,7 +34,8 @@ from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from brain.memory.extractor import MemoryExtractor
 from brain.memory.retrieval import MemoryRetriever
 from brain.scheduler import TaskScheduler
-from brain.screen_router import ScreenUnderstandingRouter
+from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
+from brain.task_runner import BackgroundTaskRunner
 from brain.tools.desktop_io import CommandRunner, execute_desktop_action
 from brain.tools.mcp_client import MCPClientManager
 from brain.tools.mcp_oauth import MCPOAuthCoordinator
@@ -48,6 +49,25 @@ logger = logging.getLogger("qimingxing.main")
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def is_allowed_ws_origin(origin: str, server_port: int = 18790) -> bool:
+    """Allow empty Origin (native clients) or loopback Origin on allowed ports (defends against CSWSH)."""
+    cleaned = (origin or "").strip()
+    if not cleaned:
+        return True
+    from urllib.parse import urlparse
+
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost", "::1", "testserver"):
+        return False
+    if host == "testserver" and parsed.port is None:
+        return True
+    allowed_ports = {int(server_port), 18790}
+    return parsed.port in allowed_ports
 
 
 def create_app(
@@ -131,10 +151,24 @@ def create_app(
         on_notice=hub.broadcast_proactive_notice,
         on_soft_alert=hub.broadcast_soft_alert,
     )
+    task_runner = BackgroundTaskRunner(
+        backend,
+        router,
+        cfg,
+        hub.tool_registry,
+        on_task_status=hub.broadcast_task_status,
+        on_notice=hub.broadcast_proactive_notice,
+        on_artifact_capsule=hub.broadcast_artifact_capsule,
+        on_soft_alert=hub.broadcast_soft_alert,
+        on_request_approval=hub.request_background_approval,
+        on_ask_user=hub.request_background_clarification,
+    )
+    hub.task_runner = task_runner
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await backend.initialize()
+        await task_runner.initialize()
         await active_mcp.start_all(hub.tool_registry)
         await active_scheduler.start()
 
@@ -147,6 +181,7 @@ def create_app(
         try:
             yield
         finally:
+            await task_runner.shutdown()
             await active_scheduler.stop()
             await active_mcp.stop_all(hub.tool_registry)
             reaper_task.cancel()
@@ -169,6 +204,7 @@ def create_app(
     app.state.memory_extractor = extractor
     app.state.hub = hub
     app.state.scheduler = active_scheduler
+    app.state.task_runner = task_runner
     app.state.mcp_manager = active_mcp
     app.state.oauth_coordinator = active_oauth
 
@@ -568,6 +604,47 @@ def create_app(
         )
         return JSONResponse(res)
 
+    @app.get("/api/tasks")
+    async def list_background_tasks(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="Task access is restricted to localhost.")
+        status_filter = request.query_params.get("status") or None
+        limit = max(1, min(100, int(request.query_params.get("limit") or 20)))
+        tasks = await task_runner.list_tasks(status=status_filter, limit=limit)  # type: ignore[arg-type]
+        return JSONResponse(
+            {
+                "status": "ok",
+                "active_count": task_runner.active_count(),
+                "tasks": [
+                    {
+                        "task_id": t.task_id,
+                        "title": t.title,
+                        "status": t.status,
+                        "progress_pct": t.progress_pct,
+                        "current_step": t.current_step,
+                        "result_summary": t.result_summary,
+                        "artifact_path": t.artifact_path,
+                        "error_message": t.error_message,
+                        "created_at": t.created_at,
+                        "started_at": t.started_at,
+                        "finished_at": t.finished_at,
+                    }
+                    for t in tasks
+                ],
+            }
+        )
+
+    @app.post("/api/tasks/{task_id}/cancel")
+    async def cancel_background_task(task_id: str, request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="Task control is restricted to localhost.")
+        ok, msg = await task_runner.cancel(task_id)
+        if not ok and "未找到" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        return JSONResponse({"status": "ok" if ok else "noop", "ok": ok, "message": msg})
+
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(_REPO_ROOT / "body_web" / "index.html")
@@ -582,6 +659,11 @@ def create_app(
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
+        origin = websocket.headers.get("origin", "")
+        if not is_allowed_ws_origin(origin, server_port=cfg.server.port):
+            logger.warning("Rejected WebSocket connection with disallowed Origin: %r", origin)
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         conn = hub.register(websocket)
         logger.info("WebSocket connected: client=%s", conn.client_id)

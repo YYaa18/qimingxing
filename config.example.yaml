@@ -227,11 +227,26 @@ batch_context:
   max_paths: 200
   max_tree_depth: 3
 
-# Godot 4 桌面躯体联动偏好
+# Godot 4 桌面躯体联动偏好（可选插件）
 godot:
   auto_hide_on_capture: true
   earcons_enabled: true
   ambient_duck_db: -12.0
+
+# 原生壳 UI 共享状态（由 Brain 统一维护）
+ui:
+  avatar_enabled: false
+  avatar_scale: 1.0
+  roam: true
+  earcons: true
+  ambient: false
+
+# 后台异步长任务引擎（asyncio 轻量任务池）
+background_tasks:
+  enabled: true
+  max_concurrency: 2
+  max_steps: 12
+  timeout_sec: 300
 
 # 阶段七 (MVP 7.0) 服务商池与 5 槽位能力路由（可选；不配置时自动兼容下方 profiles/audio/ocr）
 # providers:

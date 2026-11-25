@@ -134,3 +134,72 @@ def test_artifact_store_save_burn_ttl_and_http_upload(tmp_path: Path) -> None:
         assert client.get("/").status_code == 200
         assert client.get("/app.js").status_code == 200
         assert client.get("/styles.css").status_code == 200
+
+
+def test_macos_quartz_frontmost_picker_skips_overlays_and_tracks_chrome() -> None:
+    from senses.window_providers.base import detect_self_window
+    from senses.window_providers.macos import _pick_frontmost_from_quartz_windows
+
+    fake_z_order = [
+        # Floating always-on-top Godot avatar (layer 3) must be skipped
+        {
+            "kCGWindowLayer": 3,
+            "kCGWindowAlpha": 1.0,
+            "kCGWindowOwnerName": "Godot",
+            "kCGWindowOwnerPID": 9001,
+            "kCGWindowBounds": {"Width": 420, "Height": 500},
+        },
+        # System menu/dock/window server overlays
+        {
+            "kCGWindowLayer": 0,
+            "kCGWindowAlpha": 1.0,
+            "kCGWindowOwnerName": "WindowManager",
+            "kCGWindowOwnerPID": 111,
+            "kCGWindowBounds": {"Width": 1920, "Height": 1080},
+        },
+        # Invisible or tiny helper windows (< 50px)
+        {
+            "kCGWindowLayer": 0,
+            "kCGWindowAlpha": 0.0,
+            "kCGWindowOwnerName": "InvisibleApp",
+            "kCGWindowOwnerPID": 222,
+            "kCGWindowBounds": {"Width": 800, "Height": 600},
+        },
+        {
+            "kCGWindowLayer": 0,
+            "kCGWindowAlpha": 1.0,
+            "kCGWindowOwnerName": "TinyWidget",
+            "kCGWindowOwnerPID": 333,
+            "kCGWindowBounds": {"Width": 30, "Height": 30},
+        },
+        # Self native desktop window clicked by user (layer 0 QuickEntry / Settings)
+        {
+            "kCGWindowLayer": 0,
+            "kCGWindowAlpha": 1.0,
+            "kCGWindowOwnerName": "Godot",
+            "kCGWindowOwnerPID": 9001,
+            "kCGWindowBounds": {"Width": 620, "Height": 160},
+        },
+        # Real target browser window directly underneath
+        {
+            "kCGWindowLayer": 0,
+            "kCGWindowAlpha": 1.0,
+            "kCGWindowOwnerName": "Google Chrome",
+            "kCGWindowOwnerPID": 21619,
+            "kCGWindowBounds": {"Width": 1920, "Height": 960},
+        },
+        # Background IDE window below Chrome
+        {
+            "kCGWindowLayer": 0,
+            "kCGWindowAlpha": 1.0,
+            "kCGWindowOwnerName": "Antigravity",
+            "kCGWindowOwnerPID": 56980,
+            "kCGWindowBounds": {"Width": 1920, "Height": 960},
+        },
+    ]
+
+    picked = _pick_frontmost_from_quartz_windows(fake_z_order)
+    assert picked == ("Google Chrome", 21619)
+    assert detect_self_window("", app_name="Godot", process_name="org.godotengine.godot") is True
+    assert detect_self_window("", app_name="Qimingxing", process_name="com.qimingxing.desktop") is True
+    assert detect_self_window("GitHub - Chrome", app_name="Google Chrome", process_name="com.google.Chrome") is False

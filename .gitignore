@@ -12,3 +12,6 @@ data/*.db*
 data/mcp_oauth/
 .run/
 body_godot/.godot/
+dist/
+shell_macos/.build/
+data/artifacts/

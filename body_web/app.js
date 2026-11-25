@@ -50,6 +50,8 @@
   const clearChatBtn = document.getElementById("clearChatBtn");
   const cardsList = document.getElementById("cardsList");
   const clearCardsBtn = document.getElementById("clearCardsBtn");
+  const bgTasksList = document.getElementById("bgTasksList");
+  const refreshTasksBtn = document.getElementById("refreshTasksBtn");
 
   let ws = null;
   let reconnectAttempt = 0;
@@ -59,7 +61,68 @@
   let isGenerating = false;
   const bubbleByTurn = new Map();
   const pendingApprovalCleanups = new Map();
+  const bgTasksById = new Map();
   let pendingAttachments = [];
+
+  function renderBgTasks() {
+    if (!bgTasksList) return;
+    bgTasksList.innerHTML = "";
+    const items = Array.from(bgTasksById.values());
+    if (!items.length) {
+      bgTasksList.innerHTML = '<div class="empty-hint">暂无后台长任务。</div>';
+      return;
+    }
+    for (const t of items.slice(0, 10)) {
+      const row = document.createElement("div");
+      row.className = "bg-task-item";
+
+      const head = document.createElement("div");
+      head.className = "bg-task-head";
+      const title = document.createElement("span");
+      title.textContent = `${t.title || t.task_id}`;
+      const badge = document.createElement("span");
+      badge.textContent = `${t.status || "queued"} (${t.progress_pct ?? 0}%)`;
+      head.appendChild(title);
+      head.appendChild(badge);
+
+      const meta = document.createElement("div");
+      meta.className = "bg-task-meta";
+      meta.textContent = t.current_step || t.error_message || t.result_summary || "";
+
+      row.appendChild(head);
+      row.appendChild(meta);
+
+      if (t.status === "queued" || t.status === "running" || t.status === "waiting_approval") {
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "btn-ghost";
+        cancelBtn.textContent = "取消任务";
+        cancelBtn.addEventListener("click", async () => {
+          try {
+            await fetch(`/api/tasks/${encodeURIComponent(t.task_id)}/cancel`, { method: "POST" });
+            await fetchBgTasks();
+          } catch (_ignored) {}
+        });
+        row.appendChild(cancelBtn);
+      }
+      bgTasksList.appendChild(row);
+    }
+  }
+
+  async function fetchBgTasks() {
+    try {
+      const resp = await fetch("/api/tasks");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (Array.isArray(data.tasks)) {
+        bgTasksById.clear();
+        for (const t of data.tasks) {
+          if (t && t.task_id) bgTasksById.set(t.task_id, t);
+        }
+        renderBgTasks();
+      }
+    } catch (_ignored) {}
+  }
 
   function renderAttachmentBar() {
     if (!attachmentBar) return;
@@ -246,8 +309,9 @@
   }
 
   function renderApprovalCard(payload, turnId) {
-    clearEmptyHint(messagesEl);
     const approvalId = payload.approval_id;
+    if (approvalId && pendingApprovalCleanups.has(approvalId)) return;
+    clearEmptyHint(messagesEl);
     const timeoutSec = Math.max(5, Number(payload.timeout_sec || 60));
     let remaining = timeoutSec;
 
@@ -715,10 +779,34 @@
 
     if (type === "system.welcome") {
       handleWelcome(payload);
+      fetchBgTasks();
       return;
     }
     if (type === "system.privacy_state") {
       updatePrivacyUI(payload);
+      return;
+    }
+    if (type === "ui.state") {
+      if (Array.isArray(payload.pending_approvals)) {
+        for (const req of payload.pending_approvals) {
+          renderApprovalCard(req, req.turn_id || null);
+        }
+      }
+      return;
+    }
+    if (type === "task.status") {
+      if (payload.task_id) {
+        bgTasksById.set(payload.task_id, payload);
+        renderBgTasks();
+      }
+      return;
+    }
+    if (type === "tool.approval_resolved") {
+      const cleanup = pendingApprovalCleanups.get(payload.approval_id);
+      if (cleanup) {
+        pendingApprovalCleanups.delete(payload.approval_id);
+        cleanup(payload.approved ? "✅ 已由其他端允许" : "⛔ 已拒绝/结束");
+      }
       return;
     }
     if (type === "system.pong") {
@@ -790,6 +878,10 @@
     }
     if (type === "output.proactive_notice") {
       showProactiveNotice(payload);
+      return;
+    }
+    if (type === "output.artifact_capsule") {
+      appendUserBubble(`📦 产物报告：${payload.title || "artifact"} (${payload.path || ""})`);
       return;
     }
 
@@ -967,6 +1059,12 @@
   clearCardsBtn.addEventListener("click", () => {
     cardsList.innerHTML = '<div class="empty-hint">已清空辅助卡片。</div>';
   });
+
+  if (refreshTasksBtn) {
+    refreshTasksBtn.addEventListener("click", () => {
+      fetchBgTasks();
+    });
+  }
 
   wsUrlInput.addEventListener("change", () => {
     reconnectAttempt = 0;
