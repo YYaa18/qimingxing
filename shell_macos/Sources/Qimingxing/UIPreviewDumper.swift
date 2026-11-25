@@ -171,7 +171,7 @@ enum UIPreviewDumper {
             onOpenWorkspace: {},
             onQuit: {}
         )
-        render(popover, size: CGSize(width: 280, height: 440), to: outputDir.appendingPathComponent("menubar_popover.png"))
+        render(popover, size: CGSize(width: 280, height: 438), to: outputDir.appendingPathComponent("menubar_popover.png"))
 
         // 4. Settings Window (General & Routing)
         let store = SettingsViewStore()
@@ -188,6 +188,16 @@ enum UIPreviewDumper {
             onClose: {}
         )
         render(settingsGen, size: CGSize(width: 860, height: 580), to: outputDir.appendingPathComponent("settings_general.png"))
+
+        store.selectedSection = .voicePrivacy
+        let settingsVoice = SettingsRootView(
+            store: store,
+            brainClient: client,
+            supervisor: supervisor,
+            desktopActions: desktop,
+            onClose: {}
+        )
+        render(settingsVoice, size: CGSize(width: 860, height: 580), to: outputDir.appendingPathComponent("settings_voice.png"))
 
         store.selectedSection = .routing
         let settingsRouting = SettingsRootView(

@@ -253,7 +253,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
     func resize(toContentHeight height: CGFloat) {
         // Always cache the chat height, even while the panel is hidden.
-        let chatHeight = min(Self.answeringHeight, max(112, height))
+        let chatHeight = max(112, height)
         lastChatHeight = chatHeight
         guard let panel, panel.isVisible else { return }
         let target = inputState.isWorkspaceWingOpen
@@ -262,7 +262,13 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         let delta = abs(panel.frame.height - target)
         guard delta > 3 else { return }
         var frame = panel.frame
-        let topEdge = frame.maxY
+        var topEdge = frame.maxY
+        if let screen = panel.screen ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            let minTop = visible.minY + 8 + target
+            let maxTop = visible.maxY - 16
+            topEdge = min(max(topEdge, minTop), maxTop)
+        }
         frame.size = NSSize(width: panelWidth, height: target)
         frame.origin.y = topEdge - target
 
@@ -341,6 +347,7 @@ struct QuickEntryRootView: View {
     var onDesiredHeightChange: (CGFloat) -> Void = { _ in }
 
     @AppStorage("qmx.answerFontSize") private var answerFontSize: Double = 16
+    @AppStorage("qmx.answerMaxLines") private var answerMaxLines: Int = 30
     @State private var appeared = QMXTheme.isHeadlessDump
     @State private var answerContentHeight: CGFloat = 0
     @State private var finalAnswerHeight: CGFloat = 0
@@ -513,7 +520,7 @@ struct QuickEntryRootView: View {
                 }
                 Spacer(minLength: 0)
             } else if let turn = latestTurn, !turn.answer.isEmpty {
-                answerStream(turn)
+                answerView(turn)
                 workspaceLink
             } else {
                 Text("…")
@@ -527,17 +534,27 @@ struct QuickEntryRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// Full answer, never truncated. Scrolling is owned by a child view so the
-    /// per-character reveal does not re-evaluate the whole panel.
-    private func answerStream(_ turn: LiveTurn) -> some View {
-        AnswerStreamView(
-            text: turn.answer,
-            fontSize: CGFloat(answerFontSize),
-            turnID: turn.id,
-            width: Self.answerWidth,
-            isStreaming: turn.isStreaming,
-            onFinalHeight: { finalAnswerHeight = $0 }
-        )
+    /// Short answers render as a plain stack so no ScrollView (and therefore
+    /// no scroll indicator) can appear. Long answers switch to a fixed-height
+    /// scroll view.
+    @ViewBuilder
+    private func answerView(_ turn: LiveTurn) -> some View {
+        if answerIsScrollable {
+            AnswerScrollView(
+                text: turn.answer,
+                fontSize: CGFloat(answerFontSize),
+                turnID: turn.id,
+                width: Self.answerWidth,
+                isStreaming: turn.isStreaming,
+                onFinalHeight: { finalAnswerHeight = $0 }
+            )
+        } else {
+            AnswerPlainView(
+                text: turn.answer,
+                fontSize: CGFloat(answerFontSize),
+                turnID: turn.id
+            )
+        }
     }
 
     private var workspaceLink: some View {
@@ -658,10 +675,26 @@ struct QuickEntryRootView: View {
     /// Chrome above/below the answer stage: 68 input + 2 dividers + 36 footer.
     private static let panelChrome: CGFloat = 106
     private static let minExpandedHeight: CGFloat = 236
-    private static let maxExpandedHeight: CGFloat = 520
+    private var answerLineHeight: CGFloat {
+        ceil(CGFloat(answerFontSize) * 1.4) + 3
+    }
+
+    /// Content height allowed before the panel switches to a fixed height.
+    /// The screen height is a hard upper bound so a tall setting can never
+    /// push the window off the display.
+    private var maxLinesContentHeight: CGFloat {
+        let visibleHeight = NSScreen.main?.visibleFrame.height ?? 960
+        let prompt: CGFloat = latestTurn?.prompt.isEmpty == false ? 28 : 0
+        let screenCap = max(160, visibleHeight - 24 - Self.panelChrome - prompt - 26)
+        return min(CGFloat(answerMaxLines) * answerLineHeight, screenCap)
+    }
 
     /// Pure chat-column height. The wing floor is applied by the window
     /// controller and never written back into this value.
+    private var answerIsScrollable: Bool {
+        max(answerContentHeight, finalAnswerHeight) > maxLinesContentHeight + 0.5
+    }
+
     private var chatHeight: CGFloat {
         if !inputState.isExpanded {
             return 112
@@ -674,8 +707,9 @@ struct QuickEntryRootView: View {
             return Self.minExpandedHeight
         }
         let promptBlock: CGFloat = latestTurn?.prompt.isEmpty == false ? 28 : 0
-        let stage = 40 + promptBlock + measured + 26
-        return min(Self.maxExpandedHeight, max(200, Self.panelChrome + stage))
+        let capped = min(measured, maxLinesContentHeight)
+        let stage = 40 + promptBlock + capped + 26 + 4
+        return max(200, Self.panelChrome + stage)
     }
 
     private var latestTurn: LiveTurn? {
@@ -764,6 +798,21 @@ private struct ChatAnswerHeightKey: PreferenceKey {
     }
 }
 
+private struct AnswerPlainView: View {
+    let text: String
+    let fontSize: CGFloat
+    let turnID: String
+
+    var body: some View {
+        TypewriterText(
+            text: text,
+            fontSize: fontSize,
+            turnID: turnID
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
 private struct StreamHeightBox {
     var value: CGFloat = 0
 }
@@ -775,7 +824,7 @@ private struct StreamFinalHeightKey: PreferenceKey {
     }
 }
 
-private struct AnswerStreamView: View {
+private struct AnswerScrollView: View {
     let text: String
     let fontSize: CGFloat
     let turnID: String
@@ -814,7 +863,7 @@ private struct AnswerStreamView: View {
                     }
                 )
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.visible)
             .onPreferenceChange(StreamFinalHeightKey.self) { height in
                 heightBox.value = height
                 if finished && !didReportFinal {

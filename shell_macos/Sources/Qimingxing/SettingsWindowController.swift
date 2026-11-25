@@ -193,6 +193,7 @@ final class SettingsViewStore: ObservableObject {
 
 struct SettingsRootView: View {
     @AppStorage("qmx.answerFontSize") private var answerFontSize: Double = 16
+    @AppStorage("qmx.answerMaxLines") private var answerMaxLines: Int = 30
     @ObservedObject var store: SettingsViewStore
     @ObservedObject var brainClient: BrainClient
     let supervisor: ProcessSupervisor
@@ -401,6 +402,27 @@ struct SettingsRootView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 6)
                     .help("回答在 Quick Entry 中的显示字号")
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("回答超过 \(answerMaxLines) 行后固定高度")
+                            .font(.system(size: 13))
+                        Spacer()
+                        Text("滚动查看")
+                            .font(.system(size: 11))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(answerMaxLines) },
+                            set: { answerMaxLines = Int($0.rounded()) }
+                        ),
+                        in: 5...80,
+                        step: 1
+                    )
+                }
+                .padding(.vertical, 4)
+                .help("不超过该行数时完整展示；超过后固定高度并允许滚动。")
             }
 
             Section("系统权限") {
@@ -556,6 +578,12 @@ struct SettingsRootView: View {
             Section("语音") {
                 Toggle("启用语音输入与播报", isOn: $store.audioEnabled)
                     .frame(minHeight: 40)
+                Toggle("朗读回答", isOn: Binding(
+                    get: { brainClient.ttsEnabled },
+                    set: { brainClient.setTTSEnabled($0) }
+                ))
+                .frame(minHeight: 40)
+                .help("关闭后会停止当前播报，并静音后续回答；语音输入不受影响。")
             }
         }
     }

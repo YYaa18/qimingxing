@@ -95,7 +95,7 @@ final class MenuBarController: NSObject {
 
     private func updatePopoverSize() {
         let taskRows = min(2, brainClient.backgroundTasks.filter(\.isActive).count)
-        let height: CGFloat = 372 + (taskRows == 0 ? 0 : 22 + CGFloat(taskRows) * 44)
+        let height: CGFloat = 354 + (taskRows == 0 ? 0 : 22 + CGFloat(taskRows) * 44)
         popover.contentSize = NSSize(width: 280, height: height)
     }
 
@@ -166,10 +166,6 @@ struct MenuBarPopoverView: View {
             VisualEffectBlur(material: .popover, blendingMode: .behindWindow)
 
             VStack(alignment: .leading, spacing: 6) {
-                header
-
-                Divider().opacity(0.5)
-
                 MenuActionRow(
                     icon: "bubble.left.and.bubble.right",
                     title: "呼出对话",
@@ -241,6 +237,14 @@ struct MenuBarPopoverView: View {
                     )
                 )
                 ToggleRow(
+                    icon: "speaker.wave.2.fill",
+                    title: "朗读回答",
+                    isOn: Binding(
+                        get: { brainClient.ttsEnabled },
+                        set: { brainClient.setTTSEnabled($0) }
+                    )
+                )
+                ToggleRow(
                     icon: "music.note",
                     title: "背景氛围音",
                     isOn: Binding(
@@ -272,49 +276,6 @@ struct MenuBarPopoverView: View {
         brainClient.backgroundTasks.filter(\.isActive)
     }
 
-    private var header: some View {
-        HStack(spacing: 9) {
-            MorningStarMark(size: 18, color: QMXTheme.textPrimary)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("启明星")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(QMXTheme.textPrimary)
-                HStack(spacing: 5) {
-                    StatusDot(color: statusColor, size: 6)
-                    Text(statusLabel)
-                        .font(.system(size: 12))
-                        .foregroundStyle(QMXTheme.textSecondary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 8)
-        .padding(.top, 4)
-        .padding(.bottom, 2)
-        .help("启明星 v\(supervisor.appVersion)")
-    }
-
-    private var statusColor: Color {
-        switch brainClient.phase {
-        case .connected: return QMXTheme.success
-        case .starting: return QMXTheme.warning
-        case .offline, .error: return QMXTheme.danger
-        }
-    }
-
-    private var statusLabel: String {
-        switch brainClient.phase {
-        case .connected:
-            let model = brainClient.profiles.first(where: { $0.name == brainClient.activeProfile })?.label ?? brainClient.activeProfile
-            return model.isEmpty ? "运行中" : "\(model) 运行中"
-        case .starting: return "正在启动"
-        case .offline: return "已离线，重连中"
-        case .error: return "运行异常"
-        }
-    }
 
     private func privacyShortLabel(_ mode: String) -> String {
         switch mode {

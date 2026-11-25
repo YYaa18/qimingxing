@@ -140,6 +140,8 @@ final class DesktopActions: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDe
     }
 
     private func speak(_ text: String) {
+        let enabled = (UserDefaults.standard.object(forKey: "qmx.ttsEnabled") as? Bool) ?? true
+        guard enabled else { return }
         speechSynthesizer.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: String(text.prefix(160)))
         utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")

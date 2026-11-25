@@ -91,7 +91,7 @@ def test_settings_api_masks_keys_saves_0600_and_hot_reloads(tmp_path: Path) -> N
                     "privacy": {"default_mode": "full_on_demand"},
                     "audio": {
                         "enabled": True,
-                        "tts": {"voice": "tide"},
+                        "tts": {"voice": "tide", "enabled": False},
                         "ptt": {"hotkey": "option+space"},
                     },
                     "batch_context": {"inbox_dir": "~/Desktop/inbox_custom"},
@@ -105,6 +105,7 @@ def test_settings_api_masks_keys_saves_0600_and_hot_reloads(tmp_path: Path) -> N
             assert res_body["settings"]["default_profile"] == "mock_local"
             assert res_body["settings"]["shared_deepseek_key"]["masked"] == "sk-u****9999"
             assert res_body["settings"]["audio"]["tts"]["voice"] == "tide"
+            assert res_body["settings"]["audio"]["tts"]["enabled"] is False
             assert res_body["settings"]["audio"]["ptt"]["hotkey"] == "option+space"
             assert res_body["settings"]["privacy"]["default_mode"] == "full_on_demand"
             assert res_body["settings"]["godot"]["auto_hide_on_capture"] is False

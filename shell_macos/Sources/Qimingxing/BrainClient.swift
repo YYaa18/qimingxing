@@ -19,6 +19,7 @@ final class BrainClient: ObservableObject {
     @Published var messages: [ChatEntry] = []
     @Published var isGenerating: Bool = false
     @Published var emotion: String = "neutral"
+    @Published var ttsEnabled: Bool = (UserDefaults.standard.object(forKey: "qmx.ttsEnabled") as? Bool) ?? true
     @Published var currentTurnId: String?
     @Published var toolStatusText: String = ""
     @Published var errorBannerText: String = ""
@@ -37,6 +38,7 @@ final class BrainClient: ObservableObject {
     private let appVersion: String
     private let desktopActions: DesktopActions
     private let audioPlayer: AudioStreamPlayer
+    private var audioStreamActive = false
 
     private var webSocketTask: URLSessionWebSocketTask?
     private var reconnectAttempt = 0
@@ -223,6 +225,7 @@ final class BrainClient: ObservableObject {
     }
 
     func cancelActiveTurn(reason: String = "user_cancelled") {
+        audioStreamActive = false
         audioPlayer.stop()
         let tid = currentTurnId ?? ""
         sendEnvelope(type: "input.cancel", payload: ["reason": reason], turnId: tid.isEmpty ? nil : tid)
@@ -237,6 +240,18 @@ final class BrainClient: ObservableObject {
         messages.removeAll()
         artifactCapsules.removeAll()
         sendEnvelope(type: "input.action", payload: ["action": "clear_history"])
+    }
+
+    func setTTSEnabled(_ enabled: Bool) {
+        ttsEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "qmx.ttsEnabled")
+        if !enabled {
+            audioStreamActive = false
+            audioPlayer.stop()
+        }
+        Task {
+            _ = await saveSettings(["audio": ["tts": ["enabled": enabled]]])
+        }
     }
 
     func setPrivacyMode(_ mode: String) {
@@ -441,17 +456,22 @@ final class BrainClient: ObservableObject {
             }
 
         case "audio.output_start":
+            guard ttsEnabled else { break }
+            audioStreamActive = true
             let sr = (payload["sample_rate"] as? Double) ?? Double((payload["sample_rate"] as? Int) ?? 24000)
             let ch = AVAudioChannelCount((payload["channels"] as? Int) ?? 1)
             audioPlayer.startStream(sampleRate: sr, channels: ch)
 
         case "audio.output_chunk":
+            guard ttsEnabled && audioStreamActive else { break }
             if let b64 = payload["data_b64"] as? String,
                let pcm = Data(base64Encoded: b64) {
                 audioPlayer.enqueuePCM16LE(pcm)
             }
 
         case "audio.output_end":
+            audioStreamActive = false
+            guard ttsEnabled else { break }
             let reason = (payload["finish_reason"] as? String) ?? "completed"
             if reason == "cancelled" {
                 audioPlayer.stop()

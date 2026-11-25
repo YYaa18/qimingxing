@@ -2211,7 +2211,9 @@ class Hub:
             trace_steps: List[ToolTraceStep] = []
 
             tts_targets = (
-                self._get_tts_target_conns(conn) if self.config.audio.enabled else []
+                self._get_tts_target_conns(conn)
+                if self.config.audio.enabled and self.config.audio.tts.enabled
+                else []
             )
             chunker: Optional[SentenceChunker] = (
                 SentenceChunker() if tts_targets else None

@@ -341,6 +341,7 @@ class AudioASRConfig:
 
 @dataclass
 class AudioTTSConfig:
+    enabled: bool = True
     provider: str = "deepseek"
     base_url: str = "https://api.deepseek.com/v1"
     api_key: str = ""
@@ -905,6 +906,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
             timeout_sec=float(asr_raw.get("timeout_sec", 15.0)),
         ),
         tts=AudioTTSConfig(
+            enabled=bool(tts_raw.get("enabled", True)),
             provider=str(tts_raw.get("provider", "deepseek")),
             base_url=str(tts_raw.get("base_url", "https://api.deepseek.com/v1") or "").rstrip("/"),
             api_key=tts_key,
@@ -1128,6 +1130,7 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
                 "key_masked": mask_secret(cfg.audio.asr.api_key),
             },
             "tts": {
+                "enabled": cfg.audio.tts.enabled,
                 "provider": cfg.audio.tts.provider,
                 "base_url": cfg.audio.tts.base_url,
                 "model": cfg.audio.tts.model,
