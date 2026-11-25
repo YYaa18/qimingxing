@@ -1,29 +1,38 @@
 import AppKit
+import Luminare
 import ServiceManagement
 import SwiftUI
 
-enum SettingsSection: String, CaseIterable, Identifiable {
+enum SettingsSection: String, LuminareTabItem, CaseIterable, Identifiable, Hashable {
     case general = "通用与外观"
     case routing = "模型与路由"
     case voicePrivacy = "语音与隐私"
     case shortcuts = "快捷键"
     case mcp = "MCP 服务"
 
-    var id: String { rawValue }
-    var icon: String {
+    var id: Self { self }
+    var title: String { rawValue }
+
+    var icon: some View {
+        Image(systemName: systemIconName)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(QMXTheme.accent)
+    }
+
+    private var systemIconName: String {
         switch self {
-        case .general: return "gearshape"
-        case .routing: return "cpu"
+        case .general: return "gearshape.fill"
+        case .routing: return "cpu.fill"
         case .voicePrivacy: return "waveform.and.mic"
         case .shortcuts: return "command"
-        case .mcp: return "puzzlepiece.extension"
+        case .mcp: return "puzzlepiece.extension.fill"
         }
     }
 }
 
 @MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate {
-    private var window: NSWindow?
+    private var window: LuminareWindow?
     private let brainClient: BrainClient
     private let supervisor: ProcessSupervisor
     private let desktopActions: DesktopActions
@@ -43,7 +52,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         ensureWindow()
         Task { await store.reload(brainClient: brainClient) }
         NSApp.activate(ignoringOtherApps: true)
-        window?.center()
         window?.makeKeyAndOrderFront(nil)
     }
 
@@ -60,18 +68,19 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private func ensureWindow() {
         if window != nil { return }
-        let root = SettingsRootView(
-            store: store,
-            brainClient: brainClient,
-            supervisor: supervisor,
-            desktopActions: desktopActions
-        )
-        let hosting = NSHostingController(rootView: root)
-        let win = NSWindow(contentViewController: hosting)
+        let win = LuminareWindow(titleBarButtonConfiguration: .default) {
+            LuminareView {
+                SettingsRootView(
+                    store: self.store,
+                    brainClient: self.brainClient,
+                    supervisor: self.supervisor,
+                    desktopActions: self.desktopActions
+                )
+            }
+            .environment(\.luminareTintColor, QMXTheme.accent)
+            .environment(\.luminareTitleBarHeight, 44)
+        }
         win.title = "启明星设置中心"
-        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        win.setContentSize(NSSize(width: 820, height: 580))
-        win.minSize = NSSize(width: 720, height: 500)
         win.delegate = self
         self.window = win
     }
@@ -86,6 +95,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 final class SettingsViewStore: ObservableObject {
     @Published var selectedSection: SettingsSection = .general
     @Published var statusMessage: String = ""
+    @Published var isSaving: Bool = false
 
     @Published var avatarEnabled: Bool = false
     @Published var earconsEnabled: Bool = true
@@ -179,19 +189,45 @@ private struct SettingsRootView: View {
     let desktopActions: DesktopActions
 
     var body: some View {
-        HStack(spacing: 0) {
-            List(SettingsSection.allCases, selection: $store.selectedSection) { sec in
-                Label(sec.rawValue, systemImage: sec.icon)
-                    .tag(sec)
-            }
-            .listStyle(.sidebar)
-            .frame(width: 190)
-
-            Divider()
-
+        LuminareDividedStack {
+            // Left Luminare Sidebar
             VStack(spacing: 0) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(QMXTheme.accent)
+                    Text("启明星")
+                        .font(.system(size: 14, weight: .semibold))
+                    Spacer()
+                    Text("v\(supervisor.appVersion)")
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 38)
+                .padding(.bottom, 10)
+
+                LuminareSidebar {
+                    LuminareSidebarSection(
+                        "核心设置",
+                        selection: $store.selectedSection,
+                        items: [.general, .routing, .voicePrivacy]
+                    )
+                    LuminareSidebarSection(
+                        "效率与扩展",
+                        selection: $store.selectedSection,
+                        items: [.shortcuts, .mcp]
+                    )
+                }
+            }
+            .frame(width: 215)
+
+            // Right Luminare Pane
+            LuminarePane {
+                VStack(spacing: 0) {
+                    LuminareForm {
                         switch store.selectedSection {
                         case .general:
                             generalPane
@@ -205,105 +241,135 @@ private struct SettingsRootView: View {
                             mcpPane
                         }
                     }
-                    .padding(20)
-                }
+                    .luminareFormLayout(.stacked)
 
-                Divider()
-                HStack {
-                    Text(store.statusMessage)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Button("保存设置") {
-                        Task { await saveAll() }
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        if !store.statusMessage.isEmpty {
+                            Label(store.statusMessage, systemImage: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(QMXTheme.accent)
+                        } else {
+                            Text("配置以 Brain 为唯一状态源（0600 安全落盘）")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            Task { await saveAll() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if store.isSaving {
+                                    ProgressView().scaleEffect(0.6)
+                                }
+                                Text(store.isSaving ? "保存中…" : "保存设置")
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.luminare(tinted: true))
+                        .disabled(store.isSaving)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+            } header: {
+                HStack(spacing: 8) {
+                    store.selectedSection.icon
+                    Text(store.selectedSection.title)
+                        .font(.system(size: 14, weight: .semibold))
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(brainClient.phase == .connected ? QMXTheme.success : QMXTheme.warning)
+                            .frame(width: 7, height: 7)
+                        Text(brainClient.phase == .connected ? "Brain 已连接" : "离线重连中")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
+            .frame(width: 615)
         }
+        .frame(height: 560)
     }
 
+    // MARK: - Section Panes
+
     private var generalPane: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("通用与外观").font(.title2.bold())
-            GroupBox("运行与自启") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Toggle("开机自动启动启明星", isOn: $store.launchAtLogin)
-                        .onChange(of: store.launchAtLogin) { enabled in
-                            if #available(macOS 13.0, *), Bundle.main.bundleURL.pathExtension == "app" {
-                                if enabled {
-                                    try? SMAppService.mainApp.register()
-                                } else {
-                                    try? SMAppService.mainApp.unregister()
-                                }
+        Group {
+            LuminareSection("运行与外观", "关闭桌面虚拟形象时，由 Swift 原生壳独立完成对话、审批、语音与通知。") {
+                LuminareToggle("开机自动启动启明星", isOn: $store.launchAtLogin)
+                    .onChange(of: store.launchAtLogin) { enabled in
+                        if #available(macOS 13.0, *), Bundle.main.bundleURL.pathExtension == "app" {
+                            if enabled {
+                                try? SMAppService.mainApp.register()
+                            } else {
+                                try? SMAppService.mainApp.unregister()
                             }
                         }
-                    Toggle("启用提示音效 (Earcons)", isOn: $store.earconsEnabled)
-                    Toggle("启用可选桌面虚拟形象 (Godot 插件，默认关闭)", isOn: $store.avatarEnabled)
-                    Text("提示：关闭虚拟形象时由原生 macOS 壳独立完成全部对话、审批、语音与通知。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(8)
+                    }
+
+                LuminareToggle("启用提示音效 (Earcons)", isOn: $store.earconsEnabled)
+                LuminareToggle("启用可选桌面虚拟形象 (Godot 插件)", isOn: $store.avatarEnabled)
             }
 
-            GroupBox("macOS 隐私与系统权限 (TCC 归属 Qimingxing.app)") {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("屏幕录制 / 辅助功能 / 自动化")
-                        Spacer()
-                        Button("打开隐私设置") {
-                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }
-                        Button("打开日志目录") {
-                            desktopActions.openLogsDirectory()
-                        }
-                    }
-                    if !brainClient.permissionHint.isEmpty {
-                        Text(brainClient.permissionHint)
-                            .font(.caption)
-                            .foregroundColor(.orange)
+            LuminareSection("macOS 隐私与系统权限 (TCC)", "屏幕录制、麦克风与自动化权限统一归属 Qimingxing.app。") {
+                LuminareButton("系统隐私设置", "打开权限面板") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
+                        NSWorkspace.shared.open(url)
                     }
                 }
-                .padding(8)
+                LuminareButton("运行日志", "在访达中打开") {
+                    desktopActions.openLogsDirectory()
+                }
+                if !brainClient.permissionHint.isEmpty {
+                    LuminareCompose("权限提示") {
+                        Text(brainClient.permissionHint)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
             }
         }
     }
 
     private var routingPane: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("模型与 5 槽位路由").font(.title2.bold())
-            GroupBox("能力槽位映射") {
-                VStack(spacing: 10) {
-                    slotRow("主对话 (Chat)", slot: $store.chatSlot, showVoice: false)
-                    slotRow("视觉理解 (Vision/OCR)", slot: $store.visionSlot, showVoice: false)
-                    slotRow("后台快模型 (Fast/Utility)", slot: $store.fastSlot, showVoice: false)
-                    slotRow("语音识别 (ASR)", slot: $store.asrSlot, showVoice: false)
-                    slotRow("语音合成 (TTS)", slot: $store.ttsSlot, showVoice: true)
-                }
-                .padding(8)
+        Group {
+            LuminareSection("5 槽位能力路由", "可为对话、看图 OCR、后台快任务、ASR 与 TTS 分别指定最适合的模型。") {
+                slotRow("主对话 (Chat)", slot: $store.chatSlot, showVoice: false)
+                slotRow("视觉理解 (Vision/OCR)", slot: $store.visionSlot, showVoice: false)
+                slotRow("后台与快模型 (Fast)", slot: $store.fastSlot, showVoice: false)
+                slotRow("语音识别 (ASR)", slot: $store.asrSlot, showVoice: false)
+                slotRow("语音合成 (TTS)", slot: $store.ttsSlot, showVoice: true)
             }
 
-            GroupBox("服务商密钥池（仅保存脱敏占位保护，明文永不落盘壳本地）") {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach($store.providers) { $prov in
+            LuminareSection("服务商密钥池", "仅显示脱敏占位，未修改密钥时保存不会覆盖原有密钥。") {
+                ForEach($store.providers) { $prov in
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 8) {
-                            Text(prov.label)
-                                .frame(width: 90, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(prov.label)
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text(prov.protocolName)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(width: 96, alignment: .leading)
+
                             TextField("Base URL", text: $prov.baseURL)
                                 .textFieldStyle(.roundedBorder)
+
                             if prov.authRequired {
                                 SecureField(
-                                    prov.hasKey ? "已配置 (\(prov.keyMasked))" : "输入新 API Key",
+                                    prov.hasKey ? "已配置 (\(prov.keyMasked))" : "输入 API Key",
                                     text: $prov.draftApiKey
                                 )
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 190)
+                                .frame(width: 175)
                             }
+
                             Button("测连通") {
                                 Task {
                                     let (_, msg) = await brainClient.testProvider([
@@ -315,107 +381,110 @@ private struct SettingsRootView: View {
                                     store.testResultMessage = "\(prov.label): \(msg)"
                                 }
                             }
+                            .buttonStyle(.luminare)
                         }
                     }
-                    if !store.testResultMessage.isEmpty {
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                }
+
+                if !store.testResultMessage.isEmpty {
+                    LuminareCompose("连通探测结果") {
                         Text(store.testResultMessage)
                             .font(.caption)
-                            .foregroundColor(.accentColor)
+                            .foregroundStyle(QMXTheme.accent)
                     }
                 }
-                .padding(8)
             }
         }
     }
 
     private func slotRow(_ title: String, slot: Binding<SlotRouteViewModel>, showVoice: Bool) -> some View {
-        HStack {
-            Text(title).frame(width: 165, alignment: .leading)
-            Picker("", selection: slot.provider) {
-                ForEach(store.providers) { p in
-                    Text(p.label).tag(p.name)
+        let providerIds = store.providers.map(\.name)
+        return LuminareCompose(title) {
+            HStack(spacing: 8) {
+                if !providerIds.isEmpty {
+                    Picker("", selection: slot.provider) {
+                        ForEach(store.providers) { p in
+                            Text(p.label).tag(p.name)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 120)
                 }
-            }
-            .labelsHidden()
-            .frame(width: 130)
-            TextField("Model ID", text: slot.model)
-                .textFieldStyle(.roundedBorder)
-            if showVoice {
-                TextField("Voice", text: slot.voice)
+                TextField("Model ID", text: slot.model)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 90)
+                    .frame(width: showVoice ? 150 : 210)
+                if showVoice {
+                    TextField("Voice", text: slot.voice)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 75)
+                }
             }
         }
     }
 
     private var voicePrivacyPane: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("语音与隐私守卫").font(.title2.bold())
-            GroupBox("桌面隐私级别") {
-                Picker("默认感知模式", selection: $store.privacyMode) {
-                    Text("关闭桌面感知 (off)").tag("off")
-                    Text("仅窗口元数据 (meta_only)").tag("meta_only")
-                    Text("按需看屏 (full_on_demand)").tag("full_on_demand")
+        Group {
+            LuminareSection("桌面感知隐私守卫", "敏感密码与网银窗口在 Senses 侧强制脱敏且拦截截屏。") {
+                LuminarePicker(
+                    compactElements: ["off", "meta_only", "full_on_demand"],
+                    selection: $store.privacyMode
+                ) { mode in
+                    VStack(spacing: 4) {
+                        Image(systemName: privacyIcon(mode))
+                            .font(.system(size: 14))
+                        Text(privacyTitle(mode))
+                            .font(.caption.bold())
+                    }
+                    .padding(.vertical, 8)
                 }
-                .pickerStyle(.radioGroup)
-                .padding(8)
+                .luminareRoundingBehavior(top: true, bottom: true)
             }
-            GroupBox("流式语音闭环") {
-                Toggle("启用 ASR 语音输入与 TTS 语音播报", isOn: $store.audioEnabled)
-                    .padding(8)
+
+            LuminareSection("流式语音闭环") {
+                LuminareToggle("启用 ASR 语音输入与流式 TTS 语音播报", isOn: $store.audioEnabled)
             }
         }
     }
 
     private var shortcutsPane: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("快捷键配置").font(.title2.bold())
-            GroupBox("壳内直达快捷键（Brain 重启期依然秒开）与 PTT") {
-                VStack(spacing: 10) {
-                    shortcutField("呼出 Quick Entry", text: $store.chatInputHotkey)
-                    shortcutField("打开设置中心", text: $store.settingsHotkey)
-                    shortcutField("紧急停止当前任务", text: $store.cancelHotkey)
-                    shortcutField("按住说话 (PTT，由 Senses 监听)", text: $store.pttHotkey)
-                }
-                .padding(8)
-            }
+        LuminareSection("全局与壳内直达快捷键", "Quick Entry、设置中心与急停由 Swift 壳本地注册，Brain 重启期间依然可用。") {
+            shortcutRow("呼出 Quick Entry", value: $store.chatInputHotkey)
+            shortcutRow("打开设置中心", value: $store.settingsHotkey)
+            shortcutRow("紧急停止当前任务", value: $store.cancelHotkey)
+            shortcutRow("按住说话 (PTT · Senses)", value: $store.pttHotkey)
         }
     }
 
-    private func shortcutField(_ label: String, text: Binding<String>) -> some View {
-        HStack {
-            Text(label).frame(width: 220, alignment: .leading)
-            TextField("", text: text).textFieldStyle(.roundedBorder)
+    private func shortcutRow(_ title: String, value: Binding<String>) -> some View {
+        LuminareCompose(title) {
+            TextField("", text: value)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
+                .multilineTextAlignment(.trailing)
+                .font(.system(.body, design: .monospaced))
         }
     }
 
     private var mcpPane: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("MCP 扩展服务").font(.title2.bold())
-                Spacer()
-                Button("刷新") {
-                    Task { store.mcpServers = await brainClient.fetchMCPServers() }
-                }
+        LuminareSection("已挂载 MCP Server", "所有第三方 MCP 写入或未知工具默认触发原生审批弹窗。") {
+            LuminareButton("服务列表", "立即刷新") {
+                Task { store.mcpServers = await brainClient.fetchMCPServers() }
             }
+
             if store.mcpServers.isEmpty {
-                Text("当前未配置 MCP Server。可通过 config.yaml 或 POST /api/mcp/servers 添加。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                LuminareCompose("状态") {
+                    Text("当前未配置 MCP Server")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 ForEach(store.mcpServers) { srv in
-                    GroupBox {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("\(srv.name) · \(srv.transport)")
-                                    .font(.headline)
-                                Text("状态: \(srv.status) \(srv.error)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
+                    LuminareCompose {
+                        HStack(spacing: 8) {
                             if srv.authMode == "oauth" {
-                                Button(srv.hasOAuthToken ? "重新 OAuth 授权" : "OAuth 授权") {
+                                Button(srv.hasOAuthToken ? "重新授权" : "OAuth 授权") {
                                     Task {
                                         let (_, msg, authURL) = await brainClient.authorizeMCPServer(name: srv.name)
                                         store.statusMessage = msg
@@ -425,22 +494,50 @@ private struct SettingsRootView: View {
                                         store.mcpServers = await brainClient.fetchMCPServers()
                                     }
                                 }
+                                .buttonStyle(.luminare)
                             }
-                            Button("删除") {
+                            Button("移除", role: .destructive) {
                                 Task {
                                     await brainClient.deleteMCPServer(name: srv.name)
                                     store.mcpServers = await brainClient.fetchMCPServers()
                                 }
                             }
+                            .buttonStyle(.luminare)
                         }
-                        .padding(6)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(srv.name) · \(srv.transport)")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("\(srv.status) \(srv.error)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
         }
     }
 
+    private func privacyIcon(_ mode: String) -> String {
+        switch mode {
+        case "off": return "eye.slash"
+        case "meta_only": return "macwindow"
+        default: return "display"
+        }
+    }
+
+    private func privacyTitle(_ mode: String) -> String {
+        switch mode {
+        case "off": return "关闭感知"
+        case "meta_only": return "仅窗口信息"
+        default: return "按需看屏"
+        }
+    }
+
     private func saveAll() async {
+        store.isSaving = true
+        defer { store.isSaving = false }
+
         var provPatch: [String: Any] = [:]
         for p in store.providers {
             var entry: [String: Any] = [

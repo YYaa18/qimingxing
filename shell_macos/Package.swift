@@ -9,9 +9,15 @@ let package = Package(
     products: [
         .executable(name: "Qimingxing", targets: ["Qimingxing"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/MrKai77/Luminare.git", branch: "main")
+    ],
     targets: [
         .executableTarget(
             name: "Qimingxing",
+            dependencies: [
+                .product(name: "Luminare", package: "Luminare")
+            ],
             path: "Sources/Qimingxing",
             linkerSettings: [
                 .linkedFramework("AppKit"),
