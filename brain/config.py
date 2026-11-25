@@ -142,6 +142,10 @@ class ProfileConfig:
     temperature: float = 0.7
     timeout_seconds: float = 30.0
     supports_vision: bool = False
+    context_window: int = 0
+    max_output_tokens: int = 0
+    request_max_tokens: int = 0
+    capability_source: str = "default"
     input_cny_per_1m: Optional[float] = None
     cache_hit_cny_per_1m: Optional[float] = None
     output_cny_per_1m: Optional[float] = None
@@ -190,8 +194,15 @@ class MemoryExtractionConfig:
     batch_turns: int = 4
     idle_seconds: float = 120.0
     persist_desktop_footprints: bool = True
-    compress_trigger_turns: int = 10
+    # Rolling compression is context infrastructure and runs independently of
+    # fact/episode extraction.
+    compress_enabled: bool = True
+    compress_trigger_turns: int = 10          # legacy fallback only
     compress_batch_turns: int = 6
+    compress_high_ratio: float = 1.0           # trigger at recent_budget * ratio
+    compress_low_ratio: float = 0.55           # stop after falling below this
+    compress_summary_max_chars: int = 1600
+    compress_max_batches: int = 4
 
 
 @dataclass
@@ -215,12 +226,28 @@ class MemoryConfig:
 
 @dataclass
 class ContextBudgetConfig:
-    l1_profile_tokens: int = 400
-    l2_summary_tokens: int = 350
-    l2_recent_tokens: int = 2000
-    l3_recall_tokens: int = 500
-    l3_desktop_ocr_tokens: int = 1500
-    total_max_tokens: int = 6000
+    # --- input budget tiers ---
+    input_tier_tokens: int = 32000          # 16000 / 32000 / 64000
+    request_max_tokens: int = 8192
+    fallback_context_window: int = 64000
+
+    # --- L1 / summary floors + caps ---
+    l1_profile_floor_tokens: int = 600
+    l1_profile_tokens: int = 1200
+    l2_summary_floor_tokens: int = 1000
+    l2_summary_tokens: int = 1500
+    l2_recent_floor_tokens: int = 3000
+    l2_recent_tokens: int = 6000             # legacy fallback
+
+    # --- L3 caps ---
+    l3_recall_tokens: int = 800
+    l3_skills_tokens: int = 1000
+    l3_attachments_tokens: int = 2000
+    l3_desktop_ocr_tokens: int = 2000
+    l3_total_ratio: float = 0.35            # max share of total_input
+
+    # --- legacy hard cap; used when no resolved budget is supplied ---
+    total_max_tokens: int = 32000
 
 
 DEFAULT_SAFE_SHELL_COMMANDS = [
@@ -670,6 +697,10 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
             temperature=float(item.get("temperature", 0.7)),
             timeout_seconds=float(item.get("timeout_seconds", 30.0)),
             supports_vision=bool(item.get("supports_vision", False)),
+            context_window=int(item.get("context_window", 0) or 0),
+            max_output_tokens=int(item.get("max_output_tokens", 0) or 0),
+            request_max_tokens=int(item.get("request_max_tokens", 0) or 0),
+            capability_source=str(item.get("capability_source", "default") or "default"),
             input_cny_per_1m=float(raw_in) if raw_in is not None else None,
             cache_hit_cny_per_1m=float(raw_hit) if raw_hit is not None else None,
             output_cny_per_1m=float(raw_out) if raw_out is not None else None,
@@ -779,8 +810,13 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
             batch_turns=int(ext_raw.get("batch_turns", 4)),
             idle_seconds=float(ext_raw.get("idle_seconds", 120.0)),
             persist_desktop_footprints=bool(ext_raw.get("persist_desktop_footprints", True)),
+            compress_enabled=bool(ext_raw.get("compress_enabled", True)),
             compress_trigger_turns=int(ext_raw.get("compress_trigger_turns", 10)),
             compress_batch_turns=int(ext_raw.get("compress_batch_turns", 6)),
+            compress_high_ratio=float(ext_raw.get("compress_high_ratio", 1.0)),
+            compress_low_ratio=float(ext_raw.get("compress_low_ratio", 0.55)),
+            compress_summary_max_chars=int(ext_raw.get("compress_summary_max_chars", 1600)),
+            compress_max_batches=int(ext_raw.get("compress_max_batches", 4)),
         ),
         embedding=EmbeddingConfig(
             provider=str(emb_raw.get("provider", "null")),
@@ -792,14 +828,29 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     )
 
     budget_raw = raw.get("context_budget") or {}
-    context_budget = ContextBudgetConfig(
-        l1_profile_tokens=int(budget_raw.get("l1_profile_tokens", 400)),
-        l2_summary_tokens=int(budget_raw.get("l2_summary_tokens", 350)),
-        l2_recent_tokens=int(budget_raw.get("l2_recent_tokens", 2000)),
-        l3_recall_tokens=int(budget_raw.get("l3_recall_tokens", 500)),
-        l3_desktop_ocr_tokens=int(budget_raw.get("l3_desktop_ocr_tokens", 1500)),
-        total_max_tokens=int(budget_raw.get("total_max_tokens", 6000)),
-    )
+    if "input_tier_tokens" in budget_raw or "l1_profile_floor_tokens" in budget_raw:
+        context_budget = ContextBudgetConfig(
+            input_tier_tokens=int(budget_raw.get("input_tier_tokens", 32000)),
+            request_max_tokens=int(budget_raw.get("request_max_tokens", 8192)),
+            fallback_context_window=int(budget_raw.get("fallback_context_window", 64000)),
+            l1_profile_floor_tokens=int(budget_raw.get("l1_profile_floor_tokens", 600)),
+            l1_profile_tokens=int(budget_raw.get("l1_profile_tokens", 1200)),
+            l2_summary_floor_tokens=int(budget_raw.get("l2_summary_floor_tokens", 1000)),
+            l2_summary_tokens=int(budget_raw.get("l2_summary_tokens", 1500)),
+            l2_recent_floor_tokens=int(budget_raw.get("l2_recent_floor_tokens", 3000)),
+            l2_recent_tokens=int(budget_raw.get("l2_recent_tokens", 6000)),
+            l3_recall_tokens=int(budget_raw.get("l3_recall_tokens", 800)),
+            l3_skills_tokens=int(budget_raw.get("l3_skills_tokens", 1000)),
+            l3_attachments_tokens=int(budget_raw.get("l3_attachments_tokens", 2000)),
+            l3_desktop_ocr_tokens=int(budget_raw.get("l3_desktop_ocr_tokens", 2000)),
+            l3_total_ratio=float(budget_raw.get("l3_total_ratio", 0.35)),
+            total_max_tokens=int(budget_raw.get("total_max_tokens", 32000)),
+        )
+    else:
+        # Legacy fixed-budget configs (e.g. total 6000) are superseded by the
+        # Phase A floor+flex model. Keep the YAML untouched; use the new
+        # defaults at runtime until the user saves new values via settings.
+        context_budget = ContextBudgetConfig()
 
     tools_raw = raw.get("tools") or {}
     ws_raw = tools_raw.get("web_search") or {}

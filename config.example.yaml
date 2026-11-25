@@ -111,8 +111,13 @@ memory:
     batch_turns: 4
     idle_seconds: 120
     persist_desktop_footprints: true
-    compress_trigger_turns: 10
+    # Rolling compression is independent from fact extraction.
+    compress_enabled: true
     compress_batch_turns: 6
+    compress_high_ratio: 1.0
+    compress_low_ratio: 0.55
+    compress_summary_max_chars: 1600
+    compress_max_batches: 4
   embedding:
     provider: "null"  # 可改配 "openai_compatible" 接入 Ollama / 硅基流动 / OpenAI / 百炼
     base_url: "http://127.0.0.1:11434/v1"
@@ -121,12 +126,27 @@ memory:
     timeout_ms: 800
 
 context_budget:
-  l1_profile_tokens: 400
-  l2_summary_tokens: 350
-  l2_recent_tokens: 2000
-  l3_recall_tokens: 500
-  l3_desktop_ocr_tokens: 1500
-  total_max_tokens: 6000
+  # Input budget tiers: 16000 / 32000 / 64000 (balanced default 32000)
+  input_tier_tokens: 32000
+  request_max_tokens: 8192
+  fallback_context_window: 64000
+
+  # Floor + cap allocation
+  l1_profile_floor_tokens: 600
+  l1_profile_tokens: 1200
+  l2_summary_floor_tokens: 1000
+  l2_summary_tokens: 1500
+  l2_recent_floor_tokens: 3000
+  l2_recent_tokens: 6000
+
+  l3_recall_tokens: 800
+  l3_skills_tokens: 1000
+  l3_attachments_tokens: 2000
+  l3_desktop_ocr_tokens: 2000
+  l3_total_ratio: 0.35
+
+  # Legacy fallback only; resolved budgets are computed per model.
+  total_max_tokens: 32000
 
 tools:
   enabled: true

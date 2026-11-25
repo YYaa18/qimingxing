@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from brain.config import MemoryExtractionConfig
 from brain.context_store import ContextStore
+from brain.context_builder import estimate_tokens
 from brain.llm_router import LLMRouter
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import EmbeddingProvider, NullEmbeddingProvider, pack_embedding
@@ -65,7 +66,19 @@ _EXTRACTION_SYSTEM_PROMPT = """你是一个严谨的长期记忆分类、提炼�
 4. **主动遗忘**：当用户明确要求“忘掉/忘记/删除”某信息时，**必须**输出 `op: "DELETE"` 并匹配对应 `target_fact_id`。
 5. 绝对禁止编造不存在的信息，也禁止写入任何隐私占位（如 `[隐私窗口已隐藏]`）。"""
 
-_COMPRESS_SYSTEM_PROMPT = """请将下面的历史对话压缩合并成不超过 220 字的简明中文滚动摘要。保留：用户提出的关键前提、已确定的技术方案/结论、待跟进事项；省略寒暄与重复细节。直接输出摘要正文。"""
+_COMPRESS_SYSTEM_PROMPT = """请将下面的历史对话压缩合并成 800–1200 字的中文滚动摘要，硬上限 1600 字。
+必须使用以下固定标题分段：
+【已完成/已确认】
+【关键文件与路径】
+【技术决策与原因】
+【待办/未解决问题】
+【用户偏好与约束】
+
+要求：
+- 只保留用户提出的关键前提、已确认的技术方案/结论、精确文件路径、函数/类名、报错码与待办；
+- 不粘贴大段历史代码；需要细节时由后续工具重新读取最新文件；
+- 省略寒暄、重复内容和已被推翻的方案；
+- 直接输出摘要正文，不要额外解释。"""
 
 
 def has_explicit_memory_command(text: str) -> bool:
@@ -192,33 +205,36 @@ class MemoryExtractor:
         user_msg: MessageRecord,
         assistant_msg: Optional[MessageRecord],
         context_store: ContextStore,
+        recent_budget: int = 0,
     ) -> None:
-        """Non-blocking hook invoked after each completed turn."""
-        if not self.config.enabled:
-            return
+        """Non-blocking hook invoked after each completed turn.
 
-        buf = self._unextracted_msgs.setdefault(session_id, [])
-        buf.append(user_msg)
-        if assistant_msg is not None:
-            buf.append(assistant_msg)
-        self._pending_turns[session_id] = self._pending_turns.get(session_id, 0) + 1
+        Fact/episode extraction is optional; rolling compression is context
+        infrastructure and runs independently when compress_enabled is true.
+        """
+        if self.config.enabled:
+            buf = self._unextracted_msgs.setdefault(session_id, [])
+            buf.append(user_msg)
+            if assistant_msg is not None:
+                buf.append(assistant_msg)
+            self._pending_turns[session_id] = self._pending_turns.get(session_id, 0) + 1
 
-        # Reset idle timer
-        old_idle = self._idle_tasks.pop(session_id, None)
-        if old_idle is not None and not old_idle.done():
-            old_idle.cancel()
+            # Reset idle timer
+            old_idle = self._idle_tasks.pop(session_id, None)
+            if old_idle is not None and not old_idle.done():
+                old_idle.cancel()
 
-        explicit = has_explicit_memory_command(user_msg.content)
-        batch_reached = self._pending_turns[session_id] >= max(1, self.config.batch_turns)
+            explicit = has_explicit_memory_command(user_msg.content)
+            batch_reached = self._pending_turns[session_id] >= max(1, self.config.batch_turns)
 
-        if explicit or batch_reached:
-            msgs = self._drain_buffer(session_id)
-            self._spawn(self._safe_extract(session_id, msgs))
-        else:
-            self._idle_tasks[session_id] = self._spawn(self._idle_flush_after(session_id))
+            if explicit or batch_reached:
+                msgs = self._drain_buffer(session_id)
+                self._spawn(self._safe_extract(session_id, msgs))
+            else:
+                self._idle_tasks[session_id] = self._spawn(self._idle_flush_after(session_id))
 
-        # Trigger async rolling summary compression if unsummarized messages exceed threshold
-        self._spawn(self._safe_compress(session_id))
+        if self.config.compress_enabled:
+            self._spawn(self._safe_compress(session_id, recent_budget))
 
         # Periodically persist sanitized desktop footprints (e.g. every 30 min)
         if (
@@ -283,10 +299,10 @@ class MemoryExtractor:
             except Exception as exc:
                 logger.warning("Background memory extraction failed (isolated): %s", exc)
 
-    async def _safe_compress(self, session_id: str) -> None:
+    async def _safe_compress(self, session_id: str, recent_budget: int = 0) -> None:
         async with self._get_lock(f"compress:{session_id}"):
             try:
-                await self.maybe_compress_session(session_id)
+                await self.maybe_compress_session(session_id, recent_budget=recent_budget)
             except Exception as exc:
                 logger.warning("Background session compression failed (isolated): %s", exc)
 
@@ -455,18 +471,105 @@ class MemoryExtractor:
                 task.cancel()
         self._idle_tasks.clear()
 
-    async def maybe_compress_session(self, session_id: str) -> bool:
-        trigger_msgs = max(2, self.config.compress_trigger_turns * 2)
-        batch_msgs = max(2, self.config.compress_batch_turns * 2)
+    async def maybe_compress_session(
+        self,
+        session_id: str,
+        *,
+        recent_budget: int = 0,
+    ) -> bool:
+        """Compress until unsummarized tokens fall below the low watermark.
 
-        unsummarized_count = await self.backend.count_unsummarized_messages(session_id)
-        if unsummarized_count < trigger_msgs:
-            return False
+        High/low hysteresis keeps the summary (and therefore the L2 prefix)
+        stable for multiple turns, improving prefix-cache hit rate.
+        """
+        if recent_budget <= 0:
+            # Legacy callers/tests may not supply a dynamic recent budget;
+            # retain the old turn-count behavior in that case.
+            return await self._compress_legacy(session_id)
+
+        effective_recent = max(512, int(recent_budget))
+        high = max(512, int(effective_recent * max(0.2, self.config.compress_high_ratio)))
+        low = max(256, int(effective_recent * min(0.95, max(0.1, self.config.compress_low_ratio))))
+        batch_msgs = max(2, self.config.compress_batch_turns * 2)
 
         sess = await self.backend.get_session(session_id)
         if sess is None:
             return False
 
+        all_msgs = await self.backend.get_messages(
+            session_id,
+            after_msg_id=sess.last_summarized_msg_id,
+            limit=1000,
+            oldest_first=True,
+        )
+        if not all_msgs:
+            return False
+
+        def msg_tokens(m: MessageRecord) -> int:
+            return estimate_tokens(m.content)
+
+        total_tokens = sum(msg_tokens(m) for m in all_msgs)
+        if total_tokens < high:
+            return False
+
+        compressed_any = False
+        current_summary = sess.rolling_summary or ""
+        watermark = sess.last_summarized_msg_id
+        pending = list(all_msgs)
+
+        for _ in range(max(1, self.config.compress_max_batches)):
+            if total_tokens <= low or not pending:
+                break
+            candidates = [m for m in pending if m.msg_id > watermark][:batch_msgs]
+            if not candidates:
+                break
+
+            convo = "\n".join(f"{m.role}: {m.content}" for m in candidates)
+            prompt = (
+                f"【已有早期摘要】\n{current_summary or '（无）'}\n\n"
+                f"【待并入压缩的较早对话】\n{convo}"
+            )
+            new_summary = (
+                await self._call_fast_llm(
+                    [
+                        {"role": "system", "content": _COMPRESS_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ]
+                )
+            ).strip()
+            if not new_summary:
+                break
+            max_chars = max(400, int(self.config.compress_summary_max_chars))
+            if len(new_summary) > max_chars:
+                new_summary = new_summary[: max_chars - 3] + "…"
+
+            new_watermark = candidates[-1].msg_id
+            await self.backend.update_session_summary(session_id, new_summary, new_watermark)
+            logger.info(
+                "Compressed session=%s up to msg_id=%d (len=%d, remaining_tokens=%d)",
+                session_id,
+                new_watermark,
+                len(new_summary),
+                total_tokens,
+            )
+            current_summary = new_summary
+            watermark = new_watermark
+            removed = {m.msg_id for m in candidates}
+            pending = [m for m in pending if m.msg_id not in removed]
+            total_tokens -= sum(msg_tokens(m) for m in candidates)
+            compressed_any = True
+
+        return compressed_any
+
+    async def _compress_legacy(self, session_id: str) -> bool:
+        trigger_msgs = max(2, self.config.compress_trigger_turns * 2)
+        batch_msgs = max(2, self.config.compress_batch_turns * 2)
+        unsummarized_count = await self.backend.count_unsummarized_messages(session_id)
+        if unsummarized_count < trigger_msgs:
+            return False
+        sess = await self.backend.get_session(session_id)
+        if sess is None:
+            return False
         candidates = await self.backend.get_messages(
             session_id,
             after_msg_id=sess.last_summarized_msg_id,
@@ -475,7 +578,6 @@ class MemoryExtractor:
         )
         if len(candidates) < batch_msgs:
             return False
-
         convo = "\n".join(f"{m.role}: {m.content}" for m in candidates)
         prompt = (
             f"【已有早期摘要】\n{sess.rolling_summary or '（无）'}\n\n"
@@ -491,16 +593,11 @@ class MemoryExtractor:
         ).strip()
         if not new_summary:
             return False
-        if len(new_summary) > 300:
-            new_summary = new_summary[:297] + "…"
-
-        new_watermark = candidates[-1].msg_id
-        await self.backend.update_session_summary(session_id, new_summary, new_watermark)
-        logger.info(
-            "Compressed session=%s up to msg_id=%d (len=%d)",
-            session_id,
-            new_watermark,
-            len(new_summary),
+        max_chars = max(400, int(self.config.compress_summary_max_chars))
+        if len(new_summary) > max_chars:
+            new_summary = new_summary[: max_chars - 3] + "…"
+        await self.backend.update_session_summary(
+            session_id, new_summary, candidates[-1].msg_id
         )
         return True
 

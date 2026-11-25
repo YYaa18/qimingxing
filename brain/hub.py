@@ -23,6 +23,7 @@ from brain.audio import (
     estimate_tts_cost_cny,
 )
 from brain.config import AppConfig
+from brain.context_budget import estimate_tools_tokens, resolve_context_budget
 from brain.context_builder import BuildStats, ContextBuilder
 from brain.context_store import ContextStore
 from brain.history_store import InMemorySlidingWindowStore, MemoryStore
@@ -40,6 +41,7 @@ from brain.memory.models import (
 )
 from brain.memory.retrieval import MemoryRetriever
 from brain.memory.skills import SkillManager
+from brain.prompts import BASE_SYSTEM_PROMPT
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
 from brain.tools import (
@@ -2164,7 +2166,7 @@ class Hub:
                 raw_msgs = await self.memory_backend.get_messages(
                     session.session_id,
                     after_msg_id=session.last_summarized_msg_id,
-                    limit=20,
+                    limit=100,
                 )
                 recent_messages = [{"role": m.role, "content": m.content} for m in raw_msgs]
                 core_facts = await self.memory_backend.list_facts(status="active", limit=30)
@@ -2191,6 +2193,23 @@ class Hub:
                 categories_map = {}
                 recent_messages = self.memory_store.get_messages(conn.client_id, limit=16)
 
+            use_tools = bool(
+                self.config.tools.enabled
+                and len(self.tool_registry) > 0
+                and (
+                    profile.provider != "mock"
+                    or type(self.llm_router).complete_with_tools is not LLMRouter.complete_with_tools
+                )
+            )
+            tools_schema = self.tool_registry.to_openai_tools() if use_tools else []
+            resolved_budget = resolve_context_budget(
+                profile=profile,
+                config=self.config,
+                system_prompt=BASE_SYSTEM_PROMPT,
+                tools_schema=tools_schema,
+                has_facts=bool(core_facts),
+                has_summary=bool(rolling_summary.strip()),
+            )
             built = self.context_builder.build(
                 user_text=user_text,
                 user_content=user_content,
@@ -2203,6 +2222,8 @@ class Hub:
                 recalled_skills=recalled_skills,
                 extra_l3_sections=extra_l3_sections,
                 retrieval_ms=retrieval_ms,
+                resolved_budget=resolved_budget,
+                tools_tokens=estimate_tools_tokens(tools_schema),
             )
             self.last_build_stats = built.stats
             messages = built.messages
@@ -2245,15 +2266,6 @@ class Hub:
                         break
                     tts_queue.put_nowait(sent)
                     tts_chars_sent += len(sent)
-
-            use_tools = bool(
-                self.config.tools.enabled
-                and len(self.tool_registry) > 0
-                and (
-                    profile.provider != "mock"
-                    or type(self.llm_router).complete_with_tools is not LLMRouter.complete_with_tools
-                )
-            )
 
             if use_tools:
                 async def _on_text_delta(chunk: str) -> None:
@@ -2355,9 +2367,17 @@ class Hub:
                     ctx=tool_ctx,
                     profile_name=profile.name,
                     on_text_delta=_on_text_delta,
+                    max_context_tokens=(
+                        built.stats.total_tokens + resolved_budget.tool_loop_max
+                    ),
                 )
                 trace_steps = loop_res.trace_steps
                 turn_usages = loop_res.usages
+                if loop_res.usages:
+                    self.context_builder.observe_prompt_usage(
+                        built.stats.total_with_tools,
+                        int(loop_res.usages[0].prompt_tokens),
+                    )
             else:
                 async for chunk in self.llm_router.stream_chat(messages, profile_name=profile.name):
                     events = parser.feed(chunk)
@@ -2366,6 +2386,10 @@ class Hub:
                     )
                 if self.llm_router.last_usage is not None:
                     turn_usages.append(self.llm_router.last_usage)
+                    self.context_builder.observe_prompt_usage(
+                        built.stats.total_with_tools,
+                        int(self.llm_router.last_usage.prompt_tokens),
+                    )
 
             vision_usage = getattr(self.screen_router, "last_ocr_usage", None)
             if vision_usage is not None:
@@ -2486,6 +2510,7 @@ class Hub:
                         user_msg=user_rec,
                         assistant_msg=assistant_rec,
                         context_store=self.context_store,
+                        recent_budget=built.stats.recent_budget,
                     )
             else:
                 self.memory_store.append_turn(

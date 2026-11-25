@@ -6,9 +6,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from brain.context_builder import estimate_tokens
 from brain.llm_router import LLMRouter, LLMUsage
 from brain.tools.base import ToolExecutionContext, ToolResult, ToolTraceStep
 from brain.tools.registry import ToolRegistry
+from brain.utils import truncate_head_tail
 
 logger = logging.getLogger("qimingxing.tools.executor")
 
@@ -37,6 +39,7 @@ class ToolExecutor:
         profile_name: Optional[str] = None,
         on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
         max_steps: Optional[int] = None,
+        max_context_tokens: Optional[int] = None,
     ) -> ToolLoopResult:
         limit = max(1, max_steps if max_steps is not None else ctx.config.tools.max_tool_steps)
         tools_schema = registry.to_openai_tools()
@@ -59,6 +62,13 @@ class ToolExecutor:
         for step_idx in range(1, limit + 1):
             if ctx.is_cancelled():
                 raise asyncio.CancelledError("Turn cancelled before LLM tool step")
+
+            if max_context_tokens is not None:
+                working_messages = self._fold_old_tool_outputs(
+                    working_messages,
+                    max_tokens=max_context_tokens,
+                    keep_last=2,
+                )
 
             res = await self.llm_router.complete_with_tools(
                 working_messages,
@@ -257,8 +267,13 @@ class ToolExecutor:
                         elapsed_ms=elapsed_ms,
                     )
                 )
+                tool_output = truncate_head_tail(
+                    result.output,
+                    max_chars=6000,
+                    notice="工具输出已按单次 8K token 预算截断",
+                )
                 working_messages.append(
-                    {"role": "tool", "tool_call_id": tc.id, "content": result.output}
+                    {"role": "tool", "tool_call_id": tc.id, "content": tool_output}
                 )
                 if consecutive_errors.get(tc.name, 0) >= 2:
                     logger.warning(
@@ -298,3 +313,41 @@ class ToolExecutor:
             stopped_reason=stopped_reason,
             called_tools=called_tools,
         )
+
+    def _fold_old_tool_outputs(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        max_tokens: int,
+        keep_last: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """Replace older long tool observations with a one-line marker.
+
+        Keeps the latest few tool outputs intact so the model can continue the
+        current step without an extra summarization LLM call.
+        """
+        if max_tokens <= 0:
+            return messages
+        total = sum(estimate_tokens(str(m.get("content", ""))) + 4 for m in messages)
+        if total <= max_tokens:
+            return messages
+
+        tool_indices = [
+            index for index, message in enumerate(messages)
+            if message.get("role") == "tool"
+        ]
+        foldable = tool_indices[:-keep_last] if len(tool_indices) > keep_last else []
+        for order, index in enumerate(foldable, start=1):
+            message = messages[index]
+            content = str(message.get("content", ""))
+            if len(content) <= 400:
+                continue
+            message["content"] = (
+                f"[第 {order} 步工具输出已折叠，共 {len(content)} 字符；"
+                "完整记录未进入当前上下文]"
+            )
+            total = sum(estimate_tokens(str(m.get("content", ""))) + 4 for m in messages)
+            if total <= max_tokens:
+                break
+        return messages
+

@@ -336,3 +336,29 @@ memory:
     assert inspected["has_embedding"] is True
     assert inspected["embedding_model"] == "bge-m3"
 
+
+
+async def test_token_hysteresis_compresses_until_below_low_watermark(tmp_path: Path) -> None:
+    store, router, extractor = _make_extractor(tmp_path)
+    await store.initialize()
+    sess = await store.get_or_create_active_session()
+
+    for i in range(12):
+        await store.append_message(
+            session_id=sess.session_id,
+            turn_id=f"t{i}",
+            role="user" if i % 2 == 0 else "assistant",
+            content="设定使用 FastAPI + SQLite WAL 模式，保留文件路径与函数名。" * 2,
+        )
+
+    router.responses.extend(["摘要一", "摘要二", "摘要三", "摘要四"])
+    did_compress = await extractor.maybe_compress_session(
+        sess.session_id, recent_budget=200
+    )
+    assert did_compress is True
+
+    updated = await store.get_session(sess.session_id)
+    assert updated is not None
+    assert updated.last_summarized_msg_id > 0
+    assert await store.count_unsummarized_messages(sess.session_id) < 12
+    await store.close()

@@ -91,6 +91,27 @@ def needs_full_timeline(user_text: str) -> bool:
     return bool(_ACTIVITY_INTENT_RE.search(user_text))
 
 
+class TokenMeter:
+    """Heuristic token counter with a clamped EMA correction from API usage."""
+
+    def __init__(self) -> None:
+        self.scale = 1.0
+
+    def count(self, text: str) -> int:
+        if not text:
+            return 0
+        return max(1, int(round(estimate_tokens(text) * self.scale)))
+
+    def count_message(self, msg: Dict[str, Any]) -> int:
+        return max(1, int(round(estimate_message_tokens(msg) * self.scale)))
+
+    def observe(self, estimated: int, actual: int) -> None:
+        if estimated <= 0 or actual <= 0:
+            return
+        ratio = actual / estimated
+        self.scale = min(1.8, max(0.6, 0.7 * self.scale + 0.3 * ratio))
+
+
 @dataclass
 class BuildStats:
     l0_tokens: int = 0
@@ -98,7 +119,15 @@ class BuildStats:
     l2_summary_tokens: int = 0
     l2_recent_tokens: int = 0
     l3_tokens: int = 0
+    l3_section_tokens: int = 0
+    l3_skills_tokens: int = 0
+    l3_attachments_tokens: int = 0
     total_tokens: int = 0
+    total_with_tools: int = 0
+    tools_tokens: int = 0
+    resolved_total_input: int = 0
+    recent_budget: int = 0
+    calibration_scale: float = 1.0
     static_prefix_hash: str = ""
     recalled_count: int = 0
     recalled_skills_count: int = 0
@@ -118,6 +147,10 @@ class ContextBuilder:
 
     def __init__(self, budget: Optional[ContextBudgetConfig] = None) -> None:
         self.budget = budget or ContextBudgetConfig()
+        self.meter = TokenMeter()
+
+    def observe_prompt_usage(self, estimated_prompt_tokens: int, actual_prompt_tokens: int) -> None:
+        self.meter.observe(estimated_prompt_tokens, actual_prompt_tokens)
 
     def build(
         self,
@@ -134,19 +167,28 @@ class ContextBuilder:
         extra_l3_sections: Optional[List[str]] = None,
         retrieval_ms: float = 0.0,
         system_base_prompt: str = BASE_SYSTEM_PROMPT,
+        resolved_budget: Optional[Any] = None,
+        tools_tokens: int = 0,
     ) -> BuiltContext:
         stats = BuildStats(
             retrieval_ms=retrieval_ms,
             recalled_count=len(recalled_memories),
             recalled_skills_count=len(recalled_skills or []),
+            tools_tokens=tools_tokens,
+            calibration_scale=self.meter.scale,
         )
 
         # --- L0 (100% static) + L1 (low-frequency deterministic user profile) ---
         l0_text = system_base_prompt.strip()
-        stats.l0_tokens = estimate_tokens(l0_text)
+        stats.l0_tokens = self.meter.count(l0_text)
 
-        l1_block = self._render_l1_profile(core_facts, categories=categories)
-        stats.l1_tokens = estimate_tokens(l1_block)
+        l1_cap = (
+            int(resolved_budget.l1_cap)
+            if resolved_budget is not None
+            else self.budget.l1_profile_tokens
+        )
+        l1_block = self._render_l1_profile(core_facts, categories=categories, max_tokens=l1_cap)
+        stats.l1_tokens = self.meter.count(l1_block)
 
         static_system_parts = [l0_text]
         if l1_block:
@@ -157,45 +199,51 @@ class ContextBuilder:
         messages: List[Dict[str, Any]] = [{"role": "system", "content": static_system}]
 
         # --- L2: Rolling summary + Recent raw turns (within token budget) ---
-        if rolling_summary and rolling_summary.strip():
-            trimmed_summary = truncate_to_tokens(
-                rolling_summary.strip(), self.budget.l2_summary_tokens
-            )
+        summary_cap = (
+            int(resolved_budget.summary_cap)
+            if resolved_budget is not None
+            else self.budget.l2_summary_tokens
+        )
+        if rolling_summary and rolling_summary.strip() and summary_cap > 0:
+            trimmed_summary = truncate_to_tokens(rolling_summary.strip(), summary_cap)
             summary_msg = {
                 "role": "system",
                 "content": f"【本会话早期对话滚动摘要】\n{trimmed_summary}",
             }
-            stats.l2_summary_tokens = estimate_message_tokens(summary_msg)
+            stats.l2_summary_tokens = self.meter.count_message(summary_msg)
             messages.append(summary_msg)
 
-        kept_recent: List[Dict[str, str]] = []
-        recent_used = 0
-        for msg in reversed(recent_messages):
-            cost = estimate_message_tokens(msg)
-            if kept_recent and recent_used + cost > self.budget.l2_recent_tokens:
-                break
-            kept_recent.append({"role": msg["role"], "content": msg["content"]})
-            recent_used += cost
-        kept_recent.reverse()
-        stats.l2_recent_tokens = recent_used
-        messages.extend(kept_recent)
-
         # --- L3: High-dynamic tail (recalled memories + denoised desktop context + OCR/vision) ---
-        l3_sections: List[str] = []
+        if resolved_budget is not None:
+            recall_cap = int(resolved_budget.recall_cap)
+            skills_cap = int(resolved_budget.skills_cap)
+            attachments_cap = int(resolved_budget.attachments_cap)
+            desktop_cap = int(resolved_budget.desktop_cap)
+            l3_total_cap = int(resolved_budget.l3_total_cap)
+        else:
+            recall_cap = self.budget.l3_recall_tokens
+            skills_cap = self.budget.l3_skills_tokens
+            attachments_cap = self.budget.l3_attachments_tokens
+            desktop_cap = self.budget.l3_desktop_ocr_tokens
+            l3_total_cap = 0  # legacy mode: no separate L3 total cap
 
-        recall_block = self._render_l3_recalled(recalled_memories)
+        l3_blocks: List[tuple[str, int, str]] = []  # (kind, priority, text)
+
+        recall_block = self._render_l3_recalled(recalled_memories, max_tokens=recall_cap)
         if recall_block:
-            l3_sections.append(recall_block)
+            l3_blocks.append(("recall", 0, recall_block))
 
-        skills_block = self._render_l3_skills(recalled_skills or [])
+        skills_block = self._render_l3_skills(recalled_skills or [], max_tokens=skills_cap)
         if skills_block:
-            l3_sections.append(skills_block)
+            l3_blocks.append(("skills", 3, skills_block))
 
-        for extra_sec in extra_l3_sections or []:
-            if extra_sec and extra_sec.strip():
-                l3_sections.append(extra_sec.strip())
-        if any(extra_sec and extra_sec.strip() for extra_sec in (extra_l3_sections or [])):
-            l3_sections.append(SOURCE_ATTRIBUTION_REMINDER)
+        extra_texts = [s.strip() for s in (extra_l3_sections or []) if s and s.strip()]
+        if extra_texts:
+            extra_text = "\n\n".join(extra_texts)
+            extra_text = truncate_to_tokens(extra_text, attachments_cap)
+            if extra_text:
+                extra_text += "\n\n" + SOURCE_ATTRIBUTION_REMINDER
+                l3_blocks.append(("attachments", 2, extra_text))
 
         expand_tl = needs_full_timeline(user_text)
         stats.timeline_expanded = expand_tl
@@ -204,12 +252,27 @@ class ContextBuilder:
             if expand_tl
             else context_store.render_compact_focus()
         )
-        desktop_budget = self.budget.l3_desktop_ocr_tokens
-        desktop_trimmed = truncate_to_tokens(desktop_raw, desktop_budget)
+        desktop_trimmed = truncate_to_tokens(desktop_raw, desktop_cap)
         if desktop_trimmed:
-            l3_sections.append(f"【当前桌面感官上下文】\n{desktop_trimmed}")
+            l3_blocks.append(("desktop", 1, f"【当前桌面感官上下文】\n{desktop_trimmed}"))
 
-        final_user_content = self._apply_ocr_budget(user_content, stats)
+        if l3_total_cap > 0:
+            l3_blocks = self._fit_l3_blocks(l3_blocks, l3_total_cap)
+
+        l3_sections = [text for _, _, text in l3_blocks]
+        stats.l3_section_tokens = sum(self.meter.count(text) for text in l3_sections)
+        stats.l3_skills_tokens = sum(
+            self.meter.count(text) for kind, _, text in l3_blocks if kind == "skills"
+        )
+        stats.l3_attachments_tokens = sum(
+            self.meter.count(text) for kind, _, text in l3_blocks if kind == "attachments"
+        )
+
+        final_user_content = self._apply_ocr_budget(
+            user_content,
+            stats,
+            max_tokens=desktop_cap,
+        )
         if l3_sections:
             tail_context = "\n\n".join(l3_sections)
             if isinstance(final_user_content, list):
@@ -235,31 +298,89 @@ class ContextBuilder:
                 )
 
         user_msg = {"role": "user", "content": final_user_content}
+        user_index = len(messages)
         messages.append(user_msg)
-        stats.l3_tokens = estimate_tokens("\n\n".join(l3_sections)) + estimate_message_tokens(
+        stats.l3_tokens = stats.l3_section_tokens + self.meter.count_message(
             {"role": "user", "content": final_user_content}
         )
-        stats.total_tokens = sum(estimate_message_tokens(m) for m in messages)
 
-        # Keep exact L2 recent dict references so dropping oldest works reliably
-        # Final hard safety cap against total_max_tokens by dropping oldest L2 recent messages if needed
-        while stats.total_tokens > self.budget.total_max_tokens and kept_recent:
+        # --- Recent raw history: fill the remainder after L1/summary/L3 ---
+        if resolved_budget is not None:
+            available = max(
+                512,
+                int(resolved_budget.total_input)
+                - stats.l0_tokens
+                - int(resolved_budget.tools_tokens),
+            )
+            used_other = stats.l1_tokens + stats.l2_summary_tokens + stats.l3_tokens
+            recent_budget = max(0, available - used_other)
+            stats.resolved_total_input = int(resolved_budget.total_input)
+        else:
+            recent_budget = self.budget.l2_recent_tokens
+        stats.recent_budget = recent_budget
+
+        kept_recent: List[Dict[str, str]] = []
+        recent_used = 0
+        for msg in reversed(recent_messages):
+            cost = self.meter.count_message(msg)
+            if kept_recent and recent_used + cost > recent_budget:
+                break
+            kept_recent.append({"role": msg["role"], "content": msg["content"]})
+            recent_used += cost
+        kept_recent.reverse()
+        # Insert recent messages after system/summary, before the current user.
+        messages[user_index:user_index] = kept_recent
+        stats.l2_recent_tokens = recent_used
+
+        stats.total_tokens = sum(self.meter.count_message(m) for m in messages)
+        stats.total_with_tools = stats.total_tokens + int(tools_tokens)
+
+        # Final hard safety cap: drop oldest recent messages first.
+        hard_cap = (
+            int(resolved_budget.total_input)
+            if resolved_budget is not None
+            else self.budget.total_max_tokens
+        )
+        while stats.total_with_tools > hard_cap and kept_recent:
             dropped = kept_recent.pop(0)
             messages.remove(dropped)
-            stats.l2_recent_tokens -= estimate_message_tokens(dropped)
-            stats.total_tokens = sum(estimate_message_tokens(m) for m in messages)
+            stats.l2_recent_tokens -= self.meter.count_message(dropped)
+            stats.total_tokens = sum(self.meter.count_message(m) for m in messages)
+            stats.total_with_tools = stats.total_tokens + int(tools_tokens)
 
+        stats.calibration_scale = self.meter.scale
         return BuiltContext(messages=messages, stats=stats)
+
+    def _fit_l3_blocks(
+        self,
+        blocks: List[tuple[str, int, str]],
+        cap: int,
+    ) -> List[tuple[str, int, str]]:
+        """Drop low-priority L3 sections until under cap; truncate the last one."""
+        fitted = list(blocks)
+        while fitted and sum(self.meter.count(text) for _, _, text in fitted) > cap:
+            drop_idx = max(range(len(fitted)), key=lambda i: fitted[i][1])
+            kind, priority, text = fitted[drop_idx]
+            if priority <= 0:
+                # Only the highest-priority section remains; truncate it.
+                truncated = truncate_to_tokens(text, cap)
+                if truncated:
+                    fitted[drop_idx] = (kind, priority, truncated)
+                else:
+                    fitted.pop(drop_idx)
+                break
+            fitted.pop(drop_idx)
+        return fitted
 
     def _render_l1_profile(
         self,
         core_facts: List[MemoryFact],
         *,
         categories: Optional[Dict[str, MemoryCategory]] = None,
+        max_tokens: int,
     ) -> str:
-        if not core_facts:
+        if not core_facts or max_tokens <= 0:
             return ""
-        # Filter by category registry when provided (skip non-L1 categories such as chitchat).
         eligible = []
         for fact in core_facts:
             if fact.status != "active":
@@ -271,8 +392,6 @@ class ContextBuilder:
                 continue
             eligible.append(fact)
 
-        # Select highest-importance recent facts within budget, then sort deterministically by fact_id
-        # so consecutive turns produce byte-identical static prefixes for KV Prefix Cache hits.
         ranked = sorted(
             eligible,
             key=lambda f: (f.importance, f.updated_at),
@@ -282,10 +401,10 @@ class ContextBuilder:
         used = 0
         for fact in ranked:
             line = f"- [{fact.category}] {fact.content}"
-            cost = estimate_tokens(line)
-            if selected and used + cost > self.budget.l1_profile_tokens:
+            cost = self.meter.count(line)
+            if selected and used + cost > max_tokens:
                 continue
-            if not selected and cost > self.budget.l1_profile_tokens:
+            if not selected and cost > max_tokens:
                 break
             selected.append(fact)
             used += cost
@@ -296,8 +415,13 @@ class ContextBuilder:
         lines = "\n".join(f"- [{f.category}] {f.content}" for f in selected)
         return f"【核心用户画像（稳定长期事实）】\n{lines}"
 
-    def _render_l3_recalled(self, recalled: List[RetrievedMemory]) -> str:
-        if not recalled:
+    def _render_l3_recalled(
+        self,
+        recalled: List[RetrievedMemory],
+        *,
+        max_tokens: int,
+    ) -> str:
+        if not recalled or max_tokens <= 0:
             return ""
         lines: List[str] = []
         used = 0
@@ -309,8 +433,8 @@ class ContextBuilder:
             else:
                 tag = "情景"
             line = f"- ({tag}/{item.category}) {item.content}"
-            cost = estimate_tokens(line)
-            if lines and used + cost > self.budget.l3_recall_tokens:
+            cost = self.meter.count(line)
+            if lines and used + cost > max_tokens:
                 break
             lines.append(line)
             used += cost
@@ -318,12 +442,18 @@ class ContextBuilder:
             return ""
         return "【相关长期记忆召回】\n" + "\n".join(lines)
 
-    def _render_l3_skills(self, skills: List[MemorySkill]) -> str:
-        if not skills:
+    def _render_l3_skills(
+        self,
+        skills: List[MemorySkill],
+        *,
+        max_tokens: int = 1000,
+    ) -> str:
+        if not skills or max_tokens <= 0:
             return ""
         import json as _json
 
         lines: List[str] = []
+        used = 0
         for s in skills:
             try:
                 steps = _json.loads(s.steps_json)
@@ -331,21 +461,32 @@ class ContextBuilder:
             except Exception:
                 step_text = s.steps_json
             pre = f"（前置: {s.prerequisites}）" if s.prerequisites else ""
-            lines.append(
+            line = (
                 f"- [skill:{s.skill_id} | 工具={s.tool_preference} | 成功{s.success_count}次] "
                 f"{s.name}{pre}: {step_text}"
             )
+            cost = self.meter.count(line)
+            if lines and used + cost > max_tokens:
+                break
+            lines.append(line)
+            used += cost
+        if not lines:
+            return ""
         return "【可复用的已学技能（Skill，按需参考执行）】\n" + "\n".join(lines)
 
     def _apply_ocr_budget(
         self,
         user_content: Union[str, List[Dict[str, Any]]],
         stats: BuildStats,
+        *,
+        max_tokens: Optional[int] = None,
     ) -> Union[str, List[Dict[str, Any]]]:
         if isinstance(user_content, list):
             return user_content
         text = str(user_content)
-        budget = self.budget.l3_desktop_ocr_tokens
+        budget = max_tokens if max_tokens is not None else self.budget.l3_desktop_ocr_tokens
+        if budget <= 0:
+            return text
         if estimate_tokens(text) <= budget:
             return text
         stats.ocr_truncated = True

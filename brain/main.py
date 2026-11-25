@@ -261,6 +261,11 @@ def create_app(
                 "work_history_count": len(work_logs),
                 "scheduled_tasks_count": len(scheduled_tasks),
                 "mcp_servers": [asdict(s) for s in active_mcp.list_statuses()],
+                "last_build_stats": (
+                    asdict(hub.last_build_stats)
+                    if getattr(hub, "last_build_stats", None) is not None
+                    else None
+                ),
                 "today_usage": {
                     "calls": today_usage.calls,
                     "prompt_tokens": today_usage.prompt_tokens,
