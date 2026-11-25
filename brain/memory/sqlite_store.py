@@ -155,6 +155,8 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     session_id TEXT NOT NULL DEFAULT '',
     turn_id TEXT NOT NULL DEFAULT '',
     profile TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    slot TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
@@ -209,6 +211,18 @@ class SQLiteMemoryStore(MemoryBackend):
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA foreign_keys=ON;")
             conn.executescript(_SCHEMA_SQL)
+            usage_cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(usage_ledger)").fetchall()
+            }
+            if "provider" not in usage_cols:
+                conn.execute(
+                    "ALTER TABLE usage_ledger ADD COLUMN provider TEXT NOT NULL DEFAULT ''"
+                )
+            if "slot" not in usage_cols:
+                conn.execute(
+                    "ALTER TABLE usage_ledger ADD COLUMN slot TEXT NOT NULL DEFAULT ''"
+                )
             for cat in DEFAULT_MEMORY_CATEGORIES:
                 conn.execute(
                     """
@@ -1065,15 +1079,17 @@ class SQLiteMemoryStore(MemoryBackend):
             cur = conn.execute(
                 """
                 INSERT INTO usage_ledger (
-                    session_id, turn_id, profile, model,
+                    session_id, turn_id, profile, provider, slot, model,
                     prompt_tokens, prompt_cache_hit_tokens, completion_tokens,
                     estimated_cost_cny, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.session_id,
                     record.turn_id,
                     record.profile,
+                    record.provider,
+                    record.slot,
                     record.model,
                     record.prompt_tokens,
                     record.prompt_cache_hit_tokens,
@@ -1088,6 +1104,8 @@ class SQLiteMemoryStore(MemoryBackend):
                 session_id=record.session_id,
                 turn_id=record.turn_id,
                 profile=record.profile,
+                provider=record.provider,
+                slot=record.slot,
                 model=record.model,
                 prompt_tokens=record.prompt_tokens,
                 prompt_cache_hit_tokens=record.prompt_cache_hit_tokens,
@@ -1095,6 +1113,31 @@ class SQLiteMemoryStore(MemoryBackend):
                 estimated_cost_cny=record.estimated_cost_cny,
                 created_at=record.created_at,
             )
+
+    async def list_usage_records(self, *, limit: int = 50) -> List[UsageLedgerRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            rows = conn.execute(
+                "SELECT * FROM usage_ledger ORDER BY ledger_id DESC LIMIT ?",
+                (max(1, limit),),
+            ).fetchall()
+            return [
+                UsageLedgerRecord(
+                    ledger_id=int(r["ledger_id"]),
+                    session_id=str(r["session_id"] or ""),
+                    turn_id=str(r["turn_id"] or ""),
+                    profile=str(r["profile"] or ""),
+                    provider=str(r["provider"] or ""),
+                    slot=str(r["slot"] or ""),
+                    model=str(r["model"] or ""),
+                    prompt_tokens=int(r["prompt_tokens"] or 0),
+                    prompt_cache_hit_tokens=int(r["prompt_cache_hit_tokens"] or 0),
+                    completion_tokens=int(r["completion_tokens"] or 0),
+                    estimated_cost_cny=float(r["estimated_cost_cny"] or 0.0),
+                    created_at=float(r["created_at"] or 0.0),
+                )
+                for r in rows
+            ]
 
     async def get_usage_summary(self, *, since_ts: float = 0.0) -> UsageSummary:
         async with self._lock:
@@ -1524,16 +1567,18 @@ class SQLiteMemoryStore(MemoryBackend):
                         conn.execute(
                             """
                             INSERT OR REPLACE INTO usage_ledger (
-                                ledger_id, session_id, turn_id, profile, model,
+                                ledger_id, session_id, turn_id, profile, provider, slot, model,
                                 prompt_tokens, prompt_cache_hit_tokens, completion_tokens,
                                 estimated_cost_cny, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["ledger_id"],
                                 rec.get("session_id", ""),
                                 rec.get("turn_id", ""),
                                 rec.get("profile", ""),
+                                rec.get("provider", ""),
+                                rec.get("slot", ""),
                                 rec.get("model", ""),
                                 rec.get("prompt_tokens", 0),
                                 rec.get("prompt_cache_hit_tokens", 0),

@@ -1,19 +1,22 @@
 extends RefCounted
 
-# Phase 7 Unified Design Tokens — macOS Obsidian Translucent Dark System
-# Centralized palette, typography, radii, shadows, SVG icon loader & StyleBox helpers.
+# Phase 7 Unified Design Tokens — macOS Obsidian Layered Dark System
+# Centralized palette, typography, radii, shadows, SVG icon loader & widget factories.
 
-const SURFACE_PRIMARY := Color(0.0706, 0.0824, 0.1098, 0.92)       # #12151CEB
-const SURFACE_ELEVATED := Color(0.1176, 0.1373, 0.1882, 0.85)      # #1E2330D9
-const SURFACE_HOVER := Color(0.1686, 0.2000, 0.2706, 0.92)         # #2B3345EB
-const SURFACE_PRESSED := Color(0.2078, 0.2471, 0.3294, 0.95)       # #353F54F2
-const SURFACE_INPUT := Color(0.0510, 0.0627, 0.0863, 0.88)         # #0D1016E0
-const SURFACE_CHIP := Color(1.0, 1.0, 1.0, 0.07)
+const SURFACE_SIDEBAR := Color(0.0549, 0.0667, 0.0941, 0.96)       # #0E1118F5
+const SURFACE_PRIMARY := Color(0.0784, 0.0941, 0.1294, 0.94)       # #141821F0
+const SURFACE_CARD := Color(0.0980, 0.1216, 0.1686, 0.90)          # #191F2BE6
+const SURFACE_ELEVATED := Color(0.1098, 0.1333, 0.1882, 0.90)      # #1C2230E6
+const SURFACE_GHOST_HOVER := Color(1.0, 1.0, 1.0, 0.06)            # #FFFFFF0F
+const SURFACE_HOVER := Color(0.1490, 0.1804, 0.2471, 0.92)         # #262E3FEB
+const SURFACE_PRESSED := Color(0.1843, 0.2235, 0.3059, 0.95)       # #2F394EF2
+const SURFACE_INPUT := Color(0.0784, 0.0941, 0.1294, 0.92)
+const SURFACE_CHIP := Color(1.0, 1.0, 1.0, 0.06)
 
-const BORDER_HAIRLINE := Color(1.0, 1.0, 1.0, 0.10)                # #FFFFFF1A
-const BORDER_SPECULAR_TOP := Color(1.0, 1.0, 1.0, 0.18)            # #FFFFFF2E
+const BORDER_HAIRLINE := Color(1.0, 1.0, 1.0, 0.08)                # #FFFFFF14
+const BORDER_SPECULAR_TOP := Color(1.0, 1.0, 1.0, 0.15)            # #FFFFFF26
 const BORDER_FOCUS := Color(0.2196, 0.7412, 0.9725, 0.55)          # #38BDF88C
-const DIVIDER := Color(1.0, 1.0, 1.0, 0.07)                        # #FFFFFF12
+const DIVIDER := Color(1.0, 1.0, 1.0, 0.06)                        # #FFFFFF10
 
 const TEXT_PRIMARY := Color(0.9529, 0.9608, 0.9725, 1.0)           # #F3F5F8
 const TEXT_SECONDARY := Color(0.5804, 0.6196, 0.6824, 1.0)         # #949EAE
@@ -25,25 +28,27 @@ const ACCENT_CYAN_BG := Color(0.2196, 0.7412, 0.9725, 0.15)        # #38BDF826
 const ACCENT_CYAN_BORDER := Color(0.2196, 0.7412, 0.9725, 0.40)
 
 const STATUS_EMERALD := Color(0.2039, 0.8275, 0.6000, 1.0)         # #34D399
+const STATUS_EMERALD_BG := Color(0.2039, 0.8275, 0.6000, 0.15)
 const STATUS_AMBER := Color(0.9843, 0.7490, 0.1412, 1.0)           # #FBBF24
 const STATUS_RED := Color(0.9725, 0.4431, 0.4431, 1.0)             # #F87171
-const STATUS_RED_BG := Color(0.9725, 0.4431, 0.4431, 0.16)
-const STATUS_RED_HOVER := Color(0.9725, 0.4431, 0.4431, 0.28)
+const STATUS_RED_BG := Color(0.9725, 0.4431, 0.4431, 0.14)
+const STATUS_RED_HOVER := Color(0.9725, 0.4431, 0.4431, 0.24)
 
 const SWITCH_OFF := Color(0.2196, 0.2471, 0.3137, 1.0)             # #383F50
 const SHADOW_COLOR := Color(0.0, 0.0, 0.0, 0.45)                   # #00000073
 
-const KEYCAP_BG := Color(1.0, 1.0, 1.0, 0.08)
-const KEYCAP_BORDER := Color(1.0, 1.0, 1.0, 0.14)
+const KEYCAP_BG := Color(1.0, 1.0, 1.0, 0.07)
+const KEYCAP_BORDER := Color(1.0, 1.0, 1.0, 0.12)
 
-const RADIUS_QUICK_ENTRY := 20
+const RADIUS_QUICK_ENTRY := 18
 const RADIUS_POPOVER := 16
 const RADIUS_PIN_WINDOW := 18
 const RADIUS_CAPSULE := 14
 const RADIUS_PILL := 16
-const RADIUS_BUTTON := 10
+const RADIUS_BUTTON := 9
 const RADIUS_KEYCAP := 6
 
+const FONT_SIZE_PAGE_TITLE := 18
 const FONT_SIZE_TITLE := 15
 const FONT_SIZE_INPUT := 15
 const FONT_SIZE_BODY := 13
@@ -111,7 +116,7 @@ static func make_panel_style(
 	radius: int = RADIUS_POPOVER,
 	bg: Color = SURFACE_PRIMARY,
 	border: Color = BORDER_HAIRLINE,
-	shadow_size: int = 26,
+	shadow_size: int = 24,
 	shadow_offset: Vector2 = Vector2(0, 10)
 ) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
@@ -130,16 +135,16 @@ static func make_panel_style(
 
 static func make_capsule_style(
 	radius: int = RADIUS_CAPSULE,
-	bg: Color = SURFACE_ELEVATED,
+	bg: Color = SURFACE_CARD,
 	border: Color = BORDER_HAIRLINE,
 	pad_x: int = 12,
 	pad_y: int = 6,
-	shadow_size: int = 18
+	shadow_size: int = 16
 ) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = bg
 	sb.border_color = border
-	sb.set_border_width_all(1)
+	sb.set_border_width_all(1 if border.a > 0.01 else 0)
 	sb.set_corner_radius_all(radius)
 	sb.corner_detail = 10
 	sb.content_margin_left = pad_x
@@ -199,6 +204,77 @@ static func apply_button_states(
 	btn.add_theme_color_override("font_focus_color", hover_text_color)
 	btn.add_theme_color_override("font_disabled_color", TEXT_MUTED)
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+
+
+static func make_ghost_button(label_text: String, icon_name: String = "", icon_size: int = 14) -> Button:
+	var btn := Button.new()
+	btn.text = label_text
+	btn.expand_icon = false
+	btn.add_theme_font_size_override("font_size", FONT_SIZE_SMALL)
+	btn.add_theme_constant_override("h_separation", 6)
+	if icon_name != "":
+		btn.icon = get_icon(icon_name, icon_size, TEXT_SECONDARY, 1.0)
+	apply_button_states(
+		btn,
+		Color.TRANSPARENT,
+		SURFACE_GHOST_HOVER,
+		SURFACE_HOVER,
+		Color.TRANSPARENT,
+		8,
+		TEXT_SECONDARY,
+		8,
+		4,
+		TEXT_PRIMARY
+	)
+	return btn
+
+
+static func make_secret_input(placeholder: String) -> Dictionary:
+	var wrap := PanelContainer.new()
+	wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wrap.add_theme_stylebox_override(
+		"panel",
+		make_button_style(SURFACE_ELEVATED, BORDER_HAIRLINE, RADIUS_BUTTON, 10, 4)
+	)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	wrap.add_child(row)
+
+	var edit := LineEdit.new()
+	edit.secret = true
+	edit.placeholder_text = placeholder
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	edit.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+	edit.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	edit.add_theme_stylebox_override("read_only", StyleBoxEmpty.new())
+	edit.add_theme_font_size_override("font_size", FONT_SIZE_BODY)
+	row.add_child(edit)
+
+	var eye_btn := Button.new()
+	eye_btn.custom_minimum_size = Vector2(24, 24)
+	eye_btn.expand_icon = false
+	eye_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	eye_btn.icon = get_icon("eye", 14, TEXT_SECONDARY, 1.0)
+	eye_btn.tooltip_text = "显示/隐藏密钥"
+	apply_button_states(
+		eye_btn,
+		Color.TRANSPARENT,
+		SURFACE_GHOST_HOVER,
+		SURFACE_HOVER,
+		Color.TRANSPARENT,
+		6,
+		TEXT_SECONDARY,
+		4,
+		2,
+		TEXT_PRIMARY
+	)
+	eye_btn.pressed.connect(func() -> void:
+		edit.secret = not edit.secret
+		eye_btn.icon = get_icon("eye_off" if not edit.secret else "eye", 14, TEXT_SECONDARY, 1.0)
+	)
+	row.add_child(eye_btn)
+
+	return {"container": wrap, "edit": edit, "eye_btn": eye_btn}
 
 
 static func make_keycap(text_label: String, font_size: int = FONT_SIZE_KEYCAP) -> PanelContainer:
@@ -288,15 +364,15 @@ static func build_obsidian_theme() -> Theme:
 	theme.set_color("font_placeholder_color", "LineEdit", TEXT_MUTED)
 	theme.set_color("caret_color", "LineEdit", ACCENT_CYAN)
 	theme.set_color("selection_color", "LineEdit", ACCENT_CYAN_BG)
-	theme.set_stylebox("normal", "LineEdit", make_button_style(SURFACE_INPUT, BORDER_HAIRLINE, RADIUS_BUTTON, 10, 7))
-	theme.set_stylebox("focus", "LineEdit", make_button_style(SURFACE_INPUT, BORDER_FOCUS, RADIUS_BUTTON, 10, 7))
+	theme.set_stylebox("normal", "LineEdit", make_button_style(SURFACE_ELEVATED, BORDER_HAIRLINE, RADIUS_BUTTON, 10, 7))
+	theme.set_stylebox("focus", "LineEdit", make_button_style(SURFACE_ELEVATED, BORDER_FOCUS, RADIUS_BUTTON, 10, 7))
 	theme.set_stylebox("read_only", "LineEdit", make_button_style(SURFACE_CHIP, BORDER_HAIRLINE, RADIUS_BUTTON, 10, 7))
 
 	theme.set_color("font_color", "TextEdit", TEXT_PRIMARY)
 	theme.set_color("font_placeholder_color", "TextEdit", TEXT_MUTED)
 	theme.set_color("caret_color", "TextEdit", ACCENT_CYAN)
-	theme.set_stylebox("normal", "TextEdit", make_button_style(SURFACE_INPUT, BORDER_HAIRLINE, RADIUS_BUTTON, 10, 8))
-	theme.set_stylebox("focus", "TextEdit", make_button_style(SURFACE_INPUT, BORDER_FOCUS, RADIUS_BUTTON, 10, 8))
+	theme.set_stylebox("normal", "TextEdit", make_button_style(SURFACE_ELEVATED, BORDER_HAIRLINE, RADIUS_BUTTON, 10, 8))
+	theme.set_stylebox("focus", "TextEdit", make_button_style(SURFACE_ELEVATED, BORDER_FOCUS, RADIUS_BUTTON, 10, 8))
 
 	theme.set_stylebox("panel", "PopupMenu", make_panel_style(12, SURFACE_PRIMARY, BORDER_HAIRLINE, 18, Vector2(0, 6)))
 	theme.set_stylebox("hover", "PopupMenu", make_button_style(SURFACE_HOVER, Color.TRANSPARENT, 8, 8, 4))
@@ -311,10 +387,10 @@ static func build_obsidian_theme() -> Theme:
 	theme.set_color("font_hover_color", "OptionButton", TEXT_PRIMARY)
 
 	var scroll_grab := StyleBoxFlat.new()
-	scroll_grab.bg_color = Color(1.0, 1.0, 1.0, 0.18)
+	scroll_grab.bg_color = Color(1.0, 1.0, 1.0, 0.16)
 	scroll_grab.set_corner_radius_all(4)
 	var scroll_grab_hover := StyleBoxFlat.new()
-	scroll_grab_hover.bg_color = Color(1.0, 1.0, 1.0, 0.30)
+	scroll_grab_hover.bg_color = Color(1.0, 1.0, 1.0, 0.28)
 	scroll_grab_hover.set_corner_radius_all(4)
 	theme.set_stylebox("grabber", "VScrollBar", scroll_grab)
 	theme.set_stylebox("grabber_highlight", "VScrollBar", scroll_grab_hover)

@@ -271,9 +271,12 @@ class TaskScheduler:
             f"【近期工作足迹与情景记忆】\n" + "\n".join(ep_lines) + "\n\n"
             f"【近期任务执行记录】\n" + "\n".join(work_lines)
         )
-        profile_name = self.config.scheduler.summary_profile
-        if profile_name not in self.llm_router._config.profiles:
-            profile_name = self.llm_router.active_profile
+        if getattr(self.llm_router._config, "has_explicit_routing", False):
+            profile_name = "@slot:fast_utility"
+        else:
+            profile_name = self.config.scheduler.summary_profile
+            if profile_name not in self.llm_router._config.profiles:
+                profile_name = self.llm_router.active_profile
 
         try:
             res = await self.llm_router.complete_with_tools(
@@ -294,6 +297,8 @@ class TaskScheduler:
                         session_id="__scheduler__",
                         turn_id=task.task_id,
                         profile=u.profile or profile_name,
+                        provider=u.provider,
+                        slot=u.slot or "fast_utility",
                         model=u.model,
                         prompt_tokens=u.prompt_tokens,
                         prompt_cache_hit_tokens=u.prompt_cache_hit_tokens,

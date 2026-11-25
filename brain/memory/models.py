@@ -331,6 +331,8 @@ class UsageLedgerRecord:
     session_id: str = ""
     turn_id: str = ""
     profile: str = ""
+    provider: str = ""
+    slot: str = ""
     model: str = ""
     prompt_tokens: int = 0
     prompt_cache_hit_tokens: int = 0

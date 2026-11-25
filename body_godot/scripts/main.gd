@@ -181,13 +181,20 @@ func _on_envelope(event_type: String, turn_id: String, payload: Dictionary) -> v
 	match event_type:
 		"system.welcome":
 			var prof := str(payload.get("active_profile", ""))
-			if prof != "":
-				_cached_active_profile = prof
-				overlay.show_transient_status("启明星已上线 (%s)" % prof, 2.2)
-			tray.call("sync_status", bool(ws.call("is_connected_open")), _cached_active_profile)
 			var profs: Variant = payload.get("profiles", [])
 			if typeof(profs) == TYPE_ARRAY:
 				_cached_profiles = profs
+			var prof_disp := prof
+			for p_var in _cached_profiles:
+				if typeof(p_var) == TYPE_DICTIONARY and str((p_var as Dictionary).get("name", "")) == prof:
+					var lbl_s := str((p_var as Dictionary).get("label", "")).strip_edges()
+					if lbl_s != "":
+						prof_disp = lbl_s
+					break
+			if prof != "":
+				_cached_active_profile = prof
+				overlay.show_transient_status("启明星已上线 (%s)" % prof_disp, 2.2)
+			tray.call("sync_status", bool(ws.call("is_connected_open")), prof_disp)
 			if _quick_entry_win != null:
 				_quick_entry_win.call("sync_profiles", _cached_active_profile, _cached_profiles)
 			var welcome_sc: Variant = payload.get("shortcuts", {})

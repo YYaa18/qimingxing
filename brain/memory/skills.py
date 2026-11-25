@@ -188,9 +188,12 @@ class SkillManager:
             f"【成功执行轨迹】\n{steps_block}\n\n"
             f"【最终成果摘要】\n{final_summary[:300]}"
         )
-        profile_name = self.config.learn_profile
-        if profile_name not in self.llm_router._config.profiles:
-            profile_name = self.llm_router.active_profile
+        if getattr(self.llm_router._config, "has_explicit_routing", False):
+            profile_name = "@slot:fast_utility"
+        else:
+            profile_name = self.config.learn_profile
+            if profile_name not in self.llm_router._config.profiles:
+                profile_name = self.llm_router.active_profile
 
         chunks: List[str] = []
         async for tok in self.llm_router.stream_chat(

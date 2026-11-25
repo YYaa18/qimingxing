@@ -277,6 +277,10 @@ class MemoryBackend(ABC):
     async def get_usage_summary(self, *, since_ts: float = 0.0) -> UsageSummary:
         """Aggregate token usage, cache hit rate, and estimated cost since `since_ts`."""
 
+    @abstractmethod
+    async def list_usage_records(self, *, limit: int = 50) -> List[UsageLedgerRecord]:
+        """List recent LLM usage ledger records ordered newest first."""
+
     # --- M5: Scheduled Tasks ---
 
     @abstractmethod

@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
-from brain.config import AppConfig, ProfileConfig
+from brain.config import AppConfig, ProfileConfig, is_local_provider
 from protocol.models import ProfileInfo
 
 logger = logging.getLogger("qimingxing.llm_router")
@@ -59,6 +59,8 @@ class LLMUsage:
     estimated_cost_cny: float = 0.0
     model: str = ""
     profile: str = ""
+    provider: str = ""
+    slot: str = ""
 
 
 @dataclass
@@ -112,6 +114,8 @@ def _parse_usage(
         ),
         model=model,
         profile=profile_name,
+        provider=(profile.provider_id or profile.provider) if profile is not None else "",
+        slot=(profile.slot or "chat") if profile is not None else "",
     )
 
 
@@ -128,18 +132,30 @@ class LLMError(Exception):
 class LLMRouter:
     """Multi-profile cloud LLM streaming router with hot-switch, tool calling, and cancellation."""
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
+    ) -> None:
         self._config = config
         self._active_profile: str = config.default_profile
         self.last_usage: Optional[LLMUsage] = None
+        self._transport = transport
 
     @property
     def active_profile(self) -> str:
         return self._active_profile
 
     def get_profile(self, name: Optional[str] = None) -> ProfileConfig:
+        if name and name.startswith("@slot:"):
+            return self._config.resolve_slot_profile(name[6:])
+        if name is None and self._config.has_explicit_routing and self._active_profile in ("routed_chat", ""):
+            return self._config.resolve_slot_profile("chat")
         target = name or self._active_profile
         if target not in self._config.profiles:
+            if target == "routed_chat" or self._config.has_explicit_routing:
+                return self._config.resolve_slot_profile("chat")
             raise LLMError("PROFILE_NOT_FOUND", f"未找到模型配置: {target}")
         return self._config.profiles[target]
 
@@ -233,7 +249,10 @@ class LLMRouter:
         messages: List[Dict[str, Any]],
         profile: ProfileConfig,
     ) -> AsyncIterator[str]:
-        if not profile.api_key:
+        api_key = profile.api_key
+        if not api_key and is_local_provider(profile.provider_id, profile.base_url, profile.provider):
+            api_key = "ollama"
+        if not api_key:
             raise LLMError(
                 "MISSING_API_KEY",
                 f"模型配置 {profile.name} ({profile.model}) 未设置 API Key 环境变量。",
@@ -243,7 +262,7 @@ class LLMRouter:
 
         url = f"{profile.base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {profile.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         body = {
@@ -256,8 +275,11 @@ class LLMRouter:
         self.last_usage = None
 
         timeout = httpx.Timeout(profile.timeout_seconds, connect=10.0)
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
         logged_reasoning = False
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(**client_kwargs) as client:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code >= 400:
                     raw_err = (await resp.aread()).decode("utf-8", errors="replace")
@@ -486,7 +508,12 @@ class LLMRouter:
                     if on_text_delta is not None:
                         await on_text_delta(tok)
                 full = "".join(chunks)
-                usage = LLMUsage(model=profile.model, profile=profile.name)
+                usage = LLMUsage(
+                    model=profile.model,
+                    profile=profile.name,
+                    provider=profile.provider_id or profile.provider,
+                    slot=profile.slot or "chat",
+                )
                 self.last_usage = usage
                 return LLMCompletionResult(content=full, finish_reason="stop", usage=usage)
 
@@ -503,7 +530,12 @@ class LLMRouter:
                 chunks.append(tok)
                 if on_text_delta is not None:
                     await on_text_delta(tok)
-            usage = self.last_usage or LLMUsage(model=profile.model, profile=profile.name)
+            usage = self.last_usage or LLMUsage(
+                model=profile.model,
+                profile=profile.name,
+                provider=profile.provider_id or profile.provider,
+                slot=profile.slot or "chat",
+            )
             return LLMCompletionResult(content="".join(chunks), finish_reason="stop", usage=usage)
         except asyncio.CancelledError:
             raise
@@ -533,7 +565,10 @@ class LLMRouter:
         *,
         on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> LLMCompletionResult:
-        if not profile.api_key:
+        api_key = profile.api_key
+        if not api_key and is_local_provider(profile.provider_id, profile.base_url, profile.provider):
+            api_key = "ollama"
+        if not api_key:
             raise LLMError(
                 "MISSING_API_KEY",
                 f"模型配置 {profile.name} ({profile.model}) 未设置 API Key 环境变量。",
@@ -543,7 +578,7 @@ class LLMRouter:
 
         url = f"{profile.base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {profile.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         body: Dict[str, Any] = {
@@ -558,12 +593,20 @@ class LLMRouter:
             body["tool_choice"] = "auto"
 
         timeout = httpx.Timeout(profile.timeout_seconds, connect=10.0)
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
         content_parts: List[str] = []
         tc_acc: Dict[int, Dict[str, Any]] = {}
         finish_reason = "stop"
-        usage = LLMUsage(model=profile.model, profile=profile.name)
+        usage = LLMUsage(
+            model=profile.model,
+            profile=profile.name,
+            provider=profile.provider_id or profile.provider,
+            slot=profile.slot or "chat",
+        )
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(**client_kwargs) as client:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code >= 400:
                     raw_err = (await resp.aread()).decode("utf-8", errors="replace")
@@ -627,3 +670,117 @@ class LLMRouter:
             finish_reason=finish_reason,
             usage=usage,
         )
+
+
+async def probe_provider_connectivity(
+    config: AppConfig,
+    *,
+    provider_id: str,
+    base_url: str = "",
+    api_key: str = "",
+    protocol: str = "openai_compatible",
+    model: str = "",
+    transport: Optional[httpx.AsyncBaseTransport] = None,
+) -> Dict[str, Any]:
+    """Send a lightweight connectivity check (`GET /models` or minimal completion) to a provider."""
+    saved_prov = config.providers.get(provider_id)
+    target_url = (base_url or (saved_prov.base_url if saved_prov else "") or "").strip().rstrip("/")
+    target_proto = (protocol or (saved_prov.protocol if saved_prov else "openai_compatible")).strip()
+    local = is_local_provider(provider_id, target_url, target_proto)
+
+    resolved_key = (api_key or "").strip()
+    if (not resolved_key or "****" in resolved_key or "***REDACTED***" in resolved_key) and saved_prov:
+        resolved_key = saved_prov.api_key
+    if not resolved_key and local:
+        resolved_key = "ollama"
+
+    if not target_url or not (target_url.startswith("http://") or target_url.startswith("https://")):
+        return {
+            "ok": False,
+            "provider_id": provider_id,
+            "latency_ms": 0,
+            "models": [],
+            "message": "请先填写有效的以 http:// 或 https:// 开头的 Base URL",
+            "error": "INVALID_URL",
+        }
+
+    if not resolved_key and not local:
+        return {
+            "ok": False,
+            "provider_id": provider_id,
+            "latency_ms": 0,
+            "models": [],
+            "message": "尚未配置该服务商的 API Key",
+            "error": "MISSING_API_KEY",
+        }
+
+    headers: Dict[str, str] = {}
+    if resolved_key:
+        headers["Authorization"] = f"Bearer {resolved_key}"
+    if target_proto == "anthropic":
+        headers = {"x-api-key": resolved_key, "anthropic-version": "2023-06-01"}
+
+    client_kwargs: Dict[str, Any] = {"timeout": httpx.Timeout(8.0, connect=5.0)}
+    if transport is not None:
+        client_kwargs["transport"] = transport
+
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            models_url = f"{target_url}/v1/models" if target_proto == "anthropic" else f"{target_url}/models"
+            resp = await client.get(models_url, headers=headers)
+            if resp.status_code in (404, 405) and model and target_proto == "openai_compatible":
+                resp = await client.post(
+                    f"{target_url}/chat/completions",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1,
+                    },
+                )
+            latency_ms = max(1, int((time.perf_counter() - started) * 1000))
+            if resp.status_code >= 400:
+                safe_err = config.redact_secrets(resp.text[:240])
+                if resolved_key and len(resolved_key) >= 4:
+                    safe_err = safe_err.replace(resolved_key, "***REDACTED***")
+                return {
+                    "ok": False,
+                    "provider_id": provider_id,
+                    "latency_ms": latency_ms,
+                    "models": [],
+                    "message": f"连通失败 (HTTP {resp.status_code}): {safe_err}",
+                    "error": f"HTTP_{resp.status_code}",
+                }
+            models_found: List[str] = []
+            try:
+                data = resp.json()
+                raw_data = data.get("data") if isinstance(data, dict) else None
+                if isinstance(raw_data, list):
+                    for item in raw_data[:30]:
+                        if isinstance(item, dict) and item.get("id"):
+                            models_found.append(str(item["id"]))
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "provider_id": provider_id,
+                "latency_ms": latency_ms,
+                "models": models_found,
+                "message": f"连通成功 · {latency_ms}ms"
+                + (f"（发现 {len(models_found)} 个可用模型）" if models_found else ""),
+                "error": "",
+            }
+    except Exception as exc:
+        latency_ms = max(1, int((time.perf_counter() - started) * 1000))
+        safe_err = config.redact_secrets(f"{type(exc).__name__}: {exc}")
+        if resolved_key and len(resolved_key) >= 4:
+            safe_err = safe_err.replace(resolved_key, "***REDACTED***")
+        return {
+            "ok": False,
+            "provider_id": provider_id,
+            "latency_ms": latency_ms,
+            "models": [],
+            "message": f"连接异常: {safe_err}",
+            "error": type(exc).__name__,
+        }

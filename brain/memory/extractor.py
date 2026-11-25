@@ -291,9 +291,12 @@ class MemoryExtractor:
                 logger.warning("Background session compression failed (isolated): %s", exc)
 
     async def _call_fast_llm(self, messages: List[Dict[str, str]]) -> str:
-        profile_name = self.config.profile
-        if profile_name not in self.llm_router._config.profiles:
-            profile_name = self.llm_router.active_profile
+        if getattr(self.llm_router._config, "has_explicit_routing", False):
+            profile_name = "@slot:fast_utility"
+        else:
+            profile_name = self.config.profile
+            if profile_name not in self.llm_router._config.profiles:
+                profile_name = self.llm_router.active_profile
         chunks: List[str] = []
         async for tok in self.llm_router.stream_chat(messages, profile_name=profile_name):
             chunks.append(tok)

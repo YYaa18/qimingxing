@@ -16,8 +16,8 @@ from pydantic import ValidationError
 from brain.artifact_store import ArtifactStore
 from brain.audio import (
     ASRProvider,
-    DeepSeekASRProvider,
-    DeepSeekTTSProvider,
+    RoutedASRProvider,
+    RoutedTTSProvider,
     SentenceChunker,
     TTSProvider,
     estimate_tts_cost_cny,
@@ -196,7 +196,8 @@ class Hub:
 
         self.intent_detector = intent_detector or ScreenIntentDetector()
         self.screen_router = screen_router or ScreenUnderstandingRouter(
-            DeepSeekOCRProvider(self.config.ocr, self.config)
+            DeepSeekOCRProvider(self.config.ocr, self.config),
+            config=self.config,
         )
         self.tool_registry = (
             tool_registry
@@ -212,10 +213,10 @@ class Hub:
             )
         else:
             self.skill_manager = None
-        self.asr_provider: ASRProvider = asr_provider or DeepSeekASRProvider(
+        self.asr_provider: ASRProvider = asr_provider or RoutedASRProvider(
             self.config.audio.asr
         )
-        self.tts_provider: TTSProvider = tts_provider or DeepSeekTTSProvider(
+        self.tts_provider: TTSProvider = tts_provider or RoutedTTSProvider(
             self.config.audio.tts
         )
         self.batch_path_store: BatchPathContextStore = (
@@ -699,7 +700,9 @@ class Hub:
             self.asr_provider.config = fresh_cfg.audio.asr  # type: ignore[attr-defined]
         if hasattr(self.tts_provider, "config"):
             self.tts_provider.config = fresh_cfg.audio.tts  # type: ignore[attr-defined]
-        if hasattr(self.screen_router, "ocr_provider") and hasattr(
+        if hasattr(self.screen_router, "reload_config"):
+            self.screen_router.reload_config(fresh_cfg)
+        elif hasattr(self.screen_router, "ocr_provider") and hasattr(
             self.screen_router.ocr_provider, "config"
         ):
             self.screen_router.ocr_provider.config = fresh_cfg.ocr  # type: ignore[attr-defined]
@@ -902,6 +905,8 @@ class Hub:
                 turn_usages=[
                     LLMUsage(
                         profile="audio_asr",
+                        provider=self.config.audio.asr.provider,
+                        slot="asr",
                         model=self.config.audio.asr.model,
                         estimated_cost_cny=asr_res.estimated_cost_cny,
                     )
@@ -1014,6 +1019,8 @@ class Hub:
                             turn_usages=[
                                 LLMUsage(
                                     profile="audio_tts",
+                                    provider=self.config.audio.tts.provider,
+                                    slot="tts",
                                     model=self.config.audio.tts.model,
                                     estimated_cost_cny=tts_cost,
                                 )
@@ -1339,6 +1346,8 @@ class Hub:
                     session_id=session_id,
                     turn_id=turn_id,
                     profile=u.profile,
+                    provider=u.provider,
+                    slot=u.slot,
                     model=u.model,
                     prompt_tokens=u.prompt_tokens,
                     prompt_cache_hit_tokens=u.prompt_cache_hit_tokens,
@@ -1785,6 +1794,10 @@ class Hub:
                     )
                 if self.llm_router.last_usage is not None:
                     turn_usages.append(self.llm_router.last_usage)
+
+            vision_usage = getattr(self.screen_router, "last_ocr_usage", None)
+            if vision_usage is not None:
+                turn_usages = [vision_usage, *turn_usages]
 
             tail_events = parser.finish()
             seq = await self._emit_parser_events(

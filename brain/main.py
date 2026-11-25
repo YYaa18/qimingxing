@@ -28,7 +28,7 @@ from brain.context_store import ContextStore
 from brain.history_store import MemoryStore
 from brain.hub import SERVER_VERSION, Hub
 from brain.intent_detector import ScreenIntentDetector
-from brain.llm_router import LLMRouter
+from brain.llm_router import LLMRouter, probe_provider_connectivity
 from brain.memory import MemoryBackend, create_memory_backend
 from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from brain.memory.extractor import MemoryExtractor
@@ -68,6 +68,7 @@ def create_app(
     desktop_command_runner: Optional[CommandRunner] = None,
     settings_config_path: Optional[Path] = None,
     capture_timeout_seconds: float = 3.5,
+    probe_transport: Optional[Any] = None,
 ) -> FastAPI:
     _config_injected = config is not None
     cfg = config or load_config()
@@ -541,6 +542,31 @@ def create_app(
                 "settings": get_sanitized_settings(fresh_cfg),
             }
         )
+
+    @app.post("/api/config/test_provider")
+    async def test_provider(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=403, detail="Provider connectivity probes are restricted to localhost."
+            )
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+
+        res = await probe_provider_connectivity(
+            hub.config,
+            provider_id=str(body.get("provider_id") or body.get("name") or "").strip(),
+            base_url=str(body.get("base_url") or "").strip(),
+            api_key=str(body.get("api_key") or "").strip(),
+            protocol=str(body.get("protocol") or "openai_compatible").strip(),
+            model=str(body.get("model") or "").strip(),
+            transport=probe_transport,
+        )
+        return JSONResponse(res)
 
     @app.get("/")
     async def index() -> FileResponse:
