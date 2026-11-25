@@ -276,6 +276,10 @@ if (( WITH_GODOT == 1 )) && [[ -n "${GODOT_APP_SRC}" ]]; then
 fi
 
 # 7. Strip quarantine/resource forks & ad-hoc codesign
+echo "🧹 清理 Python 字节码缓存（避免首次运行破坏签名）..."
+find "${APP_BUNDLE}" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "${APP_BUNDLE}" -name "*.pyc" -type f -delete 2>/dev/null || true
+
 echo "🔏 清理扩展属性并执行本地 Ad-hoc 签名..."
 xattr -cr "${APP_BUNDLE}" || true
 codesign --force --deep --sign - "${APP_BUNDLE}"

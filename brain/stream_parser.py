@@ -59,9 +59,16 @@ def _match_emotion_tag(buf: str) -> Tuple[str, Union[Emotion, None]]:
     if not upper.startswith("["):
         return ("no", None)
 
-    colon_idx = buf.find(":", 1)
-    if colon_idx == -1:
-        # Still typing '[EMOTION' or '[EMOTION   ' before ':'
+    # Accept both `[EMOTION:happy]` and the `[EMOTION=happy]` variant that
+    # some models emit.
+    sep_idx = -1
+    for idx, ch in enumerate(buf):
+        if idx == 0:
+            continue
+        if ch in ":=":
+            sep_idx = idx
+            break
+    if sep_idx == -1:
         tag_name = upper[1:].rstrip()
         if "\n" in buf or len(buf) > 16:
             return ("no", None)
@@ -69,17 +76,17 @@ def _match_emotion_tag(buf: str) -> Tuple[str, Union[Emotion, None]]:
             return ("prefix", None)
         return ("no", None)
 
-    tag_name = upper[1:colon_idx].strip()
+    tag_name = upper[1:sep_idx].strip()
     if tag_name != "EMOTION":
         return ("no", None)
 
-    close_idx = buf.find("]", colon_idx + 1)
+    close_idx = buf.find("]", sep_idx + 1)
     if close_idx == -1:
         if "\n" in buf or len(buf) > 48:
             return ("no", None)
         return ("prefix", None)
 
-    raw_emotion = buf[colon_idx + 1 : close_idx].strip().lower()
+    raw_emotion = buf[sep_idx + 1 : close_idx].strip().lower()
     emotion: Emotion = raw_emotion if raw_emotion in ALLOWED_EMOTIONS else "neutral"  # type: ignore[assignment]
     return ("match", emotion)
 

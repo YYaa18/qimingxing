@@ -1,18 +1,104 @@
 import AppKit
 import SwiftUI
 
+// Quiet Native design tokens.
+// Chrome stays neutral; the only strong contrast is the primary action
+// (white on dark, black on light). Color is reserved for state and content.
 enum QMXTheme {
-    static let accent = Color(red: 0.22, green: 0.74, blue: 0.97) // #38BDF8 sky cyan
-    static let success = Color(red: 0.20, green: 0.83, blue: 0.60)
-    static let warning = Color(red: 0.98, green: 0.75, blue: 0.14)
-    static let danger = Color(red: 0.97, green: 0.44, blue: 0.44)
+    // MARK: Neutral surfaces (light / dark)
 
-    static let panelRadius: CGFloat = 16
-    static let cardRadius: CGFloat = 12
-    static let controlRadius: CGFloat = 8
+    private static func dynamic(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return isDark ? dark : light
+        })
+    }
+
+    static let window = dynamic(
+        light: NSColor(calibratedWhite: 0.96, alpha: 1.0),
+        dark: NSColor(red: 0.039, green: 0.047, blue: 0.063, alpha: 1.0) // #0A0C10
+    )
+    static let surface = dynamic(
+        light: NSColor.white,
+        dark: NSColor(red: 0.067, green: 0.078, blue: 0.102, alpha: 1.0) // #11141A
+    )
+    static let surfaceRaised = dynamic(
+        light: NSColor(calibratedWhite: 0.95, alpha: 1.0),
+        dark: NSColor(red: 0.102, green: 0.118, blue: 0.149, alpha: 1.0) // #1A1E26
+    )
+    static let surfaceMuted = dynamic(
+        light: NSColor(calibratedWhite: 0.91, alpha: 1.0),
+        dark: NSColor(red: 0.137, green: 0.157, blue: 0.200, alpha: 1.0) // #232833
+    )
+    static let field = dynamic(
+        light: NSColor.white,
+        dark: NSColor(red: 0.075, green: 0.086, blue: 0.110, alpha: 1.0) // #13161C
+    )
+
+    static let hairline = Color.primary.opacity(0.10)
+    static let textPrimary = Color.primary
+    static let textSecondary = Color.secondary
+    static let textTertiary = Color(nsColor: .tertiaryLabelColor)
+
+    // MARK: Primary action inversion
+
+    // Semantic inversion avoids appearance-resolution mismatches: primary is
+    // white on dark and black on light, so the fill is Color.primary and the
+    // label is the window background.
+    static let primaryFill = Color.primary
+    static let primaryText = Color(nsColor: .windowBackgroundColor)
+
+    // MARK: System accent + semantic state
+
+    static let accent = Color.accentColor
+    static let accentSoft = Color.accentColor.opacity(0.12)
+    static let success = Color(red: 0.20, green: 0.83, blue: 0.60) // #34D399
+    static let warning = Color(red: 0.98, green: 0.75, blue: 0.14) // #FBBF24
+    static let danger = Color(red: 0.97, green: 0.44, blue: 0.44) // #F87171
+
+    // MARK: Radii
+
+    static let commandRadius: CGFloat = 24
+    static let settingsRadius: CGFloat = 22
+    static let approvalRadius: CGFloat = 20
+    static let popoverRadius: CGFloat = 16
+    static let cardRadius: CGFloat = 14
+    static let controlRadius: CGFloat = 9
+    static let keycapRadius: CGFloat = 5
 
     static let isHeadlessDump: Bool = ProcessInfo.processInfo.arguments.contains("--dump-ui")
 }
+
+extension View {
+    func qmxCard(
+        radius: CGFloat = QMXTheme.cardRadius,
+        fill: Color = QMXTheme.surfaceRaised
+    ) -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(fill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+            )
+    }
+
+    func qmxField(radius: CGFloat = QMXTheme.controlRadius) -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(QMXTheme.field)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+            )
+    }
+}
+
+// MARK: - Window material
 
 struct VisualEffectBlur: NSViewRepresentable {
     let material: NSVisualEffectView.Material
@@ -20,7 +106,7 @@ struct VisualEffectBlur: NSViewRepresentable {
     let state: NSVisualEffectView.State
 
     init(
-        material: NSVisualEffectView.Material = .hudWindow,
+        material: NSVisualEffectView.Material = .popover,
         blendingMode: NSVisualEffectView.BlendingMode = .behindWindow,
         state: NSVisualEffectView.State = .active
     ) {
@@ -33,7 +119,11 @@ struct VisualEffectBlur: NSViewRepresentable {
         if QMXTheme.isHeadlessDump {
             let v = NSView()
             v.wantsLayer = true
-            v.layer?.backgroundColor = NSColor(red: 0.09, green: 0.11, blue: 0.16, alpha: 0.98).cgColor
+            let isLight = ProcessInfo.processInfo.arguments.contains("--light")
+            let color = isLight
+                ? NSColor(calibratedWhite: 0.96, alpha: 1.0)
+                : NSColor(red: 0.039, green: 0.047, blue: 0.063, alpha: 1.0)
+            v.layer?.backgroundColor = color.cgColor
             return v
         }
         let view = NSVisualEffectView()
@@ -52,6 +142,245 @@ struct VisualEffectBlur: NSViewRepresentable {
     }
 }
 
+// MARK: - Brand mark
+
+/// A flat four-point morning star. No tile, no glow, no gradient.
+struct MorningStarShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let outer = min(rect.width, rect.height) / 2
+        let inner = outer * 0.26
+        var path = Path()
+        for i in 0..<8 {
+            let angle = -Double.pi / 2 + Double(i) * Double.pi / 4
+            let radius = i.isMultiple(of: 2) ? outer : inner
+            let point = CGPoint(
+                x: center.x + CGFloat(cos(angle)) * radius,
+                y: center.y + CGFloat(sin(angle)) * radius
+            )
+            if i == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+struct MorningStarMark: View {
+    var size: CGFloat = 20
+    var color: Color = QMXTheme.textPrimary
+
+    var body: some View {
+        MorningStarShape()
+            .fill(color)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Status
+
+struct StatusDot: View {
+    let color: Color
+    var size: CGFloat = 6
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Ambient rim light
+
+/// A slow pearl/ice rim that appears only while the assistant is thinking
+/// or listening. Static hairline when idle; degrades to a static fade when
+/// Reduce Motion is enabled.
+struct AmbientRimLight: View {
+    let isActive: Bool
+    let cornerRadius: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spinning = false
+
+    private var gradient: AngularGradient {
+        AngularGradient(
+            gradient: Gradient(stops: [
+                .init(color: .clear, location: 0.00),
+                .init(color: QMXTheme.accent.opacity(0.72), location: 0.30),
+                .init(color: Color.primary.opacity(0.95), location: 0.50),
+                .init(color: QMXTheme.accent.opacity(0.40), location: 0.70),
+                .init(color: .clear, location: 1.00),
+            ]),
+            center: .center
+        )
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let side = hypot(geo.size.width, geo.size.height) + 8
+
+            gradient
+                .frame(width: side, height: side)
+                .rotationEffect(.degrees(spinning ? 360 : 0))
+                .frame(width: geo.size.width, height: geo.size.height)
+                .mask(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(lineWidth: 1.8)
+                )
+                .opacity(isActive ? 1.0 : 0.0)
+                .animation(.easeInOut(duration: 0.25), value: isActive)
+        }
+        .allowsHitTesting(false)
+        .onAppear { startIfNeeded() }
+        .onChange(of: isActive) { _ in startIfNeeded() }
+        .onChange(of: reduceMotion) { _ in startIfNeeded() }
+    }
+
+    /// Core Animation rotates the gradient layer; no per-frame SwiftUI body
+    /// rebuilds, which keeps the rim smooth and cheap.
+    private func startIfNeeded() {
+        if isActive && !reduceMotion {
+            spinning = false
+            withAnimation(.linear(duration: 2.8).repeatForever(autoreverses: false)) {
+                spinning = true
+            }
+        } else {
+            withAnimation(nil) {
+                spinning = false
+            }
+        }
+    }
+}
+
+// MARK: - Globe spinner
+
+/// A small dotted sphere that rotates like a loading globe. Used while the
+/// assistant is thinking and for running background tasks.
+struct GlobeSpinner: View {
+    var size: CGFloat = 18
+    var color: Color = QMXTheme.textSecondary
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: reduceMotion)) { context in
+            Canvas { graphics, canvasSize in
+                let elapsed = context.date.timeIntervalSinceReferenceDate
+                let angle = reduceMotion
+                    ? 0.7
+                    : elapsed.truncatingRemainder(dividingBy: 2.6) / 2.6 * .pi * 2
+                draw(graphics, size: canvasSize, angle: angle)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+
+    private func draw(_ graphics: GraphicsContext, size: CGSize, angle: Double) {
+        let radius = min(size.width, size.height) / 2 - 1
+        guard radius > 1 else { return }
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let tilt = 0.42
+        let unit = size.width / 18
+
+        for latitude in stride(from: -60.0, through: 60.0, by: 30.0) {
+            let phi = latitude * .pi / 180
+            let ring = cos(phi) * radius
+            let y0 = sin(phi) * radius
+            let count = max(5, Int(ring / radius * 10))
+            guard count > 0 else { continue }
+
+            for index in 0..<count {
+                let theta = 2 * .pi * Double(index) / Double(count) + angle
+                let x = cos(theta) * ring
+                let z = sin(theta) * ring
+                let y = y0 * cos(tilt) - z * sin(tilt)
+                let depthZ = y0 * sin(tilt) + z * cos(tilt)
+                let depth = (depthZ / radius + 1) / 2
+                let alpha = 0.14 + 0.86 * depth
+                let dot = (0.70 + 0.80 * depth) * unit
+                let point = CGPoint(x: center.x + x, y: center.y + y)
+                graphics.fill(
+                    Path(ellipseIn: CGRect(
+                        x: point.x - dot,
+                        y: point.y - dot,
+                        width: dot * 2,
+                        height: dot * 2
+                    )),
+                    with: .color(color.opacity(alpha))
+                )
+            }
+        }
+    }
+}
+
+// MARK: - Emotion badge
+
+/// Native expression indicator for the latest answer. The model's emotion
+/// event is rendered here instead of leaking into the spoken text.
+struct EmotionBadge: View {
+    let emotion: String
+
+    private var style: (symbol: String, label: String, color: Color) {
+        switch emotion {
+        case "happy":
+            return ("face.smiling", "开心", QMXTheme.success)
+        case "thinking":
+            return ("brain.head.profile", "思考", QMXTheme.accent)
+        case "surprised":
+            return ("exclamationmark.bubble", "惊讶", QMXTheme.warning)
+        case "confused":
+            return ("questionmark.circle", "困惑", QMXTheme.warning)
+        case "warning":
+            return ("exclamationmark.triangle", "关切", QMXTheme.danger)
+        default:
+            return ("circle.dotted", "平静", QMXTheme.textTertiary)
+        }
+    }
+
+    var body: some View {
+        let style = style
+        HStack(spacing: 4) {
+            Image(systemName: style.symbol)
+                .font(.system(size: 10, weight: .medium))
+            Text(style.label)
+                .font(.system(size: 10.5, weight: .medium))
+        }
+        .foregroundStyle(style.color)
+        .padding(.horizontal, 7)
+        .frame(height: 20)
+        .background(
+            Capsule()
+                .fill(style.color.opacity(0.12))
+        )
+        .animation(.easeInOut(duration: 0.2), value: emotion)
+        .help("启明星此刻的情绪")
+        .accessibilityLabel("情绪：\(style.label)")
+    }
+}
+
+// MARK: - Tactile buttons
+
+struct TactileButtonStyle: ButtonStyle {
+    var haptic: NSHapticFeedbackManager.FeedbackPattern? = .alignment
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(reduceMotion ? 1.0 : (configuration.isPressed ? 0.97 : 1.0))
+            .opacity(configuration.isPressed ? 0.88 : 1.0)
+            .animation(.spring(response: 0.22, dampingFraction: 0.72), value: configuration.isPressed)
+            .onChange(of: configuration.isPressed) { pressed in
+                if pressed, let pattern = haptic {
+                    NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
+                }
+            }
+    }
+}
+
 enum QMXButtonVariant {
     case prominent
     case secondary
@@ -63,6 +392,7 @@ struct QMXButtonStyle: ButtonStyle {
     let variant: QMXButtonVariant
     let isActive: Bool
     @State private var isHovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(variant: QMXButtonVariant = .secondary, isActive: Bool = false) {
         self.variant = variant
@@ -73,94 +403,78 @@ struct QMXButtonStyle: ButtonStyle {
         let pressed = configuration.isPressed
         configuration.label
             .fixedSize(horizontal: true, vertical: false)
-            .font(.system(size: 12.5, weight: variant == .prominent ? .semibold : .medium))
+            .font(.system(size: 13, weight: variant == .prominent ? .medium : .regular))
             .foregroundStyle(foregroundColor)
             .padding(.horizontal, horizontalPad)
             .padding(.vertical, verticalPad)
+            .frame(
+                width: variant == .icon ? 28 : nil,
+                height: variant == .icon ? 28 : nil
+            )
             .background(
                 RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
                     .fill(backgroundColor(pressed: pressed))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
-                    .strokeBorder(borderColor, lineWidth: 1)
+                    .strokeBorder(borderColor, lineWidth: 0.5)
             )
             .contentShape(RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous))
-            .scaleEffect(pressed ? 0.98 : 1.0)
+            .scaleEffect(reduceMotion ? 1.0 : (pressed ? 0.98 : 1.0))
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
             .onHover { isHovering = $0 }
+            .onChange(of: pressed) { isPressed in
+                if isPressed, variant == .prominent || variant == .destructive {
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                }
+            }
     }
 
     private var horizontalPad: CGFloat {
-        variant == .icon ? 7 : 11
+        variant == .icon ? 0 : 12
     }
 
     private var verticalPad: CGFloat {
-        variant == .icon ? 6 : 6
+        variant == .icon ? 0 : 7
     }
 
     private var foregroundColor: Color {
         switch variant {
         case .prominent:
-            return .white
+            return QMXTheme.primaryText
         case .destructive:
             return QMXTheme.danger
         case .secondary, .icon:
-            return isActive ? QMXTheme.accent : .primary
+            return isActive ? QMXTheme.accent : QMXTheme.textPrimary
         }
     }
 
     private func backgroundColor(pressed: Bool) -> Color {
         switch variant {
         case .prominent:
-            if pressed { return QMXTheme.accent.opacity(0.75) }
-            if isHovering { return QMXTheme.accent.opacity(0.95) }
-            return QMXTheme.accent.opacity(0.85)
+            return pressed ? QMXTheme.primaryFill.opacity(0.82) : QMXTheme.primaryFill
         case .destructive:
-            if pressed { return QMXTheme.danger.opacity(0.28) }
-            if isHovering { return QMXTheme.danger.opacity(0.20) }
-            return QMXTheme.danger.opacity(0.12)
+            if pressed { return QMXTheme.danger.opacity(0.20) }
+            if isHovering { return QMXTheme.danger.opacity(0.14) }
+            return QMXTheme.danger.opacity(0.08)
         case .secondary, .icon:
-            if isActive {
-                return QMXTheme.accent.opacity(pressed ? 0.28 : 0.18)
-            }
-            if pressed { return Color.primary.opacity(0.16) }
-            if isHovering { return Color.primary.opacity(0.11) }
-            return Color.primary.opacity(0.07)
+            if isActive { return QMXTheme.accent.opacity(pressed ? 0.18 : 0.10) }
+            if pressed { return QMXTheme.surfaceMuted }
+            if isHovering { return QMXTheme.surfaceMuted.opacity(0.72) }
+            return variant == .icon ? .clear : QMXTheme.surfaceRaised
         }
     }
 
     private var borderColor: Color {
         switch variant {
         case .prominent:
-            return Color.white.opacity(0.24)
+            return QMXTheme.hairline
         case .destructive:
-            return QMXTheme.danger.opacity(0.35)
+            return QMXTheme.danger.opacity(0.24)
         case .secondary, .icon:
-            return isActive ? QMXTheme.accent.opacity(0.45) : Color.primary.opacity(0.12)
+            return isActive ? QMXTheme.accent.opacity(0.28) : (variant == .icon ? .clear : QMXTheme.hairline)
         }
-    }
-}
-
-struct QMXChipButtonStyle: ButtonStyle {
-    @State private var isHovering = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
-                    .fill(Color.primary.opacity(configuration.isPressed ? 0.14 : (isHovering ? 0.09 : 0.05)))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(isHovering ? 0.18 : 0.10), lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous))
-            .onHover { isHovering = $0 }
     }
 }
 
@@ -174,29 +488,31 @@ extension ButtonStyle where Self == QMXButtonStyle {
     }
 }
 
-struct HairlineBorderOverlay: View {
-    let cornerRadius: CGFloat
+struct QMXChipButtonStyle: ButtonStyle {
+    @State private var isHovering = false
 
-    init(cornerRadius: CGFloat = QMXTheme.panelRadius) {
-        self.cornerRadius = cornerRadius
-    }
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .strokeBorder(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.28),
-                        Color.white.opacity(0.08),
-                        Color.white.opacity(0.04)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                lineWidth: 1
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13))
+            .foregroundStyle(isHovering ? QMXTheme.textPrimary : QMXTheme.textSecondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
+                    .fill(configuration.isPressed ? QMXTheme.surfaceMuted : QMXTheme.surfaceRaised)
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
+                    .strokeBorder(isHovering ? QMXTheme.accent.opacity(0.22) : QMXTheme.hairline, lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous))
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .onHover { isHovering = $0 }
     }
 }
+
+// MARK: - Small details
 
 struct KeyCapBadge: View {
     let keys: String
@@ -209,57 +525,42 @@ struct KeyCapBadge: View {
 
     var body: some View {
         Text(keys)
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
-            .foregroundStyle(onAccent ? Color.white.opacity(0.92) : Color.secondary)
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundStyle(onAccent ? QMXTheme.primaryText.opacity(0.7) : QMXTheme.textTertiary)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(onAccent ? Color.white.opacity(0.20) : Color.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: QMXTheme.keycapRadius, style: .continuous)
+                    .fill(onAccent ? QMXTheme.primaryText.opacity(0.10) : QMXTheme.surfaceMuted)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .strokeBorder(onAccent ? Color.white.opacity(0.25) : Color.primary.opacity(0.12), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: QMXTheme.keycapRadius, style: .continuous)
+                    .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
             )
     }
 }
 
-struct PulsingDotView: View {
-    let color: Color
-    let isPulsing: Bool
-    @State private var animate = false
+struct HairlineBorderOverlay: View {
+    let cornerRadius: CGFloat
+
+    init(cornerRadius: CGFloat = QMXTheme.commandRadius) {
+        self.cornerRadius = cornerRadius
+    }
 
     var body: some View {
-        ZStack {
-            if isPulsing {
-                Circle()
-                    .fill(color.opacity(0.45))
-                    .frame(width: 14, height: 14)
-                    .scaleEffect(animate ? 1.35 : 0.75)
-                    .opacity(animate ? 0.15 : 0.65)
-                    .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: animate)
-            }
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-                .shadow(color: color.opacity(0.6), radius: 3)
-        }
-        .frame(width: 14, height: 14)
-        .onAppear {
-            if isPulsing { animate = true }
-        }
-        .onChange(of: isPulsing) { next in
-            animate = next
-        }
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
     }
 }
+
+// MARK: - Markdown
 
 struct MarkdownMessageView: View {
     let text: String
 
     var body: some View {
         let blocks = Self.parseBlocks(text)
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .code(let lang, let code):
@@ -343,13 +644,13 @@ private struct ProseMarkdownText: View {
             )
         ) {
             Text(attr)
-                .font(.system(size: 13.5))
-                .lineSpacing(3)
+                .font(.system(size: 14))
+                .lineSpacing(5)
                 .textSelection(.enabled)
         } else {
             Text(text)
-                .font(.system(size: 13.5))
-                .lineSpacing(3)
+                .font(.system(size: 14))
+                .lineSpacing(5)
                 .textSelection(.enabled)
         }
     }
@@ -364,8 +665,8 @@ private struct CodeBlockCard: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language.isEmpty ? "code" : language)
-                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(QMXTheme.textTertiary)
                 Spacer()
                 Button {
                     let pb = NSPasteboard.general
@@ -377,31 +678,31 @@ private struct CodeBlockCard: View {
                     }
                 } label: {
                     Label(copied ? "已复制" : "复制", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(.system(size: 11))
                 }
-                .buttonStyle(.borderless)
-                .foregroundStyle(copied ? QMXTheme.success : .secondary)
+                .buttonStyle(.plain)
+                .foregroundStyle(copied ? QMXTheme.success : QMXTheme.textTertiary)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.primary.opacity(0.06))
+            .padding(.vertical, 7)
+            .background(Color.primary.opacity(0.04))
 
-            Divider().opacity(0.4)
+            Divider().opacity(0.5)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(.system(size: 12, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(10)
-            }
+            Text(code)
+                .font(.system(size: 12, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
         }
         .background(
             RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
-                .fill(Color.black.opacity(0.26))
+                .fill(Color.primary.opacity(0.035))
         )
         .overlay(
             RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
         )
     }
 }

@@ -419,3 +419,12 @@ def test_tts_failure_degrades_gracefully_without_breaking_turn(tmp_path: Path) -
                     assert msg["payload"]["finish_reason"] == "completed"
                     break
             assert "语音合成坏了也要正常出字。" in "".join(texts)
+
+
+def test_sentence_chunker_silences_equals_emotion_tag() -> None:
+    chunker = SentenceChunker(min_chars=2, max_chars=80)
+    out = list(chunker.feed("[EMOTION=happy]\n工作区开好了。"))
+    out.extend(chunker.flush())
+    joined = " ".join(out)
+    assert "工作区开好了" in joined
+    assert "EMOTION" not in joined

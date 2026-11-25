@@ -5,7 +5,7 @@ from typing import List
 
 _SENTENCE_END_CHARS = set("。！？!?；;\n")
 _SOFT_BREAK_CHARS = set("，,、 ")
-_CONTROL_TAG_RE = re.compile(r"\[(?:EMOTION|CARD)\s*:[^\]]*\]", re.IGNORECASE)
+_CONTROL_TAG_RE = re.compile(r"\[(?:EMOTION|CARD)\s*[:=][^\]]*\]", re.IGNORECASE)
 _CODE_FENCE_MARKER = "```"
 
 
@@ -104,7 +104,8 @@ class SentenceChunker:
                 self._raw_buf = self._raw_buf[6:]
                 continue
 
-            if upper_head.startswith("[EMOTION:"):
+            emotion_head = upper_head[:8] == "[EMOTION"
+            if emotion_head and len(self._raw_buf) > 8 and self._raw_buf[8] in ":=":
                 close_idx = self._raw_buf.find("]")
                 if close_idx == -1:
                     if final:

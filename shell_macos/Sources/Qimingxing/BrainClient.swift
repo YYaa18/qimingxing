@@ -18,6 +18,7 @@ final class BrainClient: ObservableObject {
 
     @Published var messages: [ChatEntry] = []
     @Published var isGenerating: Bool = false
+    @Published var emotion: String = "neutral"
     @Published var currentTurnId: String?
     @Published var toolStatusText: String = ""
     @Published var errorBannerText: String = ""
@@ -42,6 +43,7 @@ final class BrainClient: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var shouldRun = false
+    private let clientInstanceId: String
 
     init(
         httpBase: String,
@@ -55,6 +57,14 @@ final class BrainClient: ObservableObject {
         self.appVersion = appVersion
         self.desktopActions = desktopActions
         self.audioPlayer = audioPlayer
+        let key = "qmx.clientInstanceId"
+        if let existing = UserDefaults.standard.string(forKey: key), !existing.isEmpty {
+            self.clientInstanceId = existing
+        } else {
+            let generated = UUID().uuidString
+            UserDefaults.standard.set(generated, forKey: key)
+            self.clientInstanceId = generated
+        }
     }
 
     var activeBgTaskCount: Int {
@@ -91,6 +101,7 @@ final class BrainClient: ObservableObject {
             "client_type": "body_macos",
             "platform": "macos",
             "app_version": appVersion,
+            "client_instance_id": clientInstanceId,
             "capabilities": [
                 "mirror_turns",
                 "native_approvals",
@@ -99,7 +110,6 @@ final class BrainClient: ObservableObject {
             ]
         ])
 
-        reconnectAttempt = 0
         startPingLoop()
         receiveLoop(for: task)
     }
@@ -187,6 +197,7 @@ final class BrainClient: ObservableObject {
         let turnId = "turn_\(UUID().uuidString.prefix(12).lowercased())"
         currentTurnId = turnId
         isGenerating = true
+        emotion = "thinking"
         errorBannerText = ""
 
         let prefix = attachments.isEmpty
@@ -274,6 +285,7 @@ final class BrainClient: ObservableObject {
         switch type {
         case "system.welcome":
             phase = .connected
+            reconnectAttempt = 0
             activeProfile = (payload["active_profile"] as? String) ?? activeProfile
             if let rawProfs = payload["profiles"] as? [[String: Any]] {
                 profiles = rawProfs.map {
@@ -294,6 +306,13 @@ final class BrainClient: ObservableObject {
                 )
             }
             Task { await refreshTasks() }
+
+        case "system.shortcuts_sync":
+            onShortcutsSynced?(
+                (payload["chat_input_hotkey"] as? String) ?? "option+space",
+                (payload["settings_hotkey"] as? String) ?? "option+k",
+                (payload["cancel_hotkey"] as? String) ?? "option+esc"
+            )
 
         case "system.privacy_state":
             privacyMode = (payload["mode"] as? String) ?? privacyMode
@@ -348,6 +367,20 @@ final class BrainClient: ObservableObject {
                 currentTurnId = turnId
             }
             isGenerating = true
+            emotion = "thinking"
+            if let userText = payload["user_text"] as? String,
+               !userText.isEmpty,
+               !messages.contains(where: { $0.turnId == turnId && $0.isUser }) {
+                messages.append(
+                    ChatEntry(
+                        id: UUID().uuidString,
+                        turnId: turnId,
+                        isUser: true,
+                        meta: "我",
+                        text: userText
+                    )
+                )
+            }
             let prof = (payload["profile"] as? String) ?? ""
             let mod = (payload["model"] as? String) ?? ""
             let meta = prof.isEmpty ? "启明星" : "启明星 · \(prof) (\(mod))"
@@ -426,6 +459,16 @@ final class BrainClient: ObservableObject {
                 audioPlayer.finishStream()
             }
 
+        case "avatar.state":
+            if let value = payload["emotion"] as? String, !value.isEmpty {
+                let activity = (payload["activity"] as? String) ?? ""
+                // The turn-end idle/neutral reset should not erase the emotion
+                // of the answer the user is still reading.
+                if !(value == "neutral" && activity == "idle") {
+                    emotion = value
+                }
+            }
+
         case "ui.command":
             handleUICommand(payload)
 
@@ -471,6 +514,18 @@ final class BrainClient: ObservableObject {
             ok = true
         case "open_settings":
             NotificationCenter.default.post(name: .qmxOpenSettings, object: args["tab"])
+            ok = true
+        case "open_workspace":
+            NotificationCenter.default.post(name: .qmxOpenWorkspace, object: nil)
+            ok = true
+        case "detach_workspace":
+            NotificationCenter.default.post(name: .qmxDetachWorkspace, object: nil)
+            ok = true
+        case "close_workspace":
+            NotificationCenter.default.post(name: .qmxCloseWorkspaceWing, object: nil)
+            ok = true
+        case "hide_quick_entry":
+            NotificationCenter.default.post(name: .qmxHideQuickEntry, object: nil)
             ok = true
         default:
             err = "unsupported_action"

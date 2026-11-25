@@ -107,12 +107,12 @@ class SensesAgent:
             if ptt_hotkey is not None
             else (cfg.shortcuts.ptt_hotkey if cfg else "right_option")
         )
-        self.action_hotkeys: Dict[str, str] = {
+        self.action_hotkeys: Dict[str, str] = self._platform_action_hotkeys({
             "chat_input": cfg.shortcuts.chat_input_hotkey if cfg else "option+space",
             "cancel": cfg.shortcuts.cancel_hotkey if cfg else "option+esc",
             "toggle_dock": cfg.shortcuts.toggle_dock_hotkey if cfg else "option+h",
             "settings": cfg.shortcuts.settings_hotkey if cfg else "option+k",
-        }
+        })
         self.audio_sample_rate = (
             audio_sample_rate
             if audio_sample_rate is not None
@@ -300,23 +300,31 @@ class SensesAgent:
             elif isinstance(payload, SystemShortcutsSyncPayload):
                 self._apply_shortcuts_sync(payload.model_dump())
 
+    @staticmethod
+    def _platform_action_hotkeys(mapping: Dict[str, str]) -> Dict[str, str]:
+        """On macOS the native shell owns Quick Entry/settings/emergency-stop hotkeys.
+
+        Senses keeps only PTT and the avatar dock toggle to avoid double-firing
+        the same Carbon/Quartz shortcut.
+        """
+        if sys.platform == "darwin":
+            return {key: value for key, value in mapping.items() if key == "toggle_dock"}
+        return mapping
+
     def _apply_shortcuts_sync(self, sc: Dict[str, Any]) -> None:
         self.ptt_hotkey = str(sc.get("ptt_hotkey") or self.ptt_hotkey or "right_option")
-        self.action_hotkeys = {
+        self.action_hotkeys = self._platform_action_hotkeys({
             "chat_input": str(sc.get("chat_input_hotkey") or "option+space"),
             "cancel": str(sc.get("cancel_hotkey") or "option+esc"),
             "toggle_dock": str(sc.get("toggle_dock_hotkey") or "option+h"),
             "settings": str(sc.get("settings_hotkey") or "option+k"),
-        }
+        })
         if self._hotkey_listener is not None and hasattr(self._hotkey_listener, "update_hotkeys"):
             self._hotkey_listener.update_hotkeys(self.ptt_hotkey, self.action_hotkeys)
         logger.info(
-            "Shortcuts synced from Brain -> ptt=%s chat=%s cancel=%s dock=%s settings=%s",
+            "Shortcuts synced from Brain -> ptt=%s actions=%s",
             self.ptt_hotkey,
-            self.action_hotkeys["chat_input"],
-            self.action_hotkeys["cancel"],
-            self.action_hotkeys["toggle_dock"],
-            self.action_hotkeys["settings"],
+            self.action_hotkeys,
         )
 
     def _get_audio_capturer(self) -> AudioCapturer:

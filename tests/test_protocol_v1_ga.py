@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -292,3 +293,122 @@ async def test_sqlite_discipline_and_jsonl_6_0_migration(tmp_path: Path) -> None
     assert rec is not None
     assert rec.title == "迁移验证"
     assert rec.result_summary == "全部通过"
+
+
+def test_foreground_approval_survives_same_instance_reconnect(tmp_path: Path) -> None:
+    from brain.llm_router import LLMCompletionResult, LLMRouter, ToolCallRequest
+
+    class _ReconnectRouter(LLMRouter):
+        async def complete_with_tools(self, messages, tools, *, profile_name=None, on_text_delta=None):
+            if any(m.get("role") == "tool" for m in messages):
+                return LLMCompletionResult(content="审批后完成。")
+            return LLMCompletionResult(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc_reconnect",
+                        name="shared_approval_tool",
+                        arguments_json="{}",
+                    )
+                ],
+            )
+
+    cfg = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="mock-v1")},
+    )
+    cfg.memory.sqlite_path = str(tmp_path / "reconnect.db")
+    cfg.memory.extraction.enabled = False
+    app = create_app(config=cfg, llm_router=_ReconnectRouter(cfg))
+    app.state.hub.tool_registry.register(_SharedApprovalTool())
+
+    def _hello(ws) -> None:
+        ws.send_text(
+            json.dumps(
+                {
+                    "v": "1.0",
+                    "id": "h_reconnect",
+                    "ts": 1,
+                    "source": "body",
+                    "type": "system.hello",
+                    "payload": {
+                        "client_name": "qimingxing-macos",
+                        "role": "body",
+                        "client_type": "body_macos",
+                        "platform": "macos",
+                        "client_instance_id": "shell-instance-1",
+                        "capabilities": ["mirror_turns", "native_approvals", "native_desktop", "audio_output"],
+                    },
+                }
+            )
+        )
+
+    with TestClient(app) as client:
+        approval_id = ""
+        with client.websocket_connect("/ws") as ws:
+            _hello(ws)
+            for _ in range(3):
+                ws.receive_text()
+            ws.send_text(
+                json.dumps(
+                    {
+                        "v": "1.0",
+                        "id": "m_reconnect",
+                        "turn_id": "t_reconnect",
+                        "ts": 2,
+                        "source": "body",
+                        "type": "input.text",
+                        "payload": {"text": "执行审批工具"},
+                    }
+                )
+            )
+            for _ in range(30):
+                ev = json.loads(ws.receive_text())
+                if ev["type"] == "tool.approval_request":
+                    approval_id = ev["payload"]["approval_id"]
+                    break
+
+        assert approval_id, "approval request was not emitted before disconnect"
+        time.sleep(0.5)
+
+        with client.websocket_connect("/ws") as ws2:
+            _hello(ws2)
+            assert json.loads(ws2.receive_text())["type"] == "system.welcome"
+            assert json.loads(ws2.receive_text())["type"] == "system.privacy_state"
+            ui = json.loads(ws2.receive_text())
+            assert ui["type"] == "ui.state"
+            pending = ui["payload"]["pending_approvals"]
+            assert any(item["approval_id"] == approval_id for item in pending), pending
+
+            ws2.send_text(
+                json.dumps(
+                    {
+                        "v": "1.0",
+                        "id": "resp_reconnect",
+                        "turn_id": "t_reconnect",
+                        "ts": 3,
+                        "source": "body",
+                        "type": "tool.approval_response",
+                        "payload": {
+                            "approval_id": approval_id,
+                            "turn_id": "t_reconnect",
+                            "approved": True,
+                            "remember_for_session": False,
+                        },
+                    }
+                )
+            )
+
+            seen_resolved = False
+            seen_end = False
+            for _ in range(40):
+                ev = json.loads(ws2.receive_text())
+                if ev["type"] == "tool.approval_resolved":
+                    seen_resolved = True
+                if ev["type"] == "output.turn_end" and ev.get("turn_id") == "t_reconnect":
+                    seen_end = True
+                if seen_resolved and seen_end:
+                    break
+
+            assert seen_resolved
+            assert seen_end

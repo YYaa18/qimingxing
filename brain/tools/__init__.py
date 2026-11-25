@@ -40,6 +40,7 @@ from brain.tools.mcp_oauth import FileTokenStorage, MCPOAuthCoordinator
 from brain.tools.registry import ToolRegistry
 from brain.tools.scheduler_tool import CancelTaskTool, ListTasksTool, ScheduleTaskTool
 from brain.tools.shell_tool import ShellTool
+from brain.tools.ui_control import OpenQimingxingUITool
 from brain.tools.web_search import (
     DeepSeekSearchProvider,
     SearchProvider,
@@ -75,6 +76,7 @@ def build_default_tool_registry(
     registry.register(InboxScanTool(config))
     registry.register(WorkHistoryInspectTool())
     registry.register(AskUserTool())
+    registry.register(OpenQimingxingUITool())
     registry.register(ScheduleTaskTool())
     registry.register(ListTasksTool())
     registry.register(CancelTaskTool())
@@ -122,6 +124,7 @@ __all__ = [
     "MacOSNotesSearchTool",
     "MacOSRemindersCreateTool",
     "MacOSRemindersListTool",
+    "OpenQimingxingUITool",
     "ScheduleTaskTool",
     "SearchProvider",
     "ShellTool",

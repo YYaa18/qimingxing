@@ -152,6 +152,9 @@ final class ProcessSupervisor: ObservableObject {
         env["QIMINGXING_CONFIG"] = env["QIMINGXING_CONFIG"] ?? configFile.path
         env["PYTHONPATH"] = appDir.path
         env["PYTHONNOUSERSITE"] = "1"
+        // The app bundle is code-signed; never let Python write __pycache__
+        // into Resources or the signature becomes invalid after first launch.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["QIMINGXING_HOST"] = host
         env["QIMINGXING_PORT"] = String(port)
         env["QIMINGXING_HTTP_BASE"] = httpBase

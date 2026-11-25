@@ -42,6 +42,7 @@ UserQuestionRequester = Callable[
 StatusEmitter = Callable[
     [str, str, str, Optional[int], Optional[int]], Awaitable[None]
 ]
+UICommandSender = Callable[[str, Dict[str, Any]], Awaitable[Tuple[bool, str]]]
 
 
 class ToolExecutionContext:
@@ -61,6 +62,7 @@ class ToolExecutionContext:
         on_status: Optional[StatusEmitter] = None,
         on_approval: Optional[ApprovalRequester] = None,
         on_ask_user: Optional[UserQuestionRequester] = None,
+        on_ui_command: Optional[UICommandSender] = None,
         usage_collector: Optional[List[LLMUsage]] = None,
         task_runner: Any = None,
     ) -> None:
@@ -77,6 +79,7 @@ class ToolExecutionContext:
         self._on_status = on_status
         self._on_approval = on_approval
         self._on_ask_user = on_ask_user
+        self._on_ui_command = on_ui_command
         self.usage_collector: List[LLMUsage] = (
             usage_collector if usage_collector is not None else []
         )
@@ -119,6 +122,15 @@ class ToolExecutionContext:
         return await self._on_approval(
             tool_name, risk_level, summary, details or {}, wait_sec
         )
+
+    async def request_ui_command(
+        self,
+        action: str,
+        args: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str]:
+        if self._on_ui_command is None:
+            return False, "ui_unavailable"
+        return await self._on_ui_command(action, args or {})
 
     async def ask_user_clarification(
         self,

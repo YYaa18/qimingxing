@@ -15,3 +15,6 @@ body_godot/.godot/
 dist/
 shell_macos/.build/
 data/artifacts/
+
+/.build/
+design_redesign/

@@ -87,7 +87,6 @@ class BackgroundTaskRunner:
         self._semaphore = asyncio.Semaphore(max_conc)
         self._tasks: Dict[str, asyncio.Task[None]] = {}
         self._cancel_events: Dict[str, asyncio.Event] = {}
-        self._session_approved_tools: set[str] = set()
 
     async def initialize(self) -> int:
         """Mark leftover active tasks from an unexpected restart as interrupted."""
@@ -326,6 +325,9 @@ class BackgroundTaskRunner:
                             if resumed is not None:
                                 await self._emit_status(resumed)
 
+                # "Remember for this session" is scoped to this one background
+                # task; it must never auto-approve a CONFIRM tool in another task.
+                task_approved_tools: set[str] = set()
                 ctx = ToolExecutionContext(
                     turn_id=task_id,
                     session_id=record.source_session_id,
@@ -333,7 +335,7 @@ class BackgroundTaskRunner:
                     llm_router=self.llm_router,
                     memory_backend=self.backend,
                     cancel_event=cancel_ev,
-                    session_approved_tools=self._session_approved_tools,
+                    session_approved_tools=task_approved_tools,
                     on_status=_on_status,
                     on_approval=_on_approval,
                     on_ask_user=_on_ask_user,

@@ -92,6 +92,9 @@ class SystemHelloPayload(ProtocolModel):
     ] = None
     platform: Optional[str] = None
     app_version: Optional[str] = None
+    # Stable per-install/per-process ID used to rebind a reconnecting client
+    # (e.g. the macOS shell) to an in-flight turn waiting for approval.
+    client_instance_id: Optional[str] = None
     capabilities: ClientCapabilities = Field(default_factory=ClientCapabilities)
 
     @field_validator("capabilities", mode="before")
@@ -268,6 +271,9 @@ class OutputTurnStartPayload(ProtocolModel):
     model: str = ""
     origin_client_id: Optional[str] = None
     origin_client_type: Optional[str] = None
+    # Mirrored user input so every body client can render a complete
+    # conversation history (including turns started from voice or another UI).
+    user_text: str = ""
 
 
 class OutputTurnEndPayload(ProtocolModel):

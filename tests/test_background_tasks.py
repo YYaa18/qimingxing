@@ -196,6 +196,9 @@ def test_bg_task_confirm_approval_and_foreground_chat_over_ws(tmp_path: Path) ->
     )
     cfg.memory.sqlite_path = str(tmp_path / "bg_ws.db")
     cfg.memory.extraction.enabled = False
+    # The foreground turn also triggers a CONFIRM tool in this test; let it
+    # time out quickly instead of waiting the production 60s default.
+    cfg.tools.approval_timeout_sec = 1
     router = _MockBgRouter(cfg, trigger_confirm=True)
     app = create_app(config=cfg, llm_router=router)
     app.state.hub.tool_registry.register(_DummyConfirmTool())

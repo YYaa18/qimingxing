@@ -1,5 +1,5 @@
 import AppKit
-import Luminare
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -16,20 +16,139 @@ final class FloatingQuickEntryPanel: NSPanel {
 
 @MainActor
 final class QuickEntryController: NSObject, NSWindowDelegate {
+    private static let commandWidth: CGFloat = 760
+    static let wingWidth: CGFloat = 380
+    private static let idleHeight: CGFloat = 112
+    private static let thinkingHeight: CGFloat = 236
+    private static let answeringHeight: CGFloat = 520
+    private static let wingMinHeight: CGFloat = 430
+
     private var panel: FloatingQuickEntryPanel?
     private weak var previousApp: NSRunningApplication?
     private let brainClient: BrainClient
     private let desktopActions: DesktopActions
+    private let workspaceStore: WorkspaceStore
     private let inputState = QuickEntryInputState()
+    private var cancellables = Set<AnyCancellable>()
+    private var preWingOriginX: CGFloat?
+    /// Stable chat height reported by the view. The wing is a display-layer
+    /// modifier and must never overwrite this value.
+    private var lastChatHeight: CGFloat?
 
-    init(brainClient: BrainClient, desktopActions: DesktopActions) {
+    init(
+        brainClient: BrainClient,
+        desktopActions: DesktopActions,
+        workspaceStore: WorkspaceStore
+    ) {
         self.brainClient = brainClient
         self.desktopActions = desktopActions
+        self.workspaceStore = workspaceStore
         super.init()
+        wireExpansion()
+        inputState.$isWorkspaceWingOpen
+            .removeDuplicates()
+            .sink { [weak self] open in self?.layoutWing(open: open) }
+            .store(in: &cancellables)
+    }
+
+    private var panelWidth: CGFloat {
+        Self.commandWidth + (inputState.isWorkspaceWingOpen ? Self.wingWidth : 0)
+    }
+
+    func showWorkspaceWing() {
+        if !isVisible { show() }
+        inputState.isWorkspaceWingOpen = true
+    }
+
+    func hideWorkspaceWing() {
+        inputState.isWorkspaceWingOpen = false
+    }
+
+    func detachWorkspace() {
+        inputState.isWorkspaceWingOpen = false
+        NotificationCenter.default.post(name: .qmxDetachWorkspace, object: nil)
+    }
+
+
+    private func layoutWing(open: Bool) {
+        guard let panel, panel.isVisible else { return }
+        let screen = panel.screen ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? panel.frame
+        let width = Self.commandWidth + (open ? Self.wingWidth : 0)
+        var frame = panel.frame
+        let topEdge = frame.maxY
+        let chatHeight = lastChatHeight ?? frame.height
+        let height = open ? max(chatHeight, Self.wingMinHeight) : chatHeight
+
+        if open, preWingOriginX == nil {
+            preWingOriginX = frame.origin.x
+            if frame.origin.x + width > visible.maxX - 8 {
+                frame.origin.x = max(visible.minX + 8, visible.maxX - width - 8)
+            }
+        } else if !open, let restoreX = preWingOriginX {
+            frame.origin.x = restoreX
+            preWingOriginX = nil
+        }
+
+        frame.size.width = width
+        frame.size.height = height
+        frame.origin.y = topEdge - height
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            panel.setFrame(frame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.24
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().setFrame(frame, display: true)
+            }
+        }
     }
 
     var isVisible: Bool {
         panel?.isVisible ?? false
+    }
+
+    var visiblePanelFrame: NSRect? {
+        guard let panel, panel.isVisible else { return nil }
+        return panel.frame
+    }
+
+    private func wireExpansion() {
+        inputState.$forceExpanded
+            .sink { [weak self] _ in self?.refreshExpansion() }
+            .store(in: &cancellables)
+        brainClient.$isGenerating
+            .sink { [weak self] _ in self?.refreshExpansion() }
+            .store(in: &cancellables)
+        brainClient.$messages
+            .sink { [weak self] messages in
+                guard let self else { return }
+                if !messages.isEmpty { self.inputState.forceExpanded = false }
+                self.refreshExpansion()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func refreshExpansion() {
+        let expanded = inputState.forceExpanded
+            || brainClient.isGenerating
+            || !brainClient.messages.isEmpty
+
+        inputState.isExpanded = expanded
+    }
+
+    /// The last turn already has visible text -> answering layout; otherwise
+    /// we are still waiting on the first token.
+    private var lastTurnHasAnswer: Bool {
+        guard let turnID = brainClient.messages.last?.turnId else { return false }
+        return brainClient.messages.contains {
+            $0.turnId == turnID && !$0.isUser && !$0.text.isEmpty
+        }
+    }
+
+    private var desiredPanelHeight: CGFloat {
+        guard inputState.isExpanded else { return Self.idleHeight }
+        return lastTurnHasAnswer ? Self.answeringHeight : Self.thinkingHeight
     }
 
     func toggle() {
@@ -47,12 +166,26 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         }
         ensurePanel()
         guard let panel else { return }
-        panel.center()
+        refreshExpansion()
+        resizePanel(animated: false)
+        positionPanel()
         panel.makeKeyAndOrderFront(nil)
+        panel.makeKey()
         inputState.focusRequestToken = UUID()
+        inputState.layoutToken = UUID()
+
+        DispatchQueue.main.async { [weak panel] in
+            panel?.makeKey()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak panel] in
+            guard let panel, panel.isVisible, !panel.isKeyWindow else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKey()
+        }
     }
 
     func hideAndRestoreFocus() {
+        inputState.isWorkspaceWingOpen = false
         panel?.orderOut(nil)
         if let prev = previousApp, !prev.isTerminated {
             prev.activate(options: [])
@@ -63,39 +196,120 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private func ensurePanel() {
         if panel != nil { return }
         let p = FloatingQuickEntryPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 540),
-            styleMask: [.nonactivatingPanel, .borderless, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: Self.commandWidth, height: Self.idleHeight),
+            styleMask: [.nonactivatingPanel, .titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        p.isOpaque = false
-        p.backgroundColor = .clear
-        p.hasShadow = true
+        p.title = "启明星"
+        p.titleVisibility = .hidden
+        p.titlebarAppearsTransparent = true
+        // Spotlight-style panel: Esc is the only close affordance. Hide the
+        // standard traffic lights so no window chrome appears at top-left.
+        p.standardWindowButton(.closeButton)?.isHidden = true
+        p.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        p.standardWindowButton(.zoomButton)?.isHidden = true
         p.isFloatingPanel = true
         p.level = .floating
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
-        p.minSize = NSSize(width: 580, height: 420)
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
         p.delegate = self
-        p.onEscapePressed = { [weak self] in
-            self?.hideAndRestoreFocus()
-        }
+        p.onEscapePressed = { [weak self] in self?.hideAndRestoreFocus() }
 
         let rootView = QuickEntryRootView(
             brainClient: brainClient,
             desktopActions: desktopActions,
+            workspaceStore: workspaceStore,
             inputState: inputState,
-            onClose: { [weak self] in
-                self?.hideAndRestoreFocus()
+            onClose: { [weak self] in self?.hideAndRestoreFocus() },
+            onCloseWing: { [weak self] in self?.hideWorkspaceWing() },
+            onSplitWing: { [weak self] in self?.detachWorkspace() },
+            onDesiredHeightChange: { [weak self] height in
+                self?.resize(toContentHeight: height)
             }
         )
-
-        let hosting = NSHostingController(rootView: rootView)
-        hosting.view.wantsLayer = true
-        hosting.view.layer?.backgroundColor = NSColor.clear.cgColor
-        p.contentViewController = hosting
+        p.contentViewController = NSHostingController(rootView: rootView)
         self.panel = p
+    }
+
+    func shiftHorizontally(by dx: CGFloat) {
+        guard let panel, abs(dx) > 0.5 else { return }
+        var frame = panel.frame
+        frame.origin.x += dx
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            panel.setFrame(frame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.24
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().setFrame(frame, display: true)
+            }
+        }
+    }
+
+    func resize(toContentHeight height: CGFloat) {
+        // Always cache the chat height, even while the panel is hidden.
+        let chatHeight = min(Self.answeringHeight, max(112, height))
+        lastChatHeight = chatHeight
+        guard let panel, panel.isVisible else { return }
+        let target = inputState.isWorkspaceWingOpen
+            ? max(chatHeight, Self.wingMinHeight)
+            : chatHeight
+        let delta = abs(panel.frame.height - target)
+        guard delta > 3 else { return }
+        var frame = panel.frame
+        let topEdge = frame.maxY
+        frame.size = NSSize(width: panelWidth, height: target)
+        frame.origin.y = topEdge - target
+
+        // Large jumps happen on phase changes and are animated; small
+        // line-by-line growth is applied directly so overlapping window
+        // animations cannot stutter.
+        if delta > 80 && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.20
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().setFrame(frame, display: true)
+            }
+        } else {
+            panel.setFrame(frame, display: true)
+        }
+    }
+
+    private func resizePanel(animated: Bool) {
+        guard let panel else { return }
+        let chatHeight = lastChatHeight ?? desiredPanelHeight
+        let height = inputState.isWorkspaceWingOpen
+            ? max(chatHeight, Self.wingMinHeight)
+            : chatHeight
+        guard abs(panel.frame.height - height) > 0.5 else { return }
+        var frame = panel.frame
+        let topEdge = frame.maxY
+        frame.size = NSSize(width: panelWidth, height: height)
+        frame.origin.y = topEdge - height
+
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.24
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().setFrame(frame, display: true)
+            }
+        } else {
+            panel.setFrame(frame, display: true)
+        }
+    }
+
+    private func positionPanel() {
+        guard let panel, let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let visible = screen.visibleFrame
+        let height = panel.frame.height
+        let x = visible.midX - panelWidth / 2
+        let y = visible.maxY - height - 120
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -110,451 +324,410 @@ final class QuickEntryInputState: ObservableObject {
     @Published var includeScreen: Bool = false
     @Published var stagedAttachments: [StagedAttachment] = []
     @Published var focusRequestToken: UUID = UUID()
+    @Published var isExpanded: Bool = false
+    @Published var forceExpanded: Bool = false
+    @Published var isWorkspaceWingOpen: Bool = false
+    @Published var layoutToken: UUID = UUID()
 }
 
 struct QuickEntryRootView: View {
     @ObservedObject var brainClient: BrainClient
     let desktopActions: DesktopActions
+    @ObservedObject var workspaceStore: WorkspaceStore
     @ObservedObject var inputState: QuickEntryInputState
     let onClose: () -> Void
+    var onCloseWing: () -> Void = {}
+    var onSplitWing: () -> Void = {}
+    var onDesiredHeightChange: (CGFloat) -> Void = { _ in }
 
-    @State private var isDropTargeted = false
+    @AppStorage("qmx.answerFontSize") private var answerFontSize: Double = 16
+    @State private var appeared = QMXTheme.isHeadlessDump
+    @State private var answerContentHeight: CGFloat = 0
+    @State private var finalAnswerHeight: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let chatWidth: CGFloat = 760
+    private static let wingWidth: CGFloat = 380
+    private static let answerWidth: CGFloat = 696
 
     var body: some View {
         ZStack {
-            VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow)
+            VisualEffectBlur(material: .popover, blendingMode: .behindWindow)
 
-            VStack(spacing: 0) {
-                headerBar
-                Divider().opacity(0.45)
+            HStack(spacing: 0) {
+                chatColumn
 
-                if !brainClient.errorBannerText.isEmpty {
-                    errorBanner
+                if inputState.isWorkspaceWingOpen {
+                    Divider().opacity(0.5)
+                    WorkspaceWingView(
+                        store: workspaceStore,
+                        desktopActions: desktopActions,
+                        onSplit: onSplitWing,
+                        onClose: onCloseWing
+                    )
+                    .frame(width: Self.wingWidth)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
-
-                conversationArea
-
-                if !brainClient.toolStatusText.isEmpty {
-                    toolStatusBar
-                }
-
-                if !inputState.stagedAttachments.isEmpty {
-                    attachmentsBar
-                }
-
-                Divider().opacity(0.45)
-                composerDock
             }
+            .animation(.easeOut(duration: 0.20), value: inputState.isWorkspaceWingOpen)
         }
-        .frame(minWidth: 580, minHeight: 420)
-        .clipShape(RoundedRectangle(cornerRadius: QMXTheme.panelRadius, style: .continuous))
-        .overlay(HairlineBorderOverlay(cornerRadius: QMXTheme.panelRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: QMXTheme.panelRadius, style: .continuous)
-                .strokeBorder(isDropTargeted ? QMXTheme.accent : Color.clear, lineWidth: 2)
+        .frame(
+            width: Self.chatWidth + (inputState.isWorkspaceWingOpen ? Self.wingWidth : 0)
         )
-        .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
-            handleDroppedProviders(providers)
+        .clipShape(RoundedRectangle(cornerRadius: QMXTheme.commandRadius, style: .continuous))
+        .overlay(HairlineBorderOverlay(cornerRadius: QMXTheme.commandRadius))
+        .overlay(
+            AmbientRimLight(
+                isActive: brainClient.isGenerating,
+                cornerRadius: QMXTheme.commandRadius
+            )
+        )
+        .scaleEffect(appeared ? 1.0 : 0.96)
+        .opacity(appeared ? 1.0 : 0.0)
+        .onAppear {
+            if reduceMotion {
+                appeared = true
+            } else {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                    appeared = true
+                }
+            }
+            onDesiredHeightChange(chatHeight)
+        }
+        .onChange(of: chatHeight) { height in
+            onDesiredHeightChange(height)
+        }
+        .onChange(of: inputState.layoutToken) { _ in
+            onDesiredHeightChange(chatHeight)
+        }
+        .onChange(of: latestTurn?.id) { _ in
+            answerContentHeight = 0
+            finalAnswerHeight = 0
+        }
+        .onChange(of: answerFontSize) { _ in
+            answerContentHeight = 0
+            finalAnswerHeight = 0
         }
     }
 
-    private var headerBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(QMXTheme.accent)
-                Text("启明星")
-                    .font(.system(size: 13.5, weight: .semibold))
-                PulsingDotView(
-                    color: statusColor,
-                    isPulsing: brainClient.isGenerating || brainClient.phase == .starting
-                )
+    private var chatColumn: some View {
+        VStack(spacing: 0) {
+            inputRow
+
+            if inputState.isExpanded {
+                Divider().opacity(0.5)
+                liveStage
+                    .transition(.opacity.combined(with: .offset(y: 4)))
+                Divider().opacity(0.5)
+            } else {
+                Spacer(minLength: 0)
             }
 
-            if !brainClient.profiles.isEmpty {
-                Picker("", selection: Binding(
-                    get: { brainClient.activeProfile },
-                    set: { brainClient.setActiveProfile($0) }
-                )) {
-                    ForEach(brainClient.profiles) { p in
-                        Text(p.label.isEmpty ? p.name : p.label).tag(p.name)
+            footer
+        }
+        .frame(width: Self.chatWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(alignment: .topLeading) {
+            if let turn = latestTurn, !turn.answer.isEmpty {
+                TypewriterText(
+                    text: turn.answer,
+                    fontSize: CGFloat(answerFontSize),
+                    turnID: "measure-\(turn.id)-\(Int(answerFontSize))",
+                    fullText: true
+                )
+                .frame(width: Self.answerWidth, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: ChatAnswerHeightKey.self,
+                            value: geo.size.height
+                        )
+                    }
+                )
+                .opacity(0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
+        .onPreferenceChange(ChatAnswerHeightKey.self) { answerContentHeight = $0 }
+    }
+
+    // MARK: Input
+
+    private var inputRow: some View {
+        HStack(spacing: 14) {
+            MorningStarMark(size: 20, color: QMXTheme.textPrimary)
+                .padding(.leading, 2)
+
+            ChineseIMETextView(
+                text: $inputState.text,
+                focusToken: inputState.focusRequestToken,
+                fontSize: 22,
+                placeholder: "问启明星，或搜索工作区…",
+                onSubmit: { submitMessage() },
+                onEscape: { onClose() },
+                onPasteImage: { data in
+                    Task { await uploadPastedImage(data) }
+                }
+            )
+            .frame(maxWidth: .infinity, minHeight: 68, maxHeight: 68)
+
+            HStack(spacing: 10) {
+                Image(systemName: "mic")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(QMXTheme.textSecondary)
+                    .help("按住右 Option 说话")
+
+                Button(action: onClose) {
+                    Text("esc")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("关闭 (Esc)")
+            }
+        }
+        .padding(.horizontal, 20)
+        .frame(height: 68)
+    }
+
+    // MARK: Live stage
+
+    private var liveStage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let turn = latestTurn, !turn.prompt.isEmpty {
+                Text(turn.prompt)
+                    .font(.system(size: 12))
+                    .foregroundStyle(QMXTheme.textTertiary)
+                    .lineLimit(1)
+            }
+
+            if isThinking {
+                HStack(spacing: 10) {
+                    GlobeSpinner(size: 20, color: QMXTheme.textSecondary)
+                    Text(brainClient.toolStatusText.isEmpty ? "正在思考与调度…" : brainClient.toolStatusText)
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            } else if let turn = latestTurn, !turn.answer.isEmpty {
+                answerStream(turn)
+                workspaceLink
+            } else {
+                Text("…")
+                    .font(.system(size: 22))
+                    .foregroundStyle(QMXTheme.textTertiary)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 32)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// Full answer, never truncated. Scrolling is owned by a child view so the
+    /// per-character reveal does not re-evaluate the whole panel.
+    private func answerStream(_ turn: LiveTurn) -> some View {
+        AnswerStreamView(
+            text: turn.answer,
+            fontSize: CGFloat(answerFontSize),
+            turnID: turn.id,
+            width: Self.answerWidth,
+            isStreaming: turn.isStreaming,
+            onFinalHeight: { finalAnswerHeight = $0 }
+        )
+    }
+
+    private var workspaceLink: some View {
+        Button {
+            NotificationCenter.default.post(name: .qmxOpenWorkspace, object: nil)
+        } label: {
+            HStack(spacing: 4) {
+                Text("完整记录已放入工作区")
+                Image(systemName: "arrow.right")
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(QMXTheme.textSecondary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Menu {
+                ForEach(brainClient.profiles) { profile in
+                    Button {
+                        brainClient.setActiveProfile(profile.name)
+                    } label: {
+                        if profile.name == brainClient.activeProfile {
+                            Label(profile.label.isEmpty ? profile.name : profile.label, systemImage: "checkmark")
+                        } else {
+                            Text(profile.label.isEmpty ? profile.name : profile.label)
+                        }
                     }
                 }
-                .labelsHidden()
-                .frame(maxWidth: 210)
-            }
-
-            Spacer()
-
-            if brainClient.activeBgTaskCount > 0 {
-                HStack(spacing: 5) {
-                    ProgressView()
-                        .scaleEffect(0.45)
-                        .frame(width: 13, height: 13)
-                    Text("后台 \(brainClient.activeBgTaskCount)")
-                        .font(.caption.weight(.medium))
-                }
-                .fixedSize()
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(QMXTheme.accent.opacity(0.16)))
-                .overlay(Capsule().strokeBorder(QMXTheme.accent.opacity(0.32), lineWidth: 0.75))
-                .foregroundStyle(QMXTheme.accent)
-            }
-
-            Button {
-                inputState.includeScreen.toggle()
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: inputState.includeScreen ? "display.and.arrow.down" : "display")
-                    Text("看屏")
+                    Text(activeModelLabel)
+                        .font(.system(size: 12))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(QMXTheme.textTertiary)
                 }
             }
-            .buttonStyle(.qmxSecondary(active: inputState.includeScreen))
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
 
-            Button {
-                brainClient.clearHistory()
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.qmxIcon)
-            .help("清空当前对话")
+            EmotionBadge(emotion: brainClient.emotion)
 
-            Button(action: onClose) {
-                KeyCapBadge("Esc")
-            }
-            .buttonStyle(.qmxIcon)
-            .help("关闭并归还焦点")
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(height: 48)
-    }
-
-    private var errorBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(QMXTheme.warning)
-            Text(brainClient.errorBannerText)
-                .font(.caption)
-                .lineLimit(2)
             Spacer()
-            Button("关闭") { brainClient.errorBannerText = "" }
-                .font(.caption)
-                .buttonStyle(.borderless)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 7)
-        .background(QMXTheme.warning.opacity(0.14))
-    }
 
-    private var conversationArea: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    if brainClient.messages.isEmpty {
-                        emptyStateHero
-                    } else {
-                        ForEach(brainClient.messages) { msg in
-                            chatBubble(msg)
-                                .id(msg.id)
-                        }
-                    }
-
-                    if !brainClient.artifactCapsules.isEmpty {
-                        VStack(spacing: 8) {
-                            ForEach(brainClient.artifactCapsules.prefix(3)) { cap in
-                                artifactCapsuleRow(cap)
-                            }
-                        }
-                    }
-                }
-                .padding(16)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onChange(of: brainClient.messages.last?.text) { _ in
-                if let last = brainClient.messages.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
-            }
-        }
-    }
-
-    private var toolStatusBar: some View {
-        HStack(spacing: 8) {
-            ProgressView().scaleEffect(0.55)
-            Text(brainClient.toolStatusText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.05))
-    }
-
-    private var attachmentsBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(inputState.stagedAttachments) { att in
-                    HStack(spacing: 6) {
-                        Image(systemName: att.kind == "image" ? "photo" : "doc.text")
-                            .font(.caption)
-                            .foregroundStyle(QMXTheme.accent)
-                        Text(att.filename)
-                            .font(.caption)
-                            .lineLimit(1)
-                        Button {
-                            inputState.stagedAttachments.removeAll { $0.artifactId == att.artifactId }
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(QMXTheme.accent.opacity(0.14)))
-                    .overlay(Capsule().strokeBorder(QMXTheme.accent.opacity(0.32), lineWidth: 0.75))
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 7)
-        }
-    }
-
-    private var composerDock: some View {
-        HStack(alignment: .bottom, spacing: 10) {
             Button {
                 pickAttachmentFile()
             } label: {
                 Image(systemName: "paperclip")
-                    .font(.system(size: 13.5, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(.qmxIcon)
-            .help("添加文件/截图附件（支持拖拽与 Cmd+V 粘贴）")
+            .help("添加文件")
 
-            ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(NSColor.textBackgroundColor).opacity(0.75))
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
-
-                if inputState.text.isEmpty {
-                    Text("输入问题，或拖拽/粘贴文件与截图…（⏎ 发送，⇧⏎ 换行）")
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(.secondary.opacity(0.75))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 11)
-                        .allowsHitTesting(false)
-                }
-
-                ChineseIMETextView(
-                    text: $inputState.text,
-                    focusToken: inputState.focusRequestToken,
-                    onSubmit: { submitMessage() },
-                    onEscape: { onClose() },
-                    onPasteImage: { imageData in
-                        Task { await uploadPastedImage(imageData) }
-                    }
-                )
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+            Button {
+                inputState.includeScreen.toggle()
+            } label: {
+                Image(systemName: inputState.includeScreen ? "display.and.arrow.down" : "display")
+                    .font(.system(size: 13, weight: .medium))
             }
-            .frame(minWidth: 280, maxWidth: .infinity, minHeight: 46, maxHeight: 112)
-            .layoutPriority(1)
+            .buttonStyle(.qmxIcon)
+            .foregroundStyle(inputState.includeScreen ? QMXTheme.accent : QMXTheme.textSecondary)
+            .help("看屏")
+
+            Button {
+                brainClient.clearHistory()
+                inputState.forceExpanded = false
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(.qmxIcon)
+            .help("新对话")
 
             if brainClient.isGenerating {
                 Button {
                     brainClient.cancelActiveTurn()
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "stop.fill")
-                        Text("停止")
-                    }
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(QMXTheme.danger))
+                        .foregroundStyle(.white)
                 }
-                .buttonStyle(.qmxDestructive)
-            }
-
-            Button(action: submitMessage) {
-                HStack(spacing: 5) {
-                    Text("发送")
-                    KeyCapBadge("⏎", onAccent: true)
+                .buttonStyle(TactileButtonStyle(haptic: .generic))
+                .help("停止")
+            } else {
+                Button(action: submitMessage) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(canSend ? QMXTheme.primaryFill : QMXTheme.surfaceMuted))
+                        .foregroundStyle(canSend ? QMXTheme.primaryText : QMXTheme.textTertiary)
                 }
+                .buttonStyle(TactileButtonStyle(haptic: .generic))
+                .disabled(!canSend)
+                .help("发送 (⏎)")
             }
-            .buttonStyle(.qmxProminent)
-            .disabled(
-                brainClient.phase != .connected ||
-                (inputState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-                 inputState.stagedAttachments.isEmpty)
-            )
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .frame(height: 36)
     }
 
-    private var emptyStateHero: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(QMXTheme.accent.opacity(0.16))
-                        .frame(width: 36, height: 36)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(QMXTheme.accent)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("有什么可以帮你的？")
-                        .font(.system(size: 15.5, weight: .semibold))
-                    Text("原生 macOS 应用调度 · 后台异步长任务 · 本地 3 层记忆")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+    // MARK: Data
 
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 8),
-                    GridItem(.flexible(), spacing: 8)
-                ],
-                spacing: 8
-            ) {
-                suggestionChip("整理当前浏览器标签页并写到备忘录")
-                suggestionChip("派发后台任务汇总今天的工作进展")
-                suggestionChip("查一下我未来 3 天的日历和待办事项")
-                suggestionChip("总结刚才拖拽或粘贴的文件内容")
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: QMXTheme.cardRadius, style: .continuous)
-                .fill(Color.primary.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: QMXTheme.cardRadius, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
-        )
+    private struct LiveTurn {
+        let id: String
+        var prompt: String = ""
+        var answer: String = ""
+        var isStreaming: Bool = false
     }
 
-    private func suggestionChip(_ prompt: String) -> some View {
-        Button {
-            inputState.text = prompt
-            inputState.focusRequestToken = UUID()
-        } label: {
-            Text(prompt)
-                .lineLimit(1)
+    /// Chrome above/below the answer stage: 68 input + 2 dividers + 36 footer.
+    private static let panelChrome: CGFloat = 106
+    private static let minExpandedHeight: CGFloat = 236
+    private static let maxExpandedHeight: CGFloat = 520
+
+    /// Pure chat-column height. The wing floor is applied by the window
+    /// controller and never written back into this value.
+    private var chatHeight: CGFloat {
+        if !inputState.isExpanded {
+            return 112
         }
-        .buttonStyle(QMXChipButtonStyle())
+        if isThinking || latestTurn?.answer.isEmpty != false {
+            return Self.minExpandedHeight
+        }
+        let measured = max(answerContentHeight, finalAnswerHeight)
+        guard measured > 0 else {
+            return Self.minExpandedHeight
+        }
+        let promptBlock: CGFloat = latestTurn?.prompt.isEmpty == false ? 28 : 0
+        let stage = 40 + promptBlock + measured + 26
+        return min(Self.maxExpandedHeight, max(200, Self.panelChrome + stage))
     }
 
-    @ViewBuilder
-    private func chatBubble(_ msg: ChatEntry) -> some View {
-        VStack(alignment: msg.isUser ? .trailing : .leading, spacing: 4) {
-            Text(msg.meta)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
-
-            Group {
-                if msg.isUser {
-                    Text(msg.text)
-                        .font(.system(size: 13.5))
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 9)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(QMXTheme.accent.opacity(0.22))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(QMXTheme.accent.opacity(0.35), lineWidth: 0.8)
-                        )
-                } else if msg.text.isEmpty && msg.isStreaming {
-                    HStack(spacing: 6) {
-                        ProgressView().scaleEffect(0.55)
-                        Text("思考与调度中…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.primary.opacity(0.07))
-                    )
-                } else {
-                    MarkdownMessageView(text: msg.text)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Color.primary.opacity(0.07))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.8)
-                        )
-                }
+    private var latestTurn: LiveTurn? {
+        var order: [String] = []
+        var map: [String: LiveTurn] = [:]
+        for message in brainClient.messages {
+            if map[message.turnId] == nil {
+                order.append(message.turnId)
+                map[message.turnId] = LiveTurn(id: message.turnId)
             }
-            .frame(maxWidth: 560, alignment: msg.isUser ? .trailing : .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: msg.isUser ? .trailing : .leading)
-    }
-
-    private func artifactCapsuleRow(_ cap: ArtifactCapsuleItem) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "doc.richtext.fill")
-                .foregroundStyle(QMXTheme.accent)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(cap.title)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                Text(cap.path)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            if message.isUser {
+                map[message.turnId]?.prompt = message.text
+            } else {
+                map[message.turnId]?.answer = qmxCleanAssistantText(message.text)
+                map[message.turnId]?.isStreaming = message.isStreaming
             }
-            Spacer()
-            Button("快速预览") { _ = desktopActions.quickLook(cap.path) }
-                .buttonStyle(.qmxProminent)
-            Button("复制") { _ = desktopActions.copyFile(cap.path) }
-                .buttonStyle(.qmxSecondary)
-            Button("访达") { _ = desktopActions.revealPath(cap.path) }
-                .buttonStyle(.qmxSecondary)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: QMXTheme.cardRadius, style: .continuous)
-                .fill(QMXTheme.accent.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: QMXTheme.cardRadius, style: .continuous)
-                .strokeBorder(QMXTheme.accent.opacity(0.30), lineWidth: 0.8)
-        )
+        return order.last.flatMap { map[$0] }
     }
 
-    private var statusColor: Color {
-        switch brainClient.phase {
-        case .connected: return QMXTheme.success
-        case .starting: return QMXTheme.warning
-        case .offline, .error: return QMXTheme.danger
+    private var hasAnswer: Bool {
+        !(latestTurn?.answer.isEmpty ?? true)
+    }
+
+    private var isThinking: Bool {
+        brainClient.isGenerating && !hasAnswer
+    }
+
+    private var activeModelLabel: String {
+        if let profile = brainClient.profiles.first(where: { $0.name == brainClient.activeProfile }) {
+            return profile.label.isEmpty ? profile.name : profile.label
         }
+        return brainClient.activeProfile.isEmpty ? "未选择模型" : brainClient.activeProfile
+    }
+
+    private var canSend: Bool {
+        brainClient.phase == .connected &&
+        (!inputState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+         !inputState.stagedAttachments.isEmpty)
     }
 
     private func submitMessage() {
-        let msg = inputState.text
-        let atts = inputState.stagedAttachments
+        let text = inputState.text
+        let attachments = inputState.stagedAttachments
         let withScreen = inputState.includeScreen
-        guard !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !atts.isEmpty else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else {
+            return
+        }
+        inputState.forceExpanded = true
         inputState.text = ""
         inputState.stagedAttachments = []
-        brainClient.sendText(msg, attachments: atts, includeScreen: withScreen)
+        brainClient.sendText(text, attachments: attachments, includeScreen: withScreen)
     }
 
     private func pickAttachmentFile() {
@@ -565,8 +738,8 @@ struct QuickEntryRootView: View {
         if panel.runModal() == .OK {
             for url in panel.urls {
                 Task {
-                    if let att = await brainClient.uploadArtifact(fileURL: url) {
-                        inputState.stagedAttachments.append(att)
+                    if let attachment = await brainClient.uploadArtifact(fileURL: url) {
+                        inputState.stagedAttachments.append(attachment)
                     }
                 }
             }
@@ -577,59 +750,359 @@ struct QuickEntryRootView: View {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("qmx_paste_\(UUID().uuidString.prefix(8)).png")
         try? data.write(to: tmp)
-        if let att = await brainClient.uploadArtifact(fileURL: tmp) {
-            inputState.stagedAttachments.append(att)
+        if let attachment = await brainClient.uploadArtifact(fileURL: tmp) {
+            inputState.stagedAttachments.append(attachment)
         }
         try? FileManager.default.removeItem(at: tmp)
     }
+}
 
-    private func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
-        var accepted = false
-        for prov in providers where prov.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-            accepted = true
-            prov.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                if let data = item as? Data,
-                   let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    Task { @MainActor in
-                        if let att = await brainClient.uploadArtifact(fileURL: url) {
-                            inputState.stagedAttachments.append(att)
-                        }
+private struct ChatAnswerHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct StreamHeightBox {
+    var value: CGFloat = 0
+}
+
+private struct StreamFinalHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct AnswerStreamView: View {
+    let text: String
+    let fontSize: CGFloat
+    let turnID: String
+    let width: CGFloat
+    let isStreaming: Bool
+    let onFinalHeight: (CGFloat) -> Void
+
+    @State private var finished = false
+    @State private var didReportFinal = false
+    @State private var heightBox = StreamHeightBox()
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    TypewriterText(
+                        text: text,
+                        fontSize: fontSize,
+                        turnID: turnID,
+                        onFinish: { finished = true }
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id("answerTop")
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id("answerBottom")
+                }
+                .frame(width: width, alignment: .leading)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: StreamFinalHeightKey.self,
+                            value: geo.size.height
+                        )
                     }
+                )
+            }
+            .scrollIndicators(.hidden)
+            .onPreferenceChange(StreamFinalHeightKey.self) { height in
+                heightBox.value = height
+                if finished && !didReportFinal {
+                    didReportFinal = true
+                    onFinalHeight(height)
+                }
+            }
+            .onAppear {
+                proxy.scrollTo("answerTop", anchor: .top)
+            }
+            .onChange(of: turnID) { _ in
+                finished = false
+                didReportFinal = false
+                heightBox.value = 0
+                proxy.scrollTo("answerTop", anchor: .top)
+            }
+            .onChange(of: isStreaming) { streaming in
+                if !streaming {
+                    proxy.scrollTo("answerTop", anchor: .top)
+                }
+            }
+            .onChange(of: text) { _ in
+                finished = false
+                didReportFinal = false
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct TypewriterText: View {
+    let text: String
+    let fontSize: CGFloat
+    let turnID: String
+    var onTick: () -> Void = {}
+    var onFinish: () -> Void = {}
+    var fullText: Bool = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var visibleCount = 0
+    @State private var revealTask: Task<Void, Never>?
+    @State private var blocks: [StageBlock]
+
+    init(
+        text: String,
+        fontSize: CGFloat,
+        turnID: String,
+        onTick: @escaping () -> Void = {},
+        onFinish: @escaping () -> Void = {},
+        fullText: Bool = false
+    ) {
+        self.text = text
+        self.fontSize = fontSize
+        self.turnID = turnID
+        self.onTick = onTick
+        self.onFinish = onFinish
+        self.fullText = fullText
+        let parsed = Self.parse(text)
+        _blocks = State(initialValue: parsed)
+        let total = parsed.reduce(0) { $0 + $1.text.count }
+        _visibleCount = State(initialValue: (QMXTheme.isHeadlessDump || fullText) ? total : 0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(blocks) { block in
+                let shown = min(max(0, visibleCount - block.start), block.text.count)
+                if shown > 0 {
+                    blockView(block, String(block.text.prefix(shown)))
                 }
             }
         }
-        return accepted
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { start() }
+        .onChange(of: text) { _ in
+            blocks = Self.parse(text)
+            start()
+        }
+        .onChange(of: turnID) { _ in
+            blocks = Self.parse(text)
+            visibleCount = 0
+            start()
+        }
+        .onDisappear { revealTask?.cancel() }
+    }
+
+    private var codeFontSize: CGFloat {
+        max(12, (fontSize * 0.72).rounded())
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: StageBlock, _ visible: String) -> some View {
+        if block.isCode {
+            Text(visible)
+                .font(.system(size: codeFontSize, design: .monospaced))
+                .lineSpacing(2)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+                )
+        } else {
+            Text(visible)
+                .font(.system(size: fontSize, weight: .regular))
+                .lineSpacing(3)
+                .foregroundStyle(QMXTheme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var totalCount: Int {
+        blocks.reduce(0) { $0 + $1.text.count }
+    }
+
+    private func start() {
+        if fullText || reduceMotion {
+            visibleCount = totalCount
+            return
+        }
+        if visibleCount > totalCount {
+            visibleCount = 0
+        }
+        revealTask?.cancel()
+        // Reveal a few characters per display frame (~16ms) instead of
+        // relaying out the text hundreds of times per second.
+        let step = max(1, (totalCount + 179) / 180)
+        revealTask = Task { @MainActor in
+            while visibleCount < totalCount {
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                if Task.isCancelled { return }
+                visibleCount = min(totalCount, visibleCount + step)
+                onTick()
+            }
+            onFinish()
+        }
+    }
+
+    private static func parse(_ raw: String) -> [StageBlock] {
+        var parsed: [StageBlock] = []
+        var proseLines: [String] = []
+        var codeLines: [String] = []
+        var inCode = false
+        var language = ""
+
+        func flushProse() {
+            let joined = proseLines
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                parsed.append(StageBlock(
+                    id: parsed.count,
+                    isCode: false,
+                    language: "",
+                    text: joined,
+                    start: 0
+                ))
+            }
+            proseLines.removeAll()
+        }
+
+        for line in raw.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                if inCode {
+                    let code = codeLines.joined(separator: "\n")
+                    if !code.isEmpty {
+                        parsed.append(StageBlock(
+                            id: parsed.count,
+                            isCode: true,
+                            language: language,
+                            text: code,
+                            start: 0
+                        ))
+                    }
+                    codeLines.removeAll()
+                    language = ""
+                    inCode = false
+                } else {
+                    flushProse()
+                    inCode = true
+                    language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                }
+                continue
+            }
+            if inCode {
+                codeLines.append(line)
+            } else if trimmed.isEmpty {
+                flushProse()
+            } else {
+                proseLines.append(
+                    trimmed
+                        .replacingOccurrences(of: "**", with: "")
+                        .replacingOccurrences(of: "`", with: "")
+                )
+            }
+        }
+
+        if inCode {
+            let code = codeLines.joined(separator: "\n")
+            if !code.isEmpty {
+                parsed.append(StageBlock(
+                    id: parsed.count,
+                    isCode: true,
+                    language: language,
+                    text: code,
+                    start: 0
+                ))
+            }
+        } else {
+            flushProse()
+        }
+
+        if parsed.isEmpty, !raw.isEmpty {
+            parsed.append(StageBlock(id: 0, isCode: false, language: "", text: raw, start: 0))
+        }
+
+        var offset = 0
+        return parsed.map { block in
+            var block = block
+            block.start = offset
+            offset += block.text.count
+            return block
+        }
     }
 }
+
+private struct StageBlock: Identifiable {
+    let id: Int
+    let isCode: Bool
+    let language: String
+    let text: String
+    var start: Int
+}
+
+// MARK: - Native composer (IME-safe)
 
 private struct ChineseIMETextView: NSViewRepresentable {
     @Binding var text: String
     let focusToken: UUID
+    let fontSize: CGFloat
+    let placeholder: String
     let onSubmit: () -> Void
     let onEscape: () -> Void
     let onPasteImage: (Data) -> Void
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.verticalScrollElasticity = .none
 
         let tv = QMXTextView()
         tv.delegate = context.coordinator
         tv.isRichText = false
         tv.allowsUndo = true
-        tv.font = NSFont.systemFont(ofSize: 13.5)
+        tv.font = NSFont.systemFont(ofSize: fontSize)
         tv.textColor = .labelColor
-        tv.insertionPointColor = .controlAccentColor
+        tv.insertionPointColor = .labelColor
         tv.drawsBackground = false
-        tv.textContainerInset = NSSize(width: 2, height: 4)
+        tv.isEditable = true
+        tv.isSelectable = true
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.textContainerInset = NSSize(width: 0, height: 20)
+        tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(
+            width: 0,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        tv.minSize = NSSize(width: 0, height: 68)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.frame = NSRect(x: 0, y: 0, width: 560, height: 68)
+        tv.placeholder = placeholder
         tv.onSubmit = onSubmit
         tv.onEscape = onEscape
         tv.onPasteImage = onPasteImage
@@ -641,16 +1114,34 @@ private struct ChineseIMETextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let tv = context.coordinator.textView else { return }
+
+        if tv.font?.pointSize != fontSize {
+            tv.font = NSFont.systemFont(ofSize: fontSize)
+            tv.needsDisplay = true
+        }
         if !tv.hasMarkedText() && tv.string != text {
             tv.string = text
+            tv.needsDisplay = true
         }
+        tv.placeholder = placeholder
         tv.onSubmit = onSubmit
         tv.onEscape = onEscape
         tv.onPasteImage = onPasteImage
+
+        let width = nsView.contentSize.width
+        if width > 0, abs(tv.frame.width - width) > 0.5 {
+            tv.frame = NSRect(x: 0, y: 0, width: width, height: max(68, tv.frame.height))
+            tv.textContainer?.containerSize = NSSize(
+                width: width,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+        }
+
         if context.coordinator.lastFocusToken != focusToken {
             context.coordinator.lastFocusToken = focusToken
-            DispatchQueue.main.async {
-                tv.window?.makeFirstResponder(tv)
+            DispatchQueue.main.async { [weak tv] in
+                guard let tv, let window = tv.window else { return }
+                window.makeFirstResponder(tv)
             }
         }
     }
@@ -666,7 +1157,9 @@ private struct ChineseIMETextView: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let tv = textView, !tv.hasMarkedText() else { return }
+            guard let tv = textView else { return }
+            tv.needsDisplay = true
+            guard !tv.hasMarkedText() else { return }
             parent.text = tv.string
         }
     }
@@ -676,6 +1169,9 @@ private final class QMXTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onEscape: (() -> Void)?
     var onPasteImage: ((Data) -> Void)?
+    var placeholder: String = "" {
+        didSet { needsDisplay = true }
+    }
 
     override func keyDown(with event: NSEvent) {
         if hasMarkedText() {
@@ -691,6 +1187,22 @@ private final class QMXTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+        needsDisplay = true
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 22),
+            .foregroundColor: NSColor.tertiaryLabelColor
+        ]
+        (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: attrs)
     }
 
     override func paste(_ sender: Any?) {

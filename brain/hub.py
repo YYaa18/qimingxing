@@ -115,6 +115,7 @@ logger = logging.getLogger("qimingxing.hub")
 SERVER_VERSION = get_app_version()
 CAPTURE_TIMEOUT_SECONDS = 3.5
 _MAX_TTS_CHARS_PER_TURN = 600
+RECONNECT_APPROVAL_GRACE_SECONDS = 120.0
 _DANGEROUS_OPEN_EXTENSIONS = {
     ".sh",
     ".command",
@@ -153,15 +154,33 @@ class ClientConnection:
     client_type: Optional[str] = None
     platform: str = "unknown"
     app_version: str = ""
+    client_instance_id: str = ""
     ui_subscribed: bool = False
     capabilities: ClientCapabilities = field(default_factory=ClientCapabilities)
     active_turn_id: Optional[str] = None
     active_task: Optional[asyncio.Task[None]] = None
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    disconnected: bool = False
+    outbox: List[Envelope] = field(default_factory=list)
+    grace_task: Optional[asyncio.Task[None]] = None
 
     async def send_envelope(self, envelope: Envelope) -> None:
         async with self.send_lock:
-            await self.websocket.send_text(envelope.model_dump_json())
+            if self.disconnected:
+                self._queue_outbox(envelope)
+                return
+            try:
+                await self.websocket.send_text(envelope.model_dump_json())
+            except Exception:
+                # Keep the turn alive during a short reconnect window; the
+                # envelope is replayed after the same client instance resumes.
+                self.disconnected = True
+                self._queue_outbox(envelope)
+
+    def _queue_outbox(self, envelope: Envelope) -> None:
+        self.outbox.append(envelope)
+        if len(self.outbox) > 512:
+            self.outbox = self.outbox[-512:]
 
 
 class Hub:
@@ -263,6 +282,9 @@ class Hub:
         self._pending_approval_requests: Dict[str, ToolApprovalRequestPayload] = {}
         self._approval_responders: Dict[str, tuple[str, str]] = {}
         self._command_requesters: Dict[str, str] = {}
+        self._ui_command_futures: Dict[str, asyncio.Future[UICommandResultPayload]] = {}
+        self._orphaned_conns: Dict[str, ClientConnection] = {}
+        self._conn_aliases: Dict[str, ClientConnection] = {}
         self._turn_cancel_events: Dict[str, asyncio.Event] = {}
         self._active_audio_inputs: Dict[str, _AudioInputBuffer] = {}
         self._latest_audio_turn_by_client: Dict[str, str] = {}
@@ -277,12 +299,125 @@ class Hub:
         self.clients[client_id] = conn
         return conn
 
-    async def unregister(self, conn: ClientConnection) -> None:
+    async def unregister(
+        self,
+        conn: ClientConnection,
+        websocket: Optional[WebSocket] = None,
+    ) -> None:
+        transport_id = conn.client_id
+        resolved = self._resolve_conn(conn)
+        if resolved is None:
+            return
+        # A late disconnect from the old transport must not tear down a
+        # connection that has already been rebound to a new WebSocket.
+        if websocket is not None and resolved.websocket is not websocket:
+            return
+        self._conn_aliases.pop(transport_id, None)
+        conn = resolved
+        self._conn_aliases = {
+            key: value for key, value in self._conn_aliases.items() if value is not conn
+        }
+
+        instance_id = conn.client_instance_id
+        if (
+            instance_id
+            and conn.active_turn_id
+            and self._has_pending_approval_for_turn(conn.active_turn_id)
+        ):
+            # Keep the turn (and its approval future) alive for a short window so
+            # the same shell instance can reconnect, receive ui.state, and answer.
+            conn.disconnected = True
+            self.clients.pop(conn.client_id, None)
+            self._orphaned_conns[instance_id] = conn
+            if conn.grace_task is not None and not conn.grace_task.done():
+                conn.grace_task.cancel()
+            conn.grace_task = asyncio.create_task(
+                self._expire_orphaned_conn(instance_id, conn, conn.active_turn_id)
+            )
+            logger.info(
+                "Disconnected client=%s while awaiting approval; keeping turn=%s for %.0fs (instance=%s)",
+                conn.client_id,
+                conn.active_turn_id,
+                RECONNECT_APPROVAL_GRACE_SECONDS,
+                instance_id,
+            )
+            return
+
         await self._cancel_active_turn(conn, notify=False)
         self.clients.pop(conn.client_id, None)
+        if instance_id:
+            self._orphaned_conns.pop(instance_id, None)
         logger.info("Disconnected client=%s role=%s", conn.client_id, conn.role)
         if conn.role == "senses":
             await self._broadcast_privacy_state()
+
+    def _resolve_conn(self, conn: Optional[ClientConnection]) -> Optional[ClientConnection]:
+        if conn is None:
+            return None
+        return self._conn_aliases.get(conn.client_id, conn)
+
+    def _has_pending_approval_for_turn(self, turn_id: str) -> bool:
+        return any(
+            req.turn_id == turn_id for req in self._pending_approval_requests.values()
+        )
+
+    async def _expire_orphaned_conn(
+        self, instance_id: str, conn: ClientConnection, turn_id: str
+    ) -> None:
+        try:
+            await asyncio.sleep(RECONNECT_APPROVAL_GRACE_SECONDS)
+            if self._orphaned_conns.get(instance_id) is not conn:
+                return
+            self._orphaned_conns.pop(instance_id, None)
+            for approval_id, (pending_turn, fut) in list(self._pending_approvals.items()):
+                if pending_turn == turn_id and not fut.done():
+                    fut.cancel()
+            await self._cancel_active_turn(conn, notify=False)
+            logger.warning(
+                "Reconnect grace expired for instance=%s; cancelled turn=%s",
+                instance_id,
+                turn_id,
+            )
+        except asyncio.CancelledError:
+            pass
+
+    async def _maybe_resume_connection(
+        self, conn: ClientConnection, payload: SystemHelloPayload
+    ) -> ClientConnection:
+        instance_id = (payload.client_instance_id or "").strip()
+        conn.client_instance_id = instance_id
+        if not instance_id:
+            return conn
+        old = self._orphaned_conns.pop(instance_id, None)
+        if old is None:
+            return conn
+
+        if old.grace_task is not None and not old.grace_task.done():
+            old.grace_task.cancel()
+        old.grace_task = None
+        old.websocket = conn.websocket
+        old.disconnected = False
+
+        # Keep the original ClientConnection object so the in-flight turn's
+        # closure now writes to the new transport; alias the new transport id.
+        self.clients.pop(conn.client_id, None)
+        self.clients[old.client_id] = old
+        self._conn_aliases[conn.client_id] = old
+        logger.info(
+            "Resumed connection instance=%s old_client=%s new_transport=%s",
+            instance_id,
+            old.client_id,
+            conn.client_id,
+        )
+        return old
+
+    async def _flush_outbox(self, conn: ClientConnection) -> None:
+        if not conn.outbox:
+            return
+        pending = conn.outbox
+        conn.outbox = []
+        for envelope in pending:
+            await conn.send_envelope(envelope)
 
     def _get_active_senses(self) -> Optional[ClientConnection]:
         for client in self.clients.values():
@@ -291,6 +426,10 @@ class Hub:
         return None
 
     async def handle_raw_message(self, conn: ClientConnection, raw_text: str) -> None:
+        resolved = self._resolve_conn(conn)
+        if resolved is None:
+            return
+        conn = resolved
         try:
             envelope = parse_envelope(raw_text)
         except (ValueError, ValidationError) as exc:
@@ -334,6 +473,7 @@ class Hub:
 
     async def _dispatch(self, conn: ClientConnection, env: Envelope, payload: object) -> None:
         if isinstance(payload, SystemHelloPayload):
+            conn = await self._maybe_resume_connection(conn, payload)
             conn.role = payload.role
             conn.client_name = payload.client_name
             conn.client_type = payload.client_type or (
@@ -375,6 +515,7 @@ class Hub:
                 await self._send_ui_state(conn)
             if payload.role == "senses":
                 await self._broadcast_privacy_state(exclude_client_id=conn.client_id)
+            await self._flush_outbox(conn)
             return
 
         if isinstance(payload, SystemPingPayload):
@@ -477,6 +618,9 @@ class Hub:
             return
 
         if isinstance(payload, UICommandResultPayload):
+            fut = self._ui_command_futures.pop(payload.command_id, None)
+            if fut is not None and not fut.done():
+                fut.set_result(payload)
             req_cid = self._command_requesters.pop(payload.command_id, None)
             if req_cid and req_cid in self.clients:
                 try:
@@ -772,6 +916,47 @@ class Hub:
             self.config.ui.ambient = bool(patch["ambient"])
         await self._broadcast_ui_state()
 
+    async def _send_shell_ui_action(
+        self, action: str, args: Dict[str, Any]
+    ) -> tuple[bool, str]:
+        """Send a ui.command to the native shell and wait briefly for its ack.
+
+        Used by Brain-side tools (e.g. opening the workspace) so the assistant
+        can drive its own UI without going through the filesystem.
+        """
+        candidates = [
+            c
+            for c in self.clients.values()
+            if c.role == "body" and c.capabilities.native_desktop
+        ]
+        if not candidates:
+            return False, "shell_offline"
+        target = candidates[0]
+
+        command = UICommandPayload(
+            command_id=f"ui_{uuid.uuid4().hex[:12]}",
+            target="shell",
+            action=action,
+            args=args,
+        )
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[UICommandResultPayload] = loop.create_future()
+        self._ui_command_futures[command.command_id] = fut
+        try:
+            await target.send_envelope(make_envelope("brain", "ui.command", command))
+        except Exception:
+            self._ui_command_futures.pop(command.command_id, None)
+            return False, "target_send_failed"
+
+        try:
+            result = await asyncio.wait_for(fut, timeout=2.0)
+        except asyncio.TimeoutError:
+            self._ui_command_futures.pop(command.command_id, None)
+            return True, ""
+        if result.ok:
+            return True, ""
+        return False, result.error or "ui_command_failed"
+
     async def _handle_ui_command(
         self, conn: ClientConnection, payload: UICommandPayload
     ) -> None:
@@ -962,6 +1147,10 @@ class Hub:
 
     async def handle_raw_bytes(self, conn: ClientConnection, raw_bytes: bytes) -> None:
         """Accept raw binary WS PCM chunk routed to client's active audio input session."""
+        resolved = self._resolve_conn(conn)
+        if resolved is None:
+            return
+        conn = resolved
         tid = self._latest_audio_turn_by_client.get(conn.client_id)
         if not tid:
             return
@@ -1787,6 +1976,7 @@ class Hub:
                         model=profile.model,
                         origin_client_id=conn.client_id,
                         origin_client_type=conn.client_type,
+                        user_text=user_text,
                     ),
                     turn_id=turn_id,
                 ),
@@ -2123,6 +2313,12 @@ class Hub:
                         timeout_sec=timeout_sec,
                     )
 
+                async def _on_ui_command(
+                    action: str,
+                    args: Dict[str, Any],
+                ) -> tuple[bool, str]:
+                    return await self._send_shell_ui_action(action, args)
+
                 async def _on_ask_user(
                     question: str,
                     options: List[str],
@@ -2148,6 +2344,7 @@ class Hub:
                     on_status=_on_status,
                     on_approval=_on_approval,
                     on_ask_user=_on_ask_user,
+                    on_ui_command=_on_ui_command,
                     task_runner=self.task_runner,
                 )
                 loop_res = await self.tool_executor.run(

@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import QuickLookUI
 @preconcurrency import UserNotifications
@@ -8,6 +9,7 @@ final class DesktopActions: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDe
     private var previewURLs: [URL] = []
     private var pinPanel: NSPanel?
     private var notificationsAuthorized = false
+    private let speechSynthesizer = AVSpeechSynthesizer()
     var onNotificationOpenRequested: ((String) -> Void)?
 
     private static let blockedExtensions: Set<String> = [
@@ -128,6 +130,22 @@ final class DesktopActions: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDe
             trigger: nil
         )
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+
+        let spoken = [title, body]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "。")
+        if !spoken.isEmpty {
+            speak(spoken)
+        }
+    }
+
+    private func speak(_ text: String) {
+        speechSynthesizer.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: String(text.prefix(160)))
+        utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        utterance.rate = 0.48
+        utterance.pitchMultiplier = 1.0
+        speechSynthesizer.speak(utterance)
     }
 
     func openLogsDirectory() {

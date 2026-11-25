@@ -111,6 +111,13 @@ struct MCPServerViewModel: Identifiable, Equatable, Sendable {
     var id: String { name }
 }
 
+extension Notification.Name {
+    static let qmxOpenWorkspace = Notification.Name("com.qimingxing.desktop.openWorkspace")
+    static let qmxDetachWorkspace = Notification.Name("com.qimingxing.desktop.detachWorkspace")
+    static let qmxCloseWorkspaceWing = Notification.Name("com.qimingxing.desktop.closeWorkspaceWing")
+    static let qmxHideQuickEntry = Notification.Name("com.qimingxing.desktop.hideQuickEntry")
+}
+
 enum JSONHelper {
     static func dict(from data: Data) -> [String: Any]? {
         (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -126,4 +133,20 @@ enum JSONHelper {
         }
         return String(describing: value)
     }
+}
+
+
+/// Removes control tags that the model uses internally but that should never
+/// appear in the rendered answer (e.g. a leading `[EMOTION:happy]`).
+func qmxCleanAssistantText(_ raw: String) -> String {
+    var text = raw
+    // Models occasionally emit zero-width characters inside the control tag,
+    // so strip by delimiters instead of a strict character-class regex.
+    while let start = text.range(of: "[EMOTION"),
+          let end = text.range(of: "]", range: start.upperBound..<text.endIndex) {
+        text.removeSubrange(start.lowerBound..<end.upperBound)
+    }
+    text = text.replacingOccurrences(of: "\u{200B}", with: "")
+    text = text.replacingOccurrences(of: "\u{FEFF}", with: "")
+    return text.trimmingCharacters(in: .whitespacesAndNewlines)
 }

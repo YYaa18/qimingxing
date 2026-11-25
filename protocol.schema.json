@@ -1000,6 +1000,11 @@
           ],
           "default": null,
           "title": "Origin Client Type"
+        },
+        "user_text": {
+          "default": "",
+          "title": "User Text",
+          "type": "string"
         }
       },
       "required": [
@@ -1224,6 +1229,18 @@
           ],
           "default": null,
           "title": "App Version"
+        },
+        "client_instance_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Instance Id"
         },
         "capabilities": {
           "$ref": "#/$defs/ClientCapabilities"

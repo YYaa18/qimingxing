@@ -1,5 +1,4 @@
 import AppKit
-import Luminare
 import SwiftUI
 
 @MainActor
@@ -13,19 +12,22 @@ final class MenuBarController: NSObject {
     private let desktopActions: DesktopActions
     private let onOpenQuickEntry: () -> Void
     private let onOpenSettings: () -> Void
+    private let onOpenWorkspace: () -> Void
 
     init(
         brainClient: BrainClient,
         supervisor: ProcessSupervisor,
         desktopActions: DesktopActions,
         onOpenQuickEntry: @escaping () -> Void,
-        onOpenSettings: @escaping () -> Void
+        onOpenSettings: @escaping () -> Void,
+        onOpenWorkspace: @escaping () -> Void
     ) {
         self.brainClient = brainClient
         self.supervisor = supervisor
         self.desktopActions = desktopActions
         self.onOpenQuickEntry = onOpenQuickEntry
         self.onOpenSettings = onOpenSettings
+        self.onOpenWorkspace = onOpenWorkspace
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
 
@@ -36,16 +38,35 @@ final class MenuBarController: NSObject {
 
     private func configureButton() {
         guard let btn = statusItem.button else { return }
-        if let img = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "启明星") {
-            img.isTemplate = true
-            btn.image = img
-        } else {
-            btn.title = "✦"
-        }
+        btn.image = Self.makeStarImage(size: 16)
         btn.toolTip = "启明星 Qimingxing"
         btn.target = self
         btn.action = #selector(handleStatusButtonClick(_:))
         btn.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    private static func makeStarImage(size: CGFloat) -> NSImage {
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            let center = CGPoint(x: rect.midX, y: rect.midY)
+            let outer = min(rect.width, rect.height) / 2 - 1
+            let inner = outer * 0.26
+            let path = NSBezierPath()
+            for i in 0..<8 {
+                let angle = -Double.pi / 2 + Double(i) * Double.pi / 4
+                let radius = i.isMultiple(of: 2) ? outer : inner
+                let point = CGPoint(
+                    x: center.x + CGFloat(cos(angle)) * radius,
+                    y: center.y + CGFloat(sin(angle)) * radius
+                )
+                if i == 0 { path.move(to: point) } else { path.line(to: point) }
+            }
+            path.close()
+            NSColor.black.setFill()
+            path.fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     private func configurePopover() {
@@ -61,20 +82,30 @@ final class MenuBarController: NSObject {
                 self?.popover.performClose(nil)
                 self?.onOpenSettings()
             },
+            onOpenWorkspace: { [weak self] in
+                self?.popover.performClose(nil)
+                self?.onOpenWorkspace()
+            },
             onQuit: { NSApp.terminate(nil) }
         )
-
         popover.contentViewController = NSHostingController(rootView: root)
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 356, height: 470)
+        updatePopoverSize()
+    }
+
+    private func updatePopoverSize() {
+        let taskRows = min(2, brainClient.backgroundTasks.filter(\.isActive).count)
+        let height: CGFloat = 372 + (taskRows == 0 ? 0 : 22 + CGFloat(taskRows) * 44)
+        popover.contentSize = NSSize(width: 280, height: height)
     }
 
     private func configureContextMenu() {
         let items: [(String, Selector)] = [
-            ("打开 Quick Entry (⌥Space)", #selector(menuQuickEntry)),
-            ("设置中心 (⌥K)", #selector(menuSettings)),
+            ("打开对话", #selector(menuQuickEntry)),
+            ("打开工作区", #selector(menuWorkspace)),
+            ("设置与 API Key", #selector(menuSettings)),
             ("打开日志目录", #selector(menuOpenLogs)),
-            ("紧急停止当前任务 (⌥Esc)", #selector(menuEmergencyStop)),
+            ("紧急停止", #selector(menuEmergencyStop)),
             ("退出启明星", #selector(menuQuit))
         ]
         for (title, sel) in items {
@@ -103,13 +134,19 @@ final class MenuBarController: NSObject {
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            Task { await brainClient.refreshTasks() }
+            updatePopoverSize()
             popover.show(relativeTo: btn.bounds, of: btn, preferredEdge: .minY)
+            Task { [weak self] in
+                guard let self else { return }
+                await brainClient.refreshTasks()
+                updatePopoverSize()
+            }
         }
     }
 
     @objc private func menuQuickEntry() { onOpenQuickEntry() }
     @objc private func menuSettings() { onOpenSettings() }
+    @objc private func menuWorkspace() { onOpenWorkspace() }
     @objc private func menuOpenLogs() { desktopActions.openLogsDirectory() }
     @objc private func menuEmergencyStop() { brainClient.cancelActiveTurn(reason: "menu_stop") }
     @objc private func menuQuit() { NSApp.terminate(nil) }
@@ -117,205 +154,147 @@ final class MenuBarController: NSObject {
 
 struct MenuBarPopoverView: View {
     @ObservedObject var brainClient: BrainClient
-    @ObservedObject var supervisor: ProcessSupervisor
+    let supervisor: ProcessSupervisor
     let desktopActions: DesktopActions
     let onOpenQuickEntry: () -> Void
     let onOpenSettings: () -> Void
+    let onOpenWorkspace: () -> Void
     let onQuit: () -> Void
 
     var body: some View {
         ZStack {
             VisualEffectBlur(material: .popover, blendingMode: .behindWindow)
 
-            VStack(alignment: .leading, spacing: 12) {
-                // Header Status Card
-                HStack(spacing: 10) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(QMXTheme.accent.opacity(0.16))
-                            .frame(width: 36, height: 36)
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(QMXTheme.accent)
-                    }
+            VStack(alignment: .leading, spacing: 6) {
+                header
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("启明星")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("v\(supervisor.appVersion)")
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(Color.primary.opacity(0.08)))
-                        }
-                        HStack(spacing: 4) {
-                            PulsingDotView(
-                                color: statusColor,
-                                isPulsing: brainClient.isGenerating || brainClient.phase == .starting
-                            )
-                            Text(statusLabel)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                Divider().opacity(0.5)
 
-                    Spacer()
+                MenuActionRow(
+                    icon: "bubble.left.and.bubble.right",
+                    title: "呼出对话",
+                    keycap: "⌥Space",
+                    action: onOpenQuickEntry
+                )
+                MenuActionRow(
+                    icon: "gearshape",
+                    title: "设置与 API Key",
+                    keycap: "⌘,",
+                    action: onOpenSettings
+                )
+                MenuActionRow(
+                    icon: "square.grid.2x2",
+                    title: "打开工作区",
+                    keycap: "",
+                    action: onOpenWorkspace
+                )
 
-                    Button(action: onOpenQuickEntry) {
-                        HStack(spacing: 5) {
-                            Text("对话")
-                            KeyCapBadge("⌥Space", onAccent: true)
+                if !activeTasks.isEmpty {
+                    Divider().opacity(0.5)
+                    Text("后台任务")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 2)
+
+                    ForEach(activeTasks.prefix(2)) { task in
+                        TaskRow(task: task) {
+                            Task { await brainClient.cancelBackgroundTask(taskId: task.taskId) }
                         }
                     }
-                    .buttonStyle(.qmxProminent)
                 }
 
-                // Model & Senses Info Card
-                LuminareSection {
-                    LuminareCompose("当前模型") {
-                        Text(activeModelLabel)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                    }
+                Divider().opacity(0.5)
 
-                    LuminareCompose("感知隐私") {
-                        LuminarePicker(
-                            compactElements: ["off", "meta_only", "full_on_demand"],
-                            selection: Binding(
-                                get: { brainClient.privacyMode },
-                                set: { brainClient.setPrivacyMode($0) }
-                            )
-                        ) { mode in
-                            Text(privacyShortLabel(mode))
-                                .font(.system(size: 11, weight: .medium))
-                                .padding(.vertical, 4)
-                        }
-                        .frame(width: 192, height: 28)
-                    }
-
-                    LuminareToggle(
-                        "提示音效 (Earcons)",
-                        isOn: Binding(
-                            get: { brainClient.earconsEnabled },
-                            set: { brainClient.setUIStatePatch(["earcons": $0]) }
-                        )
-                    )
-                }
-                .luminareTint(overridingWith: QMXTheme.accent)
-
-                // Background Tasks Section
-                LuminareSection {
-                    if brainClient.backgroundTasks.isEmpty {
-                        LuminareCompose("后台长任务") {
-                            Text("暂无运行中任务")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        VStack(spacing: 0) {
-                            ForEach(brainClient.backgroundTasks.prefix(4)) { task in
-                                VStack(alignment: .leading, spacing: 5) {
-                                    HStack {
-                                        Text(task.title)
-                                            .font(.system(size: 12, weight: .medium))
-                                            .lineLimit(1)
-                                        Spacer()
-                                        Text("\(task.progressPct)%")
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(task.isActive ? QMXTheme.accent : .secondary)
-                                    }
-
-                                    ProgressView(value: Double(task.progressPct), total: 100.0)
-                                        .tint(task.isActive ? QMXTheme.accent : QMXTheme.success)
-
-                                    HStack {
-                                        Text(task.currentStep.isEmpty ? task.status : task.currentStep)
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                        Spacer()
-                                        if task.isActive {
-                                            Button("取消") {
-                                                Task { await brainClient.cancelBackgroundTask(taskId: task.taskId) }
-                                            }
-                                            .font(.caption2)
-                                            .buttonStyle(.borderless)
-                                            .foregroundStyle(QMXTheme.danger)
-                                        } else if !task.artifactPath.isEmpty {
-                                            Button("预览报告") {
-                                                _ = desktopActions.quickLook(task.artifactPath)
-                                            }
-                                            .font(.caption2)
-                                            .buttonStyle(.borderless)
-                                            .foregroundStyle(QMXTheme.accent)
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
+                MenuActionRow(
+                    icon: "eye",
+                    title: "隐私模式",
+                    keycap: "",
+                    trailing: AnyView(
+                        Menu {
+                            Button("关闭") { brainClient.setPrivacyMode("off") }
+                            Button("仅窗口") { brainClient.setPrivacyMode("meta_only") }
+                            Button("按需看屏") { brainClient.setPrivacyMode("full_on_demand") }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text(privacyShortLabel(brainClient.privacyMode))
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(QMXTheme.textSecondary)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(QMXTheme.textTertiary)
                             }
                         }
-                    }
-                } header: {
-                    HStack {
-                        Text("后台任务 (\(brainClient.activeBgTaskCount) 运行中)")
-                            .font(.caption.weight(.semibold))
-                        Spacer()
-                        Button {
-                            Task { await brainClient.refreshTasks() }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.caption)
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-                .luminareTint(overridingWith: QMXTheme.accent)
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                    ),
+                    action: {}
+                )
 
-                Spacer(minLength: 0)
+                ToggleRow(
+                    icon: "speaker.wave.2",
+                    title: "状态提示音",
+                    isOn: Binding(
+                        get: { brainClient.earconsEnabled },
+                        set: { brainClient.setUIStatePatch(["earcons": $0]) }
+                    )
+                )
+                ToggleRow(
+                    icon: "music.note",
+                    title: "背景氛围音",
+                    isOn: Binding(
+                        get: { brainClient.ambientEnabled },
+                        set: { brainClient.setUIStatePatch(["ambient": $0]) }
+                    )
+                )
 
-                // Compact Footer Control Bar
-                HStack(spacing: 8) {
-                    Button(action: onOpenSettings) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "gearshape")
-                            Text("设置")
-                            KeyCapBadge("⌥K")
-                        }
-                    }
-                    .buttonStyle(.qmxSecondary)
+                Divider().opacity(0.5)
 
-                    Button {
-                        brainClient.cancelActiveTurn(reason: "popover_stop")
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "stop.circle.fill")
-                            Text("急停")
-                        }
-                    }
-                    .buttonStyle(.qmxDestructive)
-
-                    Spacer()
-
-                    Button(action: onQuit) {
-                        Text("退出")
-                    }
-                    .buttonStyle(.qmxSecondary)
-                }
+                MenuActionRow(
+                    icon: "power",
+                    title: "退出启明星",
+                    keycap: "⌘Q",
+                    action: onQuit
+                )
             }
-            .padding(14)
+            .padding(10)
         }
-        .frame(width: 356)
+        .frame(width: 280)
+        .clipShape(RoundedRectangle(cornerRadius: QMXTheme.popoverRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: QMXTheme.popoverRadius, style: .continuous)
+                .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+        )
     }
 
-    private var activeModelLabel: String {
-        if let p = brainClient.profiles.first(where: { $0.name == brainClient.activeProfile }) {
-            return p.label.isEmpty ? p.name : p.label
+    private var activeTasks: [BackgroundTaskItem] {
+        brainClient.backgroundTasks.filter(\.isActive)
+    }
+
+    private var header: some View {
+        HStack(spacing: 9) {
+            MorningStarMark(size: 18, color: QMXTheme.textPrimary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("启明星")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(QMXTheme.textPrimary)
+                HStack(spacing: 5) {
+                    StatusDot(color: statusColor, size: 6)
+                    Text(statusLabel)
+                        .font(.system(size: 12))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
         }
-        return brainClient.activeProfile.isEmpty ? "未就绪" : brainClient.activeProfile
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
+        .help("启明星 v\(supervisor.appVersion)")
     }
 
     private var statusColor: Color {
@@ -329,13 +308,11 @@ struct MenuBarPopoverView: View {
     private var statusLabel: String {
         switch brainClient.phase {
         case .connected:
-            return brainClient.sensesConnected ? "已连接 · 感官在线" : "已连接 Brain"
-        case .starting:
-            return "正在启动引擎…"
-        case .offline:
-            return "已离线（自动重连中）"
-        case .error:
-            return "运行异常"
+            let model = brainClient.profiles.first(where: { $0.name == brainClient.activeProfile })?.label ?? brainClient.activeProfile
+            return model.isEmpty ? "运行中" : "\(model) 运行中"
+        case .starting: return "正在启动"
+        case .offline: return "已离线，重连中"
+        case .error: return "运行异常"
         }
     }
 
@@ -343,7 +320,117 @@ struct MenuBarPopoverView: View {
         switch mode {
         case "off": return "关闭"
         case "meta_only": return "仅窗口"
-        default: return "看屏"
+        default: return "按需看屏"
         }
+    }
+}
+
+private struct MenuActionRow: View {
+    let icon: String
+    let title: String
+    let keycap: String
+    var trailing: AnyView? = nil
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(QMXTheme.textSecondary)
+                    .frame(width: 18, alignment: .center)
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(QMXTheme.textPrimary)
+                Spacer()
+                if let trailing {
+                    trailing
+                } else if !keycap.isEmpty {
+                    KeyCapBadge(keycap)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 32)
+            .background(
+                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
+                    .fill(isHovering ? QMXTheme.surfaceRaised : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+    }
+}
+
+private struct ToggleRow: View {
+    let icon: String
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(QMXTheme.textSecondary)
+                .frame(width: 18, alignment: .center)
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(QMXTheme.textPrimary)
+            Spacer()
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 32)
+    }
+}
+
+private struct TaskRow: View {
+    let task: BackgroundTaskItem
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(task.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(QMXTheme.textPrimary)
+                    .lineLimit(1)
+                Spacer()
+                Text("\(task.progressPct)%")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(QMXTheme.textTertiary)
+                    .monospacedDigit()
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("取消任务")
+            }
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(QMXTheme.surfaceMuted)
+                        .frame(height: 2)
+                    Capsule()
+                        .fill(QMXTheme.accent)
+                        .frame(width: max(2, geo.size.width * CGFloat(task.progressPct) / 100.0), height: 2)
+                }
+            }
+            .frame(height: 2)
+
+            Text(task.currentStep.isEmpty ? task.status : task.currentStep)
+                .font(.system(size: 11))
+                .foregroundStyle(QMXTheme.textTertiary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
     }
 }

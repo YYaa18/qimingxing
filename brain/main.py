@@ -680,7 +680,7 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
-            await hub.unregister(conn)
+            await hub.unregister(conn, websocket=websocket)
 
     return app
 

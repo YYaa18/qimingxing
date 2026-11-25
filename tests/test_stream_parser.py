@@ -170,3 +170,16 @@ def test_leading_space_after_emotion_tag_is_trimmed() -> None:
     spoken = _joined_text(events)
     assert spoken == "你好呀！"
 
+
+
+def test_emotion_tag_with_equals_separator() -> None:
+    parser = StreamParser()
+    events = _collect(parser, ["[EMOTION=happy]\n", "工作区开好了。"])
+
+    emotions = [e for e in events if isinstance(e, EmotionEvent)]
+    spoken = _joined_text(events)
+
+    assert len(emotions) == 1
+    assert emotions[0].emotion == "happy"
+    assert "[EMOTION" not in spoken
+    assert spoken.strip() == "工作区开好了。"
