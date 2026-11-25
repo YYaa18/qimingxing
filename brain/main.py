@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -17,6 +18,7 @@ from brain.artifact_store import ArtifactStore
 from brain.audio import ASRProvider, TTSProvider
 from brain.config import (
     AppConfig,
+    resolve_writable_config_path,
     delete_mcp_server_in_yaml,
     get_sanitized_mcp_servers,
     get_sanitized_settings,
@@ -34,6 +36,12 @@ from brain.memory import MemoryBackend, create_memory_backend
 from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from brain.memory.extractor import MemoryExtractor
 from brain.memory.models import FeedbackRecord
+from brain.model_config_store import (
+    ModelConfigStore,
+    ModelStoreConflictError,
+    ModelStoreValidationError,
+)
+from brain.model_discovery import discover_provider_models
 from brain.memory.retrieval import MemoryRetriever
 from brain.scheduler import TaskScheduler
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
@@ -94,6 +102,27 @@ def create_app(
 ) -> FastAPI:
     _config_injected = config is not None
     cfg = config or load_config()
+    # Injected configs (tests/dev harnesses) keep their legacy config object.
+    # The production Brain (no injected config) uses models.db as source of truth.
+    enable_model_store = (not _config_injected) and (
+        settings_config_path is not None or bool(os.environ.get("QIMINGXING_CONFIG"))
+    )
+    model_store: Optional[ModelConfigStore] = None
+    model_store_mode = "disabled"
+    if enable_model_store:
+        cfg_path = Path(settings_config_path) if settings_config_path is not None else resolve_writable_config_path()
+        candidate_store = ModelConfigStore(cfg_path.parent / "models.db", cfg_path)
+        try:
+            candidate_store.initialize(cfg)
+            candidate_store.apply_to_config(cfg)
+            model_store = candidate_store
+            model_store_mode = "models_db"
+        except Exception as exc:
+            # Never brick startup because models.db migration/discovery is
+            # unhealthy. Continue with the YAML-loaded cfg in fallback mode.
+            logger.exception("models.db initialization failed; falling back to YAML: %s", exc)
+            model_store = None
+            model_store_mode = "yaml_fallback"
     router = llm_router or LLMRouter(cfg)
     artifacts = artifact_store or ArtifactStore()
     backend = memory_backend or create_memory_backend(cfg.memory)
@@ -201,6 +230,7 @@ def create_app(
     app.state.config = cfg
     app.state.llm_router = router
     app.state.artifact_store = artifacts
+    app.state.model_store = model_store
     app.state.memory_backend = backend
     app.state.memory_retriever = retriever
     app.state.memory_extractor = extractor
@@ -221,6 +251,7 @@ def create_app(
                 "privacy_mode": hub.privacy_mode,
                 "memory_backend": cfg.memory.backend,
                 "embedding_enabled": emb_provider.enabled,
+                "model_store_mode": model_store_mode,
             }
         )
 
@@ -549,6 +580,67 @@ def create_app(
 
         return JSONResponse(result)
 
+    @app.post("/api/models/discover")
+    async def discover_models(request: Request) -> JSONResponse:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            raise HTTPException(status_code=403, detail="Model discovery is restricted to localhost.")
+        if model_store is None:
+            raise HTTPException(status_code=503, detail="model_store_unavailable")
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+        provider_id = str(body.get("provider_id") or "").strip()
+        provider = model_store.provider(provider_id)
+        if provider is None:
+            raise HTTPException(status_code=404, detail="provider_not_found")
+        api_key = str(body.get("api_key") or "").strip()
+        if not api_key or "****" in api_key:
+            api_key = str(provider.get("api_key") or "")
+        try:
+            discovered = await discover_provider_models(
+                provider_id=provider_id,
+                protocol=str(provider.get("protocol") or "openai_compatible"),
+                base_url=str(provider.get("base_url") or ""),
+                api_key=api_key,
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            api_message = ""
+            try:
+                payload = exc.response.json()
+                if isinstance(payload, dict):
+                    api_message = str((payload.get("error") or {}).get("message") or "")
+            except Exception:
+                api_message = exc.response.text[:200]
+            base_url = str(provider.get("base_url") or "")
+            if provider_id == "gemini" or "generativelanguage.googleapis.com" in base_url:
+                hint = "请确认 Key 来自 Google AI Studio，并已启用 Generative Language API。"
+            elif provider_id == "deepseek":
+                hint = "请检查 DeepSeek API Key 是否有效、账户是否可用。"
+            else:
+                hint = "请检查 API Key 与 Base URL 是否正确。"
+            detail = f"刷新模型失败（HTTP {status}）"
+            if api_message:
+                detail += f"：{api_message}"
+            detail += f" {hint}"
+            safe = hub.config.redact_secrets(detail)
+            if api_key and len(api_key) >= 4:
+                safe = safe.replace(api_key, "***REDACTED***")
+            raise HTTPException(status_code=502, detail=safe) from exc
+        except Exception as exc:
+            safe = hub.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+            raise HTTPException(status_code=502, detail=safe) from exc
+        count = model_store.upsert_discovered(provider_id, discovered)
+        model_store.apply_to_config(hub.config)
+        await hub.apply_config_update(hub.config)
+        return JSONResponse({
+            "status": "ok",
+            "count": count,
+            "models": discovered,
+        })
+
     @app.get("/api/config/settings")
     async def get_settings(request: Request) -> JSONResponse:
         client_host = request.client.host if request.client else ""
@@ -573,7 +665,23 @@ def create_app(
             raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
 
         try:
+            if model_store is not None:
+                if isinstance(body.get("providers"), dict):
+                    model_store.apply_provider_patch(body["providers"])
+                if isinstance(body.get("model_routing"), dict):
+                    model_store.apply_routing_patch(body["model_routing"])
+                body = {
+                    key: value
+                    for key, value in body.items()
+                    if key not in ("providers", "model_routing", "profiles")
+                }
             fresh_cfg = save_settings_to_yaml(body, config_path=settings_config_path)
+            if model_store is not None:
+                model_store.apply_to_config(fresh_cfg)
+        except ModelStoreConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ModelStoreValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
             safe_err = hub.config.redact_secrets(f"{type(exc).__name__}: {exc}")
             raise HTTPException(status_code=400, detail=f"保存配置失败: {safe_err}") from exc

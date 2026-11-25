@@ -29,6 +29,7 @@ from brain.memory.models import (
     TaskStatus,
     TaskType,
     UsageLedgerRecord,
+    UsageSlotSummary,
     UsageSummary,
     WorkHistoryRecord,
     new_session_id,
@@ -181,6 +182,7 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     model TEXT NOT NULL DEFAULT '',
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     estimated_cost_cny REAL NOT NULL DEFAULT 0.0,
     created_at REAL NOT NULL
@@ -263,6 +265,15 @@ class SQLiteMemoryStore(MemoryBackend):
             if "slot" not in usage_cols:
                 conn.execute(
                     "ALTER TABLE usage_ledger ADD COLUMN slot TEXT NOT NULL DEFAULT ''"
+                )
+            if "cached_input_tokens" not in usage_cols:
+                conn.execute(
+                    "ALTER TABLE usage_ledger ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0"
+                )
+                # Preserve historical cache evidence on old DBs.
+                conn.execute(
+                    """UPDATE usage_ledger SET cached_input_tokens = prompt_cache_hit_tokens
+                       WHERE cached_input_tokens = 0 AND prompt_cache_hit_tokens > 0"""
                 )
             for cat in DEFAULT_MEMORY_CATEGORIES:
                 conn.execute(
@@ -666,7 +677,7 @@ class SQLiteMemoryStore(MemoryBackend):
             conn = self._ensure_conn()
             if status is None:
                 rows = conn.execute(
-                    "SELECT * FROM memory_facts ORDER BY importance DESC, updated_at DESC LIMIT ?",
+                    "SELECT * FROM memory_facts ORDER BY importance DESC, updated_at DESC, fact_id ASC LIMIT ?",
                     (limit,),
                 ).fetchall()
             else:
@@ -674,7 +685,7 @@ class SQLiteMemoryStore(MemoryBackend):
                     """
                     SELECT * FROM memory_facts
                     WHERE status = ?
-                    ORDER BY importance DESC, updated_at DESC
+                    ORDER BY importance DESC, updated_at DESC, fact_id ASC
                     LIMIT ?
                     """,
                     (status, limit),
@@ -1145,9 +1156,9 @@ class SQLiteMemoryStore(MemoryBackend):
                 """
                 INSERT INTO usage_ledger (
                     session_id, turn_id, profile, provider, slot, model,
-                    prompt_tokens, prompt_cache_hit_tokens, completion_tokens,
-                    estimated_cost_cny, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_tokens, prompt_cache_hit_tokens, cached_input_tokens,
+                    completion_tokens, estimated_cost_cny, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.session_id,
@@ -1158,6 +1169,7 @@ class SQLiteMemoryStore(MemoryBackend):
                     record.model,
                     record.prompt_tokens,
                     record.prompt_cache_hit_tokens,
+                    record.cached_input_tokens or record.prompt_cache_hit_tokens,
                     record.completion_tokens,
                     record.estimated_cost_cny,
                     record.created_at,
@@ -1174,6 +1186,7 @@ class SQLiteMemoryStore(MemoryBackend):
                 model=record.model,
                 prompt_tokens=record.prompt_tokens,
                 prompt_cache_hit_tokens=record.prompt_cache_hit_tokens,
+                cached_input_tokens=record.cached_input_tokens or record.prompt_cache_hit_tokens,
                 completion_tokens=record.completion_tokens,
                 estimated_cost_cny=record.estimated_cost_cny,
                 created_at=record.created_at,
@@ -1197,6 +1210,7 @@ class SQLiteMemoryStore(MemoryBackend):
                     model=str(r["model"] or ""),
                     prompt_tokens=int(r["prompt_tokens"] or 0),
                     prompt_cache_hit_tokens=int(r["prompt_cache_hit_tokens"] or 0),
+                    cached_input_tokens=int(r["cached_input_tokens"] or 0),
                     completion_tokens=int(r["completion_tokens"] or 0),
                     estimated_cost_cny=float(r["estimated_cost_cny"] or 0.0),
                     created_at=float(r["created_at"] or 0.0),
@@ -1212,7 +1226,7 @@ class SQLiteMemoryStore(MemoryBackend):
                 SELECT
                     COUNT(*) AS calls,
                     COALESCE(SUM(prompt_tokens), 0) AS pt,
-                    COALESCE(SUM(prompt_cache_hit_tokens), 0) AS ht,
+                    COALESCE(SUM(cached_input_tokens), 0) AS ht,
                     COALESCE(SUM(completion_tokens), 0) AS ct,
                     COALESCE(SUM(estimated_cost_cny), 0.0) AS cost
                 FROM usage_ledger
@@ -1230,10 +1244,45 @@ class SQLiteMemoryStore(MemoryBackend):
                 calls=calls,
                 prompt_tokens=pt,
                 prompt_cache_hit_tokens=ht,
+                cached_input_tokens=ht,
                 completion_tokens=ct,
                 total_cost_cny=cost,
                 cache_hit_rate=hit_rate,
             )
+
+    async def get_usage_by_slot(self, *, since_ts: float = 0.0) -> List[UsageSlotSummary]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            rows = conn.execute(
+                """
+                SELECT
+                    slot,
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(prompt_tokens), 0) AS pt,
+                    COALESCE(SUM(cached_input_tokens), 0) AS ht,
+                    COALESCE(SUM(completion_tokens), 0) AS ct,
+                    COALESCE(SUM(estimated_cost_cny), 0.0) AS cost
+                FROM usage_ledger
+                WHERE created_at >= ?
+                GROUP BY slot
+                ORDER BY slot
+                """,
+                (since_ts,),
+            ).fetchall()
+            result: List[UsageSlotSummary] = []
+            for row in rows:
+                pt = int(row["pt"] or 0)
+                ht = int(row["ht"] or 0)
+                result.append(UsageSlotSummary(
+                    slot=str(row["slot"] or ""),
+                    calls=int(row["calls"] or 0),
+                    prompt_tokens=pt,
+                    cached_input_tokens=ht,
+                    completion_tokens=int(row["ct"] or 0),
+                    total_cost_cny=float(row["cost"] or 0.0),
+                    cache_hit_rate=(ht / pt) if pt > 0 else 0.0,
+                ))
+            return result
 
     # --- M5: Scheduled Tasks ---
 
@@ -1790,9 +1839,9 @@ class SQLiteMemoryStore(MemoryBackend):
                             """
                             INSERT OR REPLACE INTO usage_ledger (
                                 ledger_id, session_id, turn_id, profile, provider, slot, model,
-                                prompt_tokens, prompt_cache_hit_tokens, completion_tokens,
-                                estimated_cost_cny, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                prompt_tokens, prompt_cache_hit_tokens, cached_input_tokens,
+                                completion_tokens, estimated_cost_cny, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["ledger_id"],
@@ -1804,6 +1853,7 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec.get("model", ""),
                                 rec.get("prompt_tokens", 0),
                                 rec.get("prompt_cache_hit_tokens", 0),
+                                rec.get("cached_input_tokens", 0),
                                 rec.get("completion_tokens", 0),
                                 rec.get("estimated_cost_cny", 0.0),
                                 rec["created_at"],

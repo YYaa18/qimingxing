@@ -148,6 +148,7 @@ class _FakeVoiceRouter(LLMRouter):
         messages: List[Dict[str, Any]],
         *,
         profile_name: Optional[str] = None,
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         reply = self._replies.pop(0) if self._replies else "好的。"
         self.last_usage = LLMUsage(

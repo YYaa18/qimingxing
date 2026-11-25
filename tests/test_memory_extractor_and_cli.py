@@ -27,6 +27,8 @@ class MockExtractorLLM(LLMRouter):
         self,
         messages: List[Dict[str, Any]],
         profile_name: str | None = None,
+        *,
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         if self.fail_mode:
             raise LLMError("LLM_TIMEOUT", "simulated timeout")

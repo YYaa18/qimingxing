@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -40,9 +42,11 @@ class ToolExecutor:
         on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
         max_steps: Optional[int] = None,
         max_context_tokens: Optional[int] = None,
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        on_server_tool_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> ToolLoopResult:
         limit = max(1, max_steps if max_steps is not None else ctx.config.tools.max_tool_steps)
-        tools_schema = registry.to_openai_tools()
+        schema = tools_schema if tools_schema is not None else registry.to_openai_tools()
         working_messages: List[Dict[str, Any]] = [dict(m) for m in messages]
 
         spoken_parts: List[str] = []
@@ -70,11 +74,16 @@ class ToolExecutor:
                     keep_last=2,
                 )
 
+            completion_kwargs: Dict[str, Any] = {
+                "profile_name": profile_name,
+                "on_text_delta": _emit_delta,
+            }
+            if on_server_tool_event is not None and self._supports_server_events():
+                completion_kwargs["on_server_tool_event"] = on_server_tool_event
             res = await self.llm_router.complete_with_tools(
                 working_messages,
-                tools_schema,
-                profile_name=profile_name,
-                on_text_delta=_emit_delta,
+                schema,
+                **completion_kwargs,
             )
             usages.append(res.usage)
             ctx.usage_collector.append(res.usage)
@@ -88,23 +97,33 @@ class ToolExecutor:
                     called_tools=called_tools,
                 )
 
-            working_messages.append(
-                {
-                    "role": "assistant",
-                    "content": res.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments_json or "{}",
-                            },
-                        }
-                        for tc in res.tool_calls
-                    ],
-                }
-            )
+            assistant_message: Dict[str, Any] = {
+                "role": "assistant",
+                "content": res.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments_json or "{}",
+                        },
+                        **(
+                            {"thought_signature": tc.thought_signature}
+                            if tc.thought_signature
+                            else {}
+                        ),
+                    }
+                    for tc in res.tool_calls
+                ],
+            }
+            # DeepSeek requires the full reasoning_content of every tool-using
+            # round to be passed back; omitting it returns HTTP 400.
+            if res.reasoning_content:
+                assistant_message["reasoning_content"] = res.reasoning_content
+            if res.server_tool_calls:
+                assistant_message["server_tool_calls"] = res.server_tool_calls
+            working_messages.append(assistant_message)
 
             for tc in res.tool_calls:
                 if ctx.is_cancelled():
@@ -297,11 +316,26 @@ class ToolExecutor:
                 else f"已达到单轮工具最大步数上限（{limit} 步）。请基于目前已经拿到的信息向用户汇总当前进展与结果。"
             )
             wrap_messages = working_messages + [{"role": "system", "content": guard_note}]
+            if max_context_tokens is not None:
+                wrap_messages = self._fold_old_tool_outputs(
+                    wrap_messages,
+                    max_tokens=max_context_tokens,
+                    keep_last=2,
+                )
+                wrap_messages = self._truncate_tool_outputs_to_fit(
+                    wrap_messages,
+                    max_tokens=max_context_tokens,
+                )
+            wrap_kwargs: Dict[str, Any] = {
+                "profile_name": profile_name,
+                "on_text_delta": _emit_delta,
+            }
+            if on_server_tool_event is not None and self._supports_server_events():
+                wrap_kwargs["on_server_tool_event"] = on_server_tool_event
             final_res = await self.llm_router.complete_with_tools(
                 wrap_messages,
                 [],
-                profile_name=profile_name,
-                on_text_delta=_emit_delta,
+                **wrap_kwargs,
             )
             usages.append(final_res.usage)
             ctx.usage_collector.append(final_res.usage)
@@ -313,6 +347,96 @@ class ToolExecutor:
             stopped_reason=stopped_reason,
             called_tools=called_tools,
         )
+
+    def _supports_server_events(self) -> bool:
+        try:
+            params = inspect.signature(self.llm_router.complete_with_tools).parameters
+        except (TypeError, ValueError):
+            return False
+        return "on_server_tool_event" in params
+
+    @staticmethod
+    def _message_tokens(messages: List[Dict[str, Any]]) -> int:
+        return sum(estimate_tokens(str(m.get("content", ""))) + 4 for m in messages)
+
+    def _truncate_tool_outputs_to_fit(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        max_tokens: int,
+    ) -> List[Dict[str, Any]]:
+        """Hard-fit the wrap-up request by head/tail truncating residual tool outputs."""
+        if max_tokens <= 0:
+            return messages
+        total = self._message_tokens(messages)
+        while total > max_tokens:
+            candidates = [
+                (len(str(m.get("content", ""))), idx)
+                for idx, m in enumerate(messages)
+                if m.get("role") == "tool" and len(str(m.get("content", ""))) > 240
+            ]
+            if not candidates:
+                logger.warning(
+                    "wrap-up still over budget after tool folding: %d > %d tokens",
+                    total,
+                    max_tokens,
+                )
+                break
+            length, idx = max(candidates)
+            content = str(messages[idx].get("content", ""))
+            cut = max(200, int(length * 0.55))
+            messages[idx] = {
+                **messages[idx],
+                "content": truncate_head_tail(
+                    content,
+                    max_chars=cut,
+                    notice="工具输出为适配收尾请求已头尾截断",
+                ),
+            }
+            total = self._message_tokens(messages)
+        return messages
+
+    @staticmethod
+    def _brief_tool_args(arguments_json: str) -> str:
+        raw = (arguments_json or "").strip()
+        if not raw:
+            return ""
+        try:
+            args = json.loads(raw)
+        except Exception:
+            return raw[:80]
+        if not isinstance(args, dict):
+            return raw[:80]
+        safe: Dict[str, Any] = {}
+        for key, value in args.items():
+            lower = str(key).lower()
+            text = str(value)
+            if any(tok in lower for tok in ("key", "token", "secret", "password", "authorization")):
+                safe[key] = "***"
+            elif "sk-" in text.lower() or "bearer " in text.lower():
+                safe[key] = "***"
+            else:
+                safe[key] = value
+        try:
+            rendered = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            rendered = raw
+        return rendered[:80]
+
+    def _tool_call_lookup(self, messages: List[Dict[str, Any]]) -> Dict[str, tuple[str, str]]:
+        lookup: Dict[str, tuple[str, str]] = {}
+        for msg in messages:
+            for call in msg.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                cid = str(call.get("id") or "")
+                fn = call.get("function") or {}
+                if cid and isinstance(fn, dict):
+                    lookup[cid] = (
+                        str(fn.get("name") or "tool"),
+                        str(fn.get("arguments") or ""),
+                    )
+        return lookup
 
     def _fold_old_tool_outputs(
         self,
@@ -336,15 +460,24 @@ class ToolExecutor:
             index for index, message in enumerate(messages)
             if message.get("role") == "tool"
         ]
-        foldable = tool_indices[:-keep_last] if len(tool_indices) > keep_last else []
+        call_lookup = self._tool_call_lookup(messages)
+        foldable = (
+            tool_indices[:-keep_last]
+            if keep_last > 0 and len(tool_indices) > keep_last
+            else ([] if keep_last > 0 else tool_indices)
+        )
         for order, index in enumerate(foldable, start=1):
             message = messages[index]
             content = str(message.get("content", ""))
             if len(content) <= 400:
                 continue
+            call_id = str(message.get("tool_call_id") or "")
+            tool_name, args_json = call_lookup.get(call_id, ("tool", ""))
+            brief = self._brief_tool_args(args_json)
+            call_text = f"{tool_name}({brief})" if brief else tool_name
             message["content"] = (
-                f"[第 {order} 步工具输出已折叠，共 {len(content)} 字符；"
-                "完整记录未进入当前上下文]"
+                f"[第 {order} 步 {call_text} 输出已折叠，共 {len(content)} 字符；"
+                "如需原文可查 work_history 或按相同参数重调]"
             )
             total = sum(estimate_tokens(str(m.get("content", ""))) + 4 for m in messages)
             if total <= max_tokens:

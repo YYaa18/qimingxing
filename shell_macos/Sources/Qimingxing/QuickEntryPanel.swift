@@ -579,31 +579,43 @@ struct QuickEntryRootView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Menu {
-                ForEach(brainClient.profiles) { profile in
-                    Button {
-                        brainClient.setActiveProfile(profile.name)
-                    } label: {
-                        if profile.name == brainClient.activeProfile {
-                            Label(profile.label.isEmpty ? profile.name : profile.label, systemImage: "checkmark")
-                        } else {
-                            Text(profile.label.isEmpty ? profile.name : profile.label)
+            if brainClient.profiles.isEmpty {
+                Button {
+                    NotificationCenter.default.post(name: .qmxOpenSettings, object: "routing")
+                } label: {
+                    Text("配置模型")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(QMXTheme.accent)
+                }
+                .buttonStyle(.plain)
+                .help("先连接 DeepSeek 或 Gemini，并选择对话模型")
+            } else {
+                Menu {
+                    ForEach(brainClient.profiles) { profile in
+                        Button {
+                            brainClient.setActiveProfile(profile.name)
+                        } label: {
+                            if profile.name == brainClient.activeProfile {
+                                Label(profile.label.isEmpty ? profile.name : profile.label, systemImage: "checkmark")
+                            } else {
+                                Text(profile.label.isEmpty ? profile.name : profile.label)
+                            }
                         }
                     }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(activeModelLabel)
+                            .font(.system(size: 12))
+                            .foregroundStyle(QMXTheme.textSecondary)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                    }
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(activeModelLabel)
-                        .font(.system(size: 12))
-                        .foregroundStyle(QMXTheme.textSecondary)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(QMXTheme.textTertiary)
-                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
 
             EmotionBadge(emotion: brainClient.emotion)
 
@@ -779,6 +791,7 @@ struct QuickEntryRootView: View {
 
     private var canSend: Bool {
         brainClient.phase == .connected &&
+        !brainClient.profiles.isEmpty &&
         (!inputState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
          !inputState.stagedAttachments.isEmpty)
     }

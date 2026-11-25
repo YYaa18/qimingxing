@@ -725,6 +725,34 @@ final class BrainClient: ObservableObject {
         _ = try? await URLSession.shared.data(for: req)
     }
 
+    func discoverModels(providerId: String, apiKey: String = "") async -> (Bool, String, Int) {
+        guard let url = URL(string: "\(httpBase)/api/models/discover") else {
+            return (false, "无效的 Brain 地址", 0)
+        }
+        var payload: [String: Any] = ["provider_id": providerId]
+        if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["api_key"] = apiKey
+        }
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            return (false, "参数序列化失败", 0)
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let obj = JSONHelper.dict(from: data)
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                let count = (obj?["count"] as? Int) ?? 0
+                return (true, "已同步 \(count) 个模型", count)
+            }
+            return (false, (obj?["detail"] as? String) ?? "刷新模型失败", 0)
+        } catch {
+            return (false, error.localizedDescription, 0)
+        }
+    }
+
     func testProvider(_ payload: [String: Any]) async -> (Bool, String) {
         guard let url = URL(string: "\(httpBase)/api/config/test_provider"),
               let body = try? JSONSerialization.data(withJSONObject: payload)

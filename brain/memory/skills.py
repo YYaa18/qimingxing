@@ -202,6 +202,7 @@ class SkillManager:
                 {"role": "user", "content": user_prompt},
             ],
             profile_name=profile_name,
+            json_mode=True,
         ):
             chunks.append(tok)
         parsed = parse_skill_distill_json("".join(chunks))

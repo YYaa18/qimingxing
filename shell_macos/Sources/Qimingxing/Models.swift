@@ -75,6 +75,30 @@ struct StagedAttachment: Identifiable, Equatable, Sendable {
     var id: String { artifactId }
 }
 
+struct ModelCapabilityViewModel: Equatable, Sendable {
+    var contextWindow: Int = 0
+    var maxOutputTokens: Int = 0
+    var supportsTools: Bool = true
+    var supportsVision: Bool = false
+    var supportsCache: Bool = false
+    var supportsReasoning: Bool = false
+    var isPreview: Bool = false
+    var source: String = "manual"
+
+    var payload: [String: Any] {
+        [
+            "context_window": contextWindow,
+            "max_output_tokens": maxOutputTokens,
+            "supports_tools": supportsTools,
+            "supports_vision": supportsVision,
+            "supports_cache": supportsCache,
+            "supports_reasoning": supportsReasoning,
+            "is_preview": isPreview,
+            "source": source,
+        ]
+    }
+}
+
 struct ProviderViewModel: Identifiable, Equatable, Sendable {
     var name: String
     var label: String
@@ -84,7 +108,9 @@ struct ProviderViewModel: Identifiable, Equatable, Sendable {
     var hasKey: Bool
     var keyMasked: String
     var models: [String]
+    var modelCapabilities: [String: ModelCapabilityViewModel] = [:]
     var draftApiKey: String = ""
+    var isPersisted: Bool = true
 
     var id: String { name }
 }

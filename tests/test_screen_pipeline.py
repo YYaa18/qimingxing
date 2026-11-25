@@ -119,6 +119,8 @@ class CaptureSpyRouter(LLMRouter):
         self,
         messages: List[Dict[str, Any]],
         profile_name: str | None = None,
+        *,
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         self.seen_user_contents.append(messages[-1]["content"])
         user_raw = messages[-1]["content"]

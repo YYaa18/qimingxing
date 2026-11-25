@@ -23,6 +23,7 @@ from brain.memory.models import (
     TaskStatus,
     TaskType,
     UsageLedgerRecord,
+    UsageSlotSummary,
     UsageSummary,
     WorkHistoryRecord,
 )
@@ -283,6 +284,10 @@ class MemoryBackend(ABC):
     @abstractmethod
     async def get_usage_summary(self, *, since_ts: float = 0.0) -> UsageSummary:
         """Aggregate token usage, cache hit rate, and estimated cost since `since_ts`."""
+
+    @abstractmethod
+    async def get_usage_by_slot(self, *, since_ts: float = 0.0) -> List[UsageSlotSummary]:
+        """Aggregate token usage and weighted cache hit rate per routing slot."""
 
     @abstractmethod
     async def list_usage_records(self, *, limit: int = 50) -> List[UsageLedgerRecord]:

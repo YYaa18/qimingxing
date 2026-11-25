@@ -467,6 +467,7 @@ class BackgroundTaskRunner:
                     model=u.model,
                     prompt_tokens=u.prompt_tokens,
                     prompt_cache_hit_tokens=u.prompt_cache_hit_tokens,
+                    cached_input_tokens=u.cached_input_tokens or u.prompt_cache_hit_tokens,
                     completion_tokens=u.completion_tokens,
                     estimated_cost_cny=u.estimated_cost_cny,
                 )

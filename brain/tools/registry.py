@@ -5,6 +5,14 @@ from typing import Dict, Iterable, List, Optional
 from brain.tools.base import Tool
 
 
+def _canonicalize(value):
+    if isinstance(value, dict):
+        return {key: _canonicalize(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_canonicalize(item) for item in value]
+    return value
+
+
 class ToolRegistry:
     """Deterministic tool registry keeping OpenAI tool schemas sorted by name for KV Prefix-Cache stability."""
 
@@ -27,8 +35,11 @@ class ToolRegistry:
         return [self._tools[name] for name in sorted(self._tools.keys())]
 
     def to_openai_tools(self) -> List[Dict[str, object]]:
-        """Export OpenAI/DeepSeek function tool schemas deterministically sorted by name."""
-        return [self._tools[name].to_openai_schema() for name in sorted(self._tools.keys())]
+        """Export schemas sorted by tool name with deterministic JSON key order."""
+        return [
+            _canonicalize(self._tools[name].to_openai_schema())
+            for name in sorted(self._tools.keys())
+        ]
 
     def __len__(self) -> int:
         return len(self._tools)

@@ -108,6 +108,9 @@ class SlotRouteConfig:
     provider: str = "deepseek"
     model: str = ""
     voice: str = ""
+    # Per-slot extras persisted in models.db: temperature, effort,
+    # max_output_override, etc. Kept on the route rather than a profiles table.
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -145,6 +148,7 @@ class ProfileConfig:
     context_window: int = 0
     max_output_tokens: int = 0
     request_max_tokens: int = 0
+    reasoning_effort: str = ""
     capability_source: str = "default"
     input_cny_per_1m: Optional[float] = None
     cache_hit_cny_per_1m: Optional[float] = None
@@ -435,6 +439,34 @@ class ShortcutsConfig:
 
 
 @dataclass
+class DeepSeekConfig:
+    """DeepSeek-specific chat features (ignored by other providers)."""
+
+    # auto = don't send thinking (API default: enabled/high)
+    # enabled/disabled = explicit override
+    thinking: str = "auto"
+    reasoning_effort: str = ""  # "" | low | high | max
+    native_web_tools: bool = True
+    safety_check: bool = False
+    # Stable identifier for DeepSeek KVCache isolation / scheduling. Not a
+    # personal identifier; override in YAML if multiple users share a key.
+    user_id: str = "qimingxing-desktop"
+
+
+@dataclass
+class GeminiConfig:
+    """Gemini-native chat features (ignored by other providers)."""
+
+    # auto = don't send thinkingConfig (model default)
+    # low/medium/high/xhigh = explicit thinkingLevel
+    thinking_level: str = "auto"
+    # Google Search grounding and URL context are billed per query/use; off by
+    # default, opt-in from Settings.
+    google_search: bool = False
+    url_context: bool = False
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     default_profile: str = "mock_local"
@@ -442,6 +474,8 @@ class AppConfig:
     providers: Dict[str, ProviderConfig] = field(default_factory=dict)
     model_routing: ModelRoutingConfig = field(default_factory=ModelRoutingConfig)
     has_explicit_routing: bool = False
+    # Phase B: capabilities loaded from models.db, keyed by "provider_id/model_id".
+    model_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     ocr: OCRConfig = field(default_factory=OCRConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -455,6 +489,8 @@ class AppConfig:
     ui: UIConfig = field(default_factory=UIConfig)
     background_tasks: BackgroundTaskConfig = field(default_factory=BackgroundTaskConfig)
     shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
+    deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
+    gemini: GeminiConfig = field(default_factory=GeminiConfig)
     _secrets: List[str] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
@@ -532,6 +568,21 @@ class AppConfig:
                 voice=self.audio.tts.voice or "stella",
             )
 
+    def _apply_model_caps(self, profile: ProfileConfig) -> ProfileConfig:
+        caps = self.model_capabilities.get(
+            f"{profile.provider_id}/{profile.model}"
+        )
+        if not caps:
+            return profile
+        if not profile.context_window:
+            profile.context_window = int(caps.get("context_window") or 0)
+        if not profile.max_output_tokens:
+            profile.max_output_tokens = int(caps.get("max_output_tokens") or 0)
+        profile.capability_source = str(caps.get("source") or "models_db")
+        if caps.get("supports_vision") is not None:
+            profile.supports_vision = bool(caps.get("supports_vision"))
+        return profile
+
     def resolve_slot_profile(self, slot: str) -> ProfileConfig:
         """Resolve a capability slot (`chat`, `vision_ocr`, `fast_utility`, `asr`, `tts`) to a ProfileConfig."""
         slot_clean = (slot or "chat").strip().lower()
@@ -551,14 +602,14 @@ class AppConfig:
             fallback = self.profiles.get(self.default_profile)
             if fallback is not None:
                 return fallback
-            return ProfileConfig(
+            return self._apply_model_caps(ProfileConfig(
                 name=f"slot_{slot_clean}",
                 label=route.model or slot_clean,
                 provider="openai_compatible",
                 provider_id=route.provider,
                 model=route.model,
                 slot=slot_clean,
-            )
+            ))
 
         local = (not prov.auth_required) or is_local_provider(prov.name, prov.base_url, prov.protocol)
         api_key = prov.api_key or ("ollama" if local and prov.protocol == "openai_compatible" else "")
@@ -567,7 +618,7 @@ class AppConfig:
         is_vision = slot_clean == "vision_ocr" and "ocr" not in lower_m
         if slot_clean == "chat":
             is_vision = any(tok in lower_m for tok in ("vl", "vision", "gpt-4o", "flash", "claude-3"))
-        return ProfileConfig(
+        profile = ProfileConfig(
             name="routed_chat" if slot_clean == "chat" else f"slot_{slot_clean}",
             label=f"{prov.label} · {model_name or slot_clean}",
             provider=prov.protocol,
@@ -578,6 +629,21 @@ class AppConfig:
             supports_vision=is_vision,
             slot=slot_clean,
         )
+        return self._apply_model_caps(self._apply_slot_extra(profile, route))
+
+    @staticmethod
+    def _apply_slot_extra(profile: ProfileConfig, route: SlotRouteConfig) -> ProfileConfig:
+        extra = route.extra if isinstance(route.extra, dict) else {}
+        temperature = extra.get("temperature")
+        if isinstance(temperature, (int, float)):
+            profile.temperature = max(0.0, min(2.0, float(temperature)))
+        max_override = extra.get("max_output_override")
+        if isinstance(max_override, (int, float)) and int(max_override) > 0:
+            profile.request_max_tokens = int(max_override)
+        effort = str(extra.get("effort") or extra.get("reasoning_effort") or "").strip().lower()
+        if effort in ("", "none", "low", "medium", "high", "max", "xhigh"):
+            profile.reasoning_effort = effort
+        return profile
 
     def collect_secrets(self) -> List[str]:
         secrets = [p.api_key for p in self.profiles.values() if p.api_key]
@@ -1023,6 +1089,40 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         settings_hotkey=str(shortcuts_raw.get("settings_hotkey", "option+k") or "option+k").strip().lower(),
     )
 
+    ds_raw = raw.get("deepseek") or {}
+    if not isinstance(ds_raw, dict):
+        ds_raw = {}
+    ds_thinking = str(ds_raw.get("thinking", "auto") or "auto").strip().lower()
+    if ds_thinking not in ("auto", "enabled", "disabled"):
+        ds_thinking = "auto"
+    ds_effort = str(ds_raw.get("reasoning_effort", "") or "").strip().lower()
+    if ds_effort not in ("", "low", "high", "max"):
+        ds_effort = ""
+    ds_user_id = re.sub(
+        r"[^A-Za-z0-9_-]",
+        "",
+        str(ds_raw.get("user_id", "qimingxing-desktop") or "").strip(),
+    )[:512]
+    deepseek = DeepSeekConfig(
+        thinking=ds_thinking,
+        reasoning_effort=ds_effort,
+        native_web_tools=bool(ds_raw.get("native_web_tools", True)),
+        safety_check=bool(ds_raw.get("safety_check", False)),
+        user_id=ds_user_id,
+    )
+
+    gem_raw = raw.get("gemini") or {}
+    if not isinstance(gem_raw, dict):
+        gem_raw = {}
+    gem_level = str(gem_raw.get("thinking_level", "auto") or "auto").strip().lower()
+    if gem_level not in ("auto", "low", "medium", "high", "xhigh"):
+        gem_level = "auto"
+    gemini = GeminiConfig(
+        thinking_level=gem_level,
+        google_search=bool(gem_raw.get("google_search", False)),
+        url_context=bool(gem_raw.get("url_context", False)),
+    )
+
     def _parse_slot(slot_key: str, def_prov: str, def_model: str, def_voice: str = "") -> SlotRouteConfig:
         sraw = raw_routing.get(slot_key) if isinstance(raw_routing, dict) else None
         if not isinstance(sraw, dict):
@@ -1030,9 +1130,11 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         prov_id = str(sraw.get("provider") or def_prov).strip()
         model_id = str(sraw.get("model") or def_model).strip()
         voice_id = str(sraw.get("voice") or def_voice).strip()
+        raw_extra = sraw.get("extra")
+        extra = dict(raw_extra) if isinstance(raw_extra, dict) else {}
         if prov_id in providers and model_id and model_id not in providers[prov_id].models:
             providers[prov_id].models.append(model_id)
-        return SlotRouteConfig(provider=prov_id, model=model_id, voice=voice_id)
+        return SlotRouteConfig(provider=prov_id, model=model_id, voice=voice_id, extra=extra)
 
     model_routing = ModelRoutingConfig(
         chat=_parse_slot("chat", "deepseek", "deepseek-chat"),
@@ -1078,7 +1180,9 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
                 supports_vision=any(tok in lower_cm for tok in ("vl", "vision", "gpt-4o", "flash", "claude-3")),
                 slot="chat",
             )
-            profiles["routed_chat"] = routed_prof
+            profiles["routed_chat"] = AppConfig._apply_slot_extra(
+                routed_prof, model_routing.chat
+            )
             if raw.get("default_profile") in (None, "", "routed_chat"):
                 default_profile = "routed_chat"
 
@@ -1102,6 +1206,8 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         ui=ui,
         background_tasks=background_tasks,
         shortcuts=shortcuts,
+        deepseek=deepseek,
+        gemini=gemini,
     )
 
 
@@ -1229,6 +1335,18 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
             "toggle_dock_hotkey": cfg.shortcuts.toggle_dock_hotkey,
             "settings_hotkey": cfg.shortcuts.settings_hotkey,
         },
+        "deepseek": {
+            "thinking": cfg.deepseek.thinking,
+            "reasoning_effort": cfg.deepseek.reasoning_effort,
+            "native_web_tools": cfg.deepseek.native_web_tools,
+            "safety_check": cfg.deepseek.safety_check,
+            "user_id": cfg.deepseek.user_id,
+        },
+        "gemini": {
+            "thinking_level": cfg.gemini.thinking_level,
+            "google_search": cfg.gemini.google_search,
+            "url_context": cfg.gemini.url_context,
+        },
         "providers": {
             pname: {
                 "name": prov.name,
@@ -1239,24 +1357,40 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
                 "has_key": bool(prov.api_key and prov.auth_required),
                 "key_masked": mask_secret(prov.api_key) if (prov.auth_required and prov.api_key) else "",
                 "models": list(prov.models),
+                "model_capabilities": {
+                    model_id: cfg.model_capabilities.get(f"{pname}/{model_id}", {})
+                    for model_id in prov.models
+                    if cfg.model_capabilities.get(f"{pname}/{model_id}")
+                },
             }
             for pname, prov in cfg.providers.items()
         },
         "model_routing": {
-            "chat": {"provider": cfg.model_routing.chat.provider, "model": cfg.model_routing.chat.model},
+            "chat": {
+                "provider": cfg.model_routing.chat.provider,
+                "model": cfg.model_routing.chat.model,
+                "extra": cfg.model_routing.chat.extra,
+            },
             "vision_ocr": {
                 "provider": cfg.model_routing.vision_ocr.provider,
                 "model": cfg.model_routing.vision_ocr.model,
+                "extra": cfg.model_routing.vision_ocr.extra,
             },
             "fast_utility": {
                 "provider": cfg.model_routing.fast_utility.provider,
                 "model": cfg.model_routing.fast_utility.model,
+                "extra": cfg.model_routing.fast_utility.extra,
             },
-            "asr": {"provider": cfg.model_routing.asr.provider, "model": cfg.model_routing.asr.model},
+            "asr": {
+                "provider": cfg.model_routing.asr.provider,
+                "model": cfg.model_routing.asr.model,
+                "extra": cfg.model_routing.asr.extra,
+            },
             "tts": {
                 "provider": cfg.model_routing.tts.provider,
                 "model": cfg.model_routing.tts.model,
                 "voice": cfg.model_routing.tts.voice,
+                "extra": cfg.model_routing.tts.extra,
             },
         },
     }
@@ -1610,6 +1744,41 @@ def save_settings_to_yaml(
             sc_sec = raw.setdefault("shortcuts", {})
             if isinstance(sc_sec, dict):
                 sc_sec["ptt_hotkey"] = str(ptt_hk).strip().lower()
+
+    # 6b. DeepSeek-specific chat features
+    ds_up = updates.get("deepseek")
+    if isinstance(ds_up, dict):
+        ds_sec = raw.setdefault("deepseek", {})
+        if isinstance(ds_sec, dict):
+            if "thinking" in ds_up:
+                val = str(ds_up["thinking"] or "auto").strip().lower()
+                if val in ("auto", "enabled", "disabled"):
+                    ds_sec["thinking"] = val
+            if "reasoning_effort" in ds_up:
+                val = str(ds_up["reasoning_effort"] or "").strip().lower()
+                if val in ("", "low", "high", "max"):
+                    ds_sec["reasoning_effort"] = val
+            for key in ("native_web_tools", "safety_check"):
+                if key in ds_up:
+                    ds_sec[key] = bool(ds_up[key])
+            if "user_id" in ds_up:
+                uid = re.sub(
+                    r"[^A-Za-z0-9_-]", "", str(ds_up["user_id"] or "").strip()
+                )[:512]
+                ds_sec["user_id"] = uid
+
+    # 6c. Gemini-specific chat features
+    gem_up = updates.get("gemini")
+    if isinstance(gem_up, dict):
+        gem_sec = raw.setdefault("gemini", {})
+        if isinstance(gem_sec, dict):
+            if "thinking_level" in gem_up:
+                val = str(gem_up["thinking_level"] or "auto").strip().lower()
+                if val in ("auto", "low", "medium", "high", "xhigh"):
+                    gem_sec["thinking_level"] = val
+            for key in ("google_search", "url_context"):
+                if key in gem_up:
+                    gem_sec[key] = bool(gem_up[key])
 
     # 7. Providers pool & 5-slot model routing (preserving masked placeholders & 0600 secrets)
     prov_updates = updates.get("providers")

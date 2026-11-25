@@ -134,6 +134,7 @@ class BuildStats:
     retrieval_ms: float = 0.0
     timeline_expanded: bool = False
     ocr_truncated: bool = False
+    has_image_input: bool = False
 
 
 @dataclass
@@ -149,7 +150,17 @@ class ContextBuilder:
         self.budget = budget or ContextBudgetConfig()
         self.meter = TokenMeter()
 
-    def observe_prompt_usage(self, estimated_prompt_tokens: int, actual_prompt_tokens: int) -> None:
+    def observe_prompt_usage(
+        self,
+        estimated_prompt_tokens: int,
+        actual_prompt_tokens: int,
+        *,
+        has_images: bool = False,
+    ) -> None:
+        if has_images:
+            # Image token accounting differs wildly between providers and
+            # resolutions. Never let a multimodal turn shift the pure-text EMA.
+            return
         self.meter.observe(estimated_prompt_tokens, actual_prompt_tokens)
 
     def build(
@@ -176,6 +187,13 @@ class ContextBuilder:
             recalled_skills_count=len(recalled_skills or []),
             tools_tokens=tools_tokens,
             calibration_scale=self.meter.scale,
+            has_image_input=bool(
+                isinstance(user_content, list)
+                and any(
+                    isinstance(part, dict) and part.get("type") == "image_url"
+                    for part in user_content
+                )
+            ),
         )
 
         # --- L0 (100% static) + L1 (low-frequency deterministic user profile) ---
@@ -394,8 +412,7 @@ class ContextBuilder:
 
         ranked = sorted(
             eligible,
-            key=lambda f: (f.importance, f.updated_at),
-            reverse=True,
+            key=lambda f: (-f.importance, -f.updated_at, f.fact_id),
         )
         selected: List[MemoryFact] = []
         used = 0
@@ -414,6 +431,16 @@ class ContextBuilder:
         selected.sort(key=lambda f: f.fact_id)
         lines = "\n".join(f"- [{f.category}] {f.content}" for f in selected)
         return f"【核心用户画像（稳定长期事实）】\n{lines}"
+
+    def _fit_single_l3_line(self, line: str, max_tokens: int) -> str:
+        if max_tokens <= 0:
+            return ""
+        fitted = truncate_ocr_smart(line, max_tokens)
+        guard = 0
+        while self.meter.count(fitted) > max_tokens and len(fitted) > 24 and guard < 6:
+            guard += 1
+            fitted = truncate_to_tokens(fitted, max(16, int(max_tokens * 0.75)))
+        return fitted
 
     def _render_l3_recalled(
         self,
@@ -434,7 +461,11 @@ class ContextBuilder:
                 tag = "情景"
             line = f"- ({tag}/{item.category}) {item.content}"
             cost = self.meter.count(line)
-            if lines and used + cost > max_tokens:
+            if used + cost > max_tokens:
+                if not lines:
+                    line = self._fit_single_l3_line(line, max_tokens)
+                    lines.append(line)
+                    used = min(max_tokens, self.meter.count(line))
                 break
             lines.append(line)
             used += cost
@@ -466,7 +497,11 @@ class ContextBuilder:
                 f"{s.name}{pre}: {step_text}"
             )
             cost = self.meter.count(line)
-            if lines and used + cost > max_tokens:
+            if used + cost > max_tokens:
+                if not lines:
+                    line = self._fit_single_l3_line(line, max_tokens)
+                    lines.append(line)
+                    used = min(max_tokens, self.meter.count(line))
                 break
             lines.append(line)
             used += cost

@@ -90,6 +90,17 @@ def test_settings_api_masks_keys_saves_0600_and_hot_reloads(tmp_path: Path) -> N
                     "default_profile": "mock_local",
                     "shared_deepseek_api_key": "sk-updated-newkey-9999",
                     "privacy": {"default_mode": "full_on_demand"},
+                    "deepseek": {
+                        "thinking": "disabled",
+                        "reasoning_effort": "max",
+                        "native_web_tools": False,
+                        "safety_check": True,
+                    },
+                    "gemini": {
+                        "thinking_level": "high",
+                        "google_search": True,
+                        "url_context": True,
+                    },
                     "audio": {
                         "enabled": True,
                         "tts": {"voice": "tide", "enabled": False},
@@ -110,6 +121,18 @@ def test_settings_api_masks_keys_saves_0600_and_hot_reloads(tmp_path: Path) -> N
             assert res_body["settings"]["audio"]["ptt"]["hotkey"] == "option+space"
             assert res_body["settings"]["privacy"]["default_mode"] == "full_on_demand"
             assert res_body["settings"]["godot"]["auto_hide_on_capture"] is False
+            assert res_body["settings"]["deepseek"] == {
+                "thinking": "disabled",
+                "reasoning_effort": "max",
+                "native_web_tools": False,
+                "safety_check": True,
+                "user_id": "qimingxing-desktop",
+            }
+            assert res_body["settings"]["gemini"] == {
+                "thinking_level": "high",
+                "google_search": True,
+                "url_context": True,
+            }
 
             # Hub broadcast updated welcome & privacy_state live
             seen_types = []
@@ -142,6 +165,13 @@ def test_settings_api_masks_keys_saves_0600_and_hot_reloads(tmp_path: Path) -> N
     assert reloaded.profiles["deepseek_flash"].api_key == "sk-updated-newkey-9999"
     assert reloaded.ocr.api_key == "sk-updated-newkey-9999"
     assert reloaded.audio.tts.api_key == "sk-updated-newkey-9999"
+    assert reloaded.deepseek.thinking == "disabled"
+    assert reloaded.deepseek.reasoning_effort == "max"
+    assert reloaded.deepseek.native_web_tools is False
+    assert reloaded.deepseek.safety_check is True
+    assert reloaded.gemini.thinking_level == "high"
+    assert reloaded.gemini.google_search is True
+    assert reloaded.gemini.url_context is True
 
 
 def test_feedback_endpoint_appends_jsonl(tmp_path: Path) -> None:

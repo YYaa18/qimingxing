@@ -176,9 +176,70 @@ enum UIPreviewDumper {
         // 4. Settings Window (General & Routing)
         let store = SettingsViewStore()
         store.providers = [
-            ProviderViewModel(name: "deepseek", label: "DeepSeek", protocolName: "openai_compatible", baseURL: "https://api.deepseek.com/v1", authRequired: true, hasKey: true, keyMasked: "sk-a****9f21", models: ["deepseek-chat", "deepseek-flash"]),
-            ProviderViewModel(name: "local_ollama", label: "本地 Ollama", protocolName: "openai_compatible", baseURL: "http://127.0.0.1:11434/v1", authRequired: false, hasKey: false, keyMasked: "", models: ["qwen2.5:7b"]),
+            ProviderViewModel(
+                name: "deepseek",
+                label: "DeepSeek",
+                protocolName: "openai_compatible",
+                baseURL: "https://api.deepseek.com/v1",
+                authRequired: true,
+                hasKey: true,
+                keyMasked: "sk-a****9f21",
+                models: ["deepseek-flash", "deepseek-v4-pro"],
+                modelCapabilities: [
+                    "deepseek-flash": ModelCapabilityViewModel(contextWindow: 1048576, maxOutputTokens: 393216, supportsTools: true, supportsVision: false, supportsCache: true, supportsReasoning: true, source: "provider_api"),
+                    "deepseek-v4-pro": ModelCapabilityViewModel(contextWindow: 1048576, maxOutputTokens: 393216, supportsTools: true, supportsVision: false, supportsCache: true, supportsReasoning: true, source: "provider_api"),
+                ]
+            ),
+            ProviderViewModel(
+                name: "gemini",
+                label: "Google Gemini",
+                protocolName: "openai_compatible",
+                baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+                authRequired: true,
+                hasKey: false,
+                keyMasked: "",
+                models: ["gemini-4-carbon", "gemini-4-neon", "gemini-4-hydrogen", "gemini-4-argon"],
+                modelCapabilities: [
+                    "gemini-4-carbon": ModelCapabilityViewModel(contextWindow: 1048576, maxOutputTokens: 65536, supportsTools: true, supportsVision: true, supportsCache: true, supportsReasoning: true, source: "catalog"),
+                    "gemini-4-neon": ModelCapabilityViewModel(contextWindow: 1048576, maxOutputTokens: 65536, supportsTools: true, supportsVision: true, supportsCache: true, supportsReasoning: true, source: "catalog"),
+                    "gemini-4-hydrogen": ModelCapabilityViewModel(contextWindow: 1048576, maxOutputTokens: 65536, supportsTools: true, supportsVision: true, supportsCache: true, supportsReasoning: true, source: "catalog"),
+                    "gemini-4-argon": ModelCapabilityViewModel(contextWindow: 1048576, maxOutputTokens: 65536, supportsTools: true, supportsVision: true, supportsCache: true, supportsReasoning: true, source: "catalog"),
+                ],
+                draftApiKey: "AIzaSyPreviewKey"
+            ),
+            ProviderViewModel(
+                name: "openai",
+                label: "OpenAI",
+                protocolName: "openai_compatible",
+                baseURL: "https://api.openai.com/v1",
+                authRequired: true,
+                hasKey: false,
+                keyMasked: "",
+                models: ["gpt-4o", "gpt-4o-mini"],
+                modelCapabilities: [
+                    "gpt-4o": ModelCapabilityViewModel(contextWindow: 128000, maxOutputTokens: 16384, supportsTools: true, supportsVision: true, supportsCache: true, source: "catalog"),
+                    "gpt-4o-mini": ModelCapabilityViewModel(contextWindow: 128000, maxOutputTokens: 16384, supportsTools: true, supportsVision: true, supportsCache: true, source: "catalog"),
+                ]
+            ),
+            ProviderViewModel(
+                name: "custom_ab12cd34",
+                label: "我的中转站",
+                protocolName: "openai_compatible",
+                baseURL: "https://relay.example.com/v1",
+                authRequired: true,
+                hasKey: false,
+                keyMasked: "",
+                models: ["gpt-4o"],
+                modelCapabilities: [
+                    "gpt-4o": ModelCapabilityViewModel(contextWindow: 32768, maxOutputTokens: 4096, supportsTools: true, supportsVision: false, source: "manual")
+                ]
+            ),
         ]
+        store.chatSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-flash")
+        store.visionSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-flash")
+        store.fastSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-flash")
+        store.asrSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-asr")
+        store.ttsSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-tts", voice: "stella")
         store.selectedSection = .general
         let settingsGen = SettingsRootView(
             store: store,
@@ -208,6 +269,10 @@ enum UIPreviewDumper {
             onClose: {}
         )
         render(settingsRouting, size: CGSize(width: 860, height: 580), to: outputDir.appendingPathComponent("settings_routing.png"))
+        render(settingsRouting, size: CGSize(width: 860, height: 1400), to: outputDir.appendingPathComponent("settings_routing_full.png"))
+        render(settingsRouting, size: CGSize(width: 760, height: 760), to: outputDir.appendingPathComponent("settings_routing_narrow.png"))
+        let customSheet = CustomProviderSheet { _ in }
+        render(customSheet, size: CGSize(width: 480, height: 520), to: outputDir.appendingPathComponent("custom_provider_sheet.png"))
 
         // 5. Approval Modal
         let aprItem = PendingApprovalItem(

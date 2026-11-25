@@ -66,7 +66,7 @@ _EXTRACTION_SYSTEM_PROMPT = """你是一个严谨的长期记忆分类、提炼�
 4. **主动遗忘**：当用户明确要求“忘掉/忘记/删除”某信息时，**必须**输出 `op: "DELETE"` 并匹配对应 `target_fact_id`。
 5. 绝对禁止编造不存在的信息，也禁止写入任何隐私占位（如 `[隐私窗口已隐藏]`）。"""
 
-_COMPRESS_SYSTEM_PROMPT = """请将下面的历史对话压缩合并成 800–1200 字的中文滚动摘要，硬上限 1600 字。
+_COMPRESS_SYSTEM_PROMPT = """请将下面的历史对话压缩合并成 800–1000 字的中文滚动摘要，硬上限 1600 字。
 必须使用以下固定标题分段：
 【已完成/已确认】
 【关键文件与路径】
@@ -79,6 +79,76 @@ _COMPRESS_SYSTEM_PROMPT = """请将下面的历史对话压缩合并成 800–12
 - 不粘贴大段历史代码；需要细节时由后续工具重新读取最新文件；
 - 省略寒暄、重复内容和已被推翻的方案；
 - 直接输出摘要正文，不要额外解释。"""
+
+
+_SUMMARY_HEADINGS = [
+    "【已完成/已确认】",
+    "【关键文件与路径】",
+    "【技术决策与原因】",
+    "【待办/未解决问题】",
+    "【用户偏好与约束】",
+]
+
+
+def _split_summary_sections(text: str) -> Dict[str, str]:
+    found: List[tuple[int, str]] = []
+    for heading in _SUMMARY_HEADINGS:
+        idx = text.find(heading)
+        if idx >= 0:
+            found.append((idx, heading))
+    found.sort()
+    sections: Dict[str, str] = {heading: "" for heading in _SUMMARY_HEADINGS}
+    for pos, (idx, heading) in enumerate(found):
+        end = found[pos + 1][0] if pos + 1 < len(found) else len(text)
+        sections[heading] = text[idx + len(heading):end].strip()
+    if found:
+        preamble = text[: found[0][0]].strip()
+        if preamble:
+            sections[found[0][1]] = (preamble + "\n" + sections[found[0][1]]).strip()
+    return sections
+
+
+def _clip_structured_summary(new_summary: str, previous_summary: str, max_chars: int) -> str:
+    """Keep all five headings; backfill missing sections; trim bodies only."""
+    if not any(heading in new_summary for heading in _SUMMARY_HEADINGS):
+        if len(new_summary) > max_chars:
+            return new_summary[: max_chars - 3] + "…"
+        return new_summary
+
+    new_sections = _split_summary_sections(new_summary)
+    old_sections = _split_summary_sections(previous_summary or "")
+    for heading in _SUMMARY_HEADINGS:
+        if not new_sections.get(heading) and old_sections.get(heading):
+            new_sections[heading] = old_sections[heading]
+
+    headings_len = sum(len(h) + 1 for h in _SUMMARY_HEADINGS)
+    body_budget = max(0, max_chars - headings_len - 4 * 2)
+    bodies = [new_sections.get(h, "") for h in _SUMMARY_HEADINGS]
+    total_body = sum(len(b) for b in bodies)
+    if total_body > body_budget:
+        quota = max(40, body_budget // len(_SUMMARY_HEADINGS))
+        trimmed: List[str] = []
+        for body in bodies:
+            if len(body) <= quota:
+                trimmed.append(body)
+            else:
+                trimmed.append(body[: max(20, quota - 1)].rstrip() + "…")
+        bodies = trimmed
+        # If equal quotas overflowed due the ellipsis/minimum, trim tail bodies.
+        while sum(len(b) for b in bodies) > body_budget:
+            candidates = [i for i, b in enumerate(bodies) if len(b) > 24]
+            if not candidates:
+                break
+            idx = max(candidates, key=lambda i: len(bodies[i]))
+            bodies[idx] = bodies[idx][: max(20, len(bodies[idx]) - 8)].rstrip() + "…"
+
+    rendered = "\n".join(
+        f"{heading}\n{body}".rstrip()
+        for heading, body in zip(_SUMMARY_HEADINGS, bodies)
+    )
+    if len(rendered) > max_chars:
+        rendered = rendered[: max_chars - 1] + "…"
+    return rendered
 
 
 def has_explicit_memory_command(text: str) -> bool:
@@ -306,7 +376,12 @@ class MemoryExtractor:
             except Exception as exc:
                 logger.warning("Background session compression failed (isolated): %s", exc)
 
-    async def _call_fast_llm(self, messages: List[Dict[str, str]]) -> str:
+    async def _call_fast_llm(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        json_mode: bool = False,
+    ) -> str:
         if getattr(self.llm_router._config, "has_explicit_routing", False):
             profile_name = "@slot:fast_utility"
         else:
@@ -314,7 +389,9 @@ class MemoryExtractor:
             if profile_name not in self.llm_router._config.profiles:
                 profile_name = self.llm_router.active_profile
         chunks: List[str] = []
-        async for tok in self.llm_router.stream_chat(messages, profile_name=profile_name):
+        async for tok in self.llm_router.stream_chat(
+            messages, profile_name=profile_name, json_mode=json_mode
+        ):
             chunks.append(tok)
         return "".join(chunks)
 
@@ -352,7 +429,8 @@ class MemoryExtractor:
             [
                 {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
-            ]
+            ],
+            json_mode=True,
         )
         new_categories, mutations, episode_summary, chitchat_summary = parse_extraction_json(raw)
 
@@ -540,8 +618,9 @@ class MemoryExtractor:
             if not new_summary:
                 break
             max_chars = max(400, int(self.config.compress_summary_max_chars))
-            if len(new_summary) > max_chars:
-                new_summary = new_summary[: max_chars - 3] + "…"
+            new_summary = _clip_structured_summary(
+                new_summary, current_summary, max_chars
+            )
 
             new_watermark = candidates[-1].msg_id
             await self.backend.update_session_summary(session_id, new_summary, new_watermark)
@@ -594,8 +673,9 @@ class MemoryExtractor:
         if not new_summary:
             return False
         max_chars = max(400, int(self.config.compress_summary_max_chars))
-        if len(new_summary) > max_chars:
-            new_summary = new_summary[: max_chars - 3] + "…"
+        new_summary = _clip_structured_summary(
+            new_summary, sess.rolling_summary or "", max_chars
+        )
         await self.backend.update_session_summary(
             session_id, new_summary, candidates[-1].msg_id
         )

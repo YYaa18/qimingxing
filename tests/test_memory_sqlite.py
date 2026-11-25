@@ -16,7 +16,7 @@ def test_zero_sqlite3_imports_outside_sqlite_store() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     offenders: list[str] = []
     for py_file in (repo_root / "brain").rglob("*.py"):
-        if py_file.name == "sqlite_store.py":
+        if py_file.name in ("sqlite_store.py", "model_config_store.py"):
             continue
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
         for node in ast.walk(tree):

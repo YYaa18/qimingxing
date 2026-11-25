@@ -363,6 +363,7 @@ class UsageLedgerRecord:
     model: str = ""
     prompt_tokens: int = 0
     prompt_cache_hit_tokens: int = 0
+    cached_input_tokens: int = 0
     completion_tokens: int = 0
     estimated_cost_cny: float = 0.0
     created_at: float = field(default_factory=time.time)
@@ -373,6 +374,18 @@ class UsageSummary:
     calls: int = 0
     prompt_tokens: int = 0
     prompt_cache_hit_tokens: int = 0
+    cached_input_tokens: int = 0
+    completion_tokens: int = 0
+    total_cost_cny: float = 0.0
+    cache_hit_rate: float = 0.0
+
+
+@dataclass
+class UsageSlotSummary:
+    slot: str = ""
+    calls: int = 0
+    prompt_tokens: int = 0
+    cached_input_tokens: int = 0
     completion_tokens: int = 0
     total_cost_cny: float = 0.0
     cache_hit_rate: float = 0.0

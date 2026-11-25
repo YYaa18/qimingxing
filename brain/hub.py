@@ -114,6 +114,41 @@ from protocol.models import (
 
 logger = logging.getLogger("qimingxing.hub")
 
+
+def build_turn_tools_schema(
+    registry: Any,
+    config: AppConfig,
+    profile: Any,
+    *,
+    use_tools: bool,
+) -> tuple[List[Dict[str, Any]], bool]:
+    """Return (tools schema, native_web_tools_enabled) for one turn."""
+    schema = registry.to_openai_tools() if use_tools else []
+    native_web = bool(
+        use_tools
+        and config.deepseek.native_web_tools
+        and config.tools.web_search.enabled
+        and (profile.model or "").lower() == "deepseek-flash"
+        and (
+            (profile.provider_id or "").lower() == "deepseek"
+            or "api.deepseek.com" in (profile.base_url or "").lower()
+        )
+    )
+    if not native_web:
+        return schema, False
+    schema = [
+        tool
+        for tool in schema
+        if (tool.get("function") or {}).get("name") not in ("web_search", "web_fetch")
+    ]
+    schema.extend(
+        [
+            {"type": "deepseek_web_search"},
+            {"type": "deepseek_read_url"},
+        ]
+    )
+    return schema, True
+
 SERVER_VERSION = get_app_version()
 CAPTURE_TIMEOUT_SECONDS = 3.5
 _MAX_TTS_CHARS_PER_TURN = 600
@@ -1900,6 +1935,19 @@ class Hub:
             ):
                 continue
             turn_tokens += u.total_tokens or (u.prompt_tokens + u.completion_tokens)
+            cached = int(u.cached_input_tokens or u.prompt_cache_hit_tokens or 0)
+            cached = max(0, min(int(u.prompt_tokens or 0), cached))
+            rate = (cached / u.prompt_tokens) if u.prompt_tokens > 0 else 0.0
+            logger.debug(
+                "usage turn=%s provider=%s slot=%s model=%s cache_hit=%d/%d (%.1f%%)",
+                turn_id,
+                u.provider,
+                u.slot,
+                u.model,
+                cached,
+                u.prompt_tokens,
+                rate * 100.0,
+            )
             await self.memory_backend.add_usage_record(
                 UsageLedgerRecord(
                     session_id=session_id,
@@ -1910,6 +1958,7 @@ class Hub:
                     model=u.model,
                     prompt_tokens=u.prompt_tokens,
                     prompt_cache_hit_tokens=u.prompt_cache_hit_tokens,
+                    cached_input_tokens=cached,
                     completion_tokens=u.completion_tokens,
                     estimated_cost_cny=u.estimated_cost_cny,
                 )
@@ -2201,7 +2250,12 @@ class Hub:
                     or type(self.llm_router).complete_with_tools is not LLMRouter.complete_with_tools
                 )
             )
-            tools_schema = self.tool_registry.to_openai_tools() if use_tools else []
+            tools_schema, native_web_tools = build_turn_tools_schema(
+                self.tool_registry,
+                self.config,
+                profile,
+                use_tools=use_tools,
+            )
             resolved_budget = resolve_context_budget(
                 profile=profile,
                 config=self.config,
@@ -2310,6 +2364,36 @@ class Hub:
                             )
                         )
 
+                async def _on_server_tool_event(event: Dict[str, Any]) -> None:
+                    etype = str(event.get("type") or "")
+                    call = event.get("call") or {}
+                    if not isinstance(call, dict):
+                        call = {}
+                    kind = str(call.get("kind") or "")
+                    tool_name = (
+                        "deepseek_read_url"
+                        if kind == "read_link"
+                        else "deepseek_web_search"
+                    )
+                    if etype == "call_started":
+                        if tool_name == "deepseek_read_url":
+                            label = "正在阅读网页…"
+                        elif kind == "deep_search":
+                            label = "正在深度联网搜索…"
+                        else:
+                            label = "正在联网搜索…"
+                        await _on_status("running", tool_name, label, None, None)
+                    elif etype == "call_completed":
+                        ok = str(call.get("status") or "completed") == "completed"
+                        await _on_status(
+                            "completed" if ok else "error",
+                            tool_name,
+                            "网页阅读完成" if ok and tool_name == "deepseek_read_url"
+                            else ("联网搜索完成" if ok else "联网搜索失败"),
+                            None,
+                            None,
+                        )
+
                 async def _on_approval(
                     tool_name: str,
                     risk_level: RiskLevel,
@@ -2370,6 +2454,8 @@ class Hub:
                     max_context_tokens=(
                         built.stats.total_tokens + resolved_budget.tool_loop_max
                     ),
+                    tools_schema=tools_schema,
+                    on_server_tool_event=_on_server_tool_event,
                 )
                 trace_steps = loop_res.trace_steps
                 turn_usages = loop_res.usages
@@ -2377,6 +2463,7 @@ class Hub:
                     self.context_builder.observe_prompt_usage(
                         built.stats.total_with_tools,
                         int(loop_res.usages[0].prompt_tokens),
+                        has_images=built.stats.has_image_input,
                     )
             else:
                 async for chunk in self.llm_router.stream_chat(messages, profile_name=profile.name):
@@ -2389,6 +2476,7 @@ class Hub:
                     self.context_builder.observe_prompt_usage(
                         built.stats.total_with_tools,
                         int(self.llm_router.last_usage.prompt_tokens),
+                        has_images=built.stats.has_image_input,
                     )
 
             vision_usage = getattr(self.screen_router, "last_ocr_usage", None)

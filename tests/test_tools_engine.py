@@ -68,6 +68,44 @@ class ScriptedToolRouter(LLMRouter):
         return res
 
 
+async def test_tool_executor_passes_reasoning_and_server_tools_back() -> None:
+    cfg = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="m")},
+    )
+    reg = ToolRegistry([DummyTool("search_mock", risk="safe")])
+    router = ScriptedToolRouter(
+        cfg,
+        [
+            LLMCompletionResult(
+                content="",
+                reasoning_content="先查一下",
+                server_tool_calls=[
+                    {"index": 0, "calls": [{"index": 0, "id": "srv_1", "type": "deepseek_web_search"}]}
+                ],
+                tool_calls=[ToolCallRequest(id="c1", name="search_mock", arguments_json='{"x": "1"}')],
+            ),
+            LLMCompletionResult(content="完成"),
+        ],
+    )
+    executor = ToolExecutor(router)
+    ctx = ToolExecutionContext(turn_id="t1", session_id="s1", config=cfg)
+
+    await executor.run(
+        messages=[{"role": "user", "content": "查"}],
+        registry=reg,
+        ctx=ctx,
+    )
+
+    assert len(router.recorded_messages) >= 2
+    assistant = next(
+        m for m in router.recorded_messages[1] if m.get("role") == "assistant"
+    )
+    assert assistant["reasoning_content"] == "先查一下"
+    assert assistant["tool_calls"][0]["id"] == "c1"
+    assert assistant["server_tool_calls"][0]["calls"][0]["id"] == "srv_1"
+
+
 def test_tool_registry_deterministic_sorting_and_prefix_cache() -> None:
     reg = ToolRegistry([DummyTool("z_tool"), DummyTool("a_tool"), DummyTool("m_tool")])
     schemas = reg.to_openai_tools()

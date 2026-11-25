@@ -23,11 +23,12 @@ _CATALOG: tuple[tuple[str, ModelCapabilities], ...] = (
     # DeepSeek V4 family (current API)
     ("deepseek-v4-pro", ModelCapabilities(1_048_576, 393_216, supports_cache=True, supports_reasoning=True, source="catalog")),
     ("deepseek-v4-flash", ModelCapabilities(1_048_576, 393_216, supports_cache=True, supports_reasoning=True, source="catalog")),
-    ("deepseek-flash", ModelCapabilities(1_048_576, 393_216, supports_cache=True, supports_reasoning=True, source="catalog")),
+    ("deepseek-flash", ModelCapabilities(1_048_576, 393_216, supports_vision=True, supports_cache=True, supports_reasoning=True, source="catalog")),
     # Legacy DeepSeek aliases (may be unavailable; keep for migration/fallback)
     ("deepseek-chat", ModelCapabilities(128_000, 8_192, supports_cache=True, source="catalog")),
     ("deepseek-reasoner", ModelCapabilities(128_000, 8_192, supports_cache=True, supports_reasoning=True, source="catalog")),
-    # Gemini 3 family
+    # Gemini 4 family (current); 3.x kept for migration fallback.
+    ("gemini-4", ModelCapabilities(1_048_576, 65_536, supports_vision=True, supports_cache=True, supports_reasoning=True, source="catalog")),
     ("gemini-3", ModelCapabilities(1_048_576, 65_536, supports_vision=True, supports_cache=True, supports_reasoning=True, source="catalog")),
     ("gemini-2.5", ModelCapabilities(1_048_576, 65_536, supports_vision=True, supports_cache=True, supports_reasoning=True, source="catalog")),
     ("gemini-2.0", ModelCapabilities(1_048_576, 8_192, supports_vision=True, supports_cache=True, source="catalog")),

@@ -25,6 +25,8 @@ class ControllableRouter(LLMRouter):
         self,
         messages: List[Dict[str, str]],
         profile_name: str | None = None,
+        *,
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         profile = self.get_profile(profile_name)
         if self.force_error:

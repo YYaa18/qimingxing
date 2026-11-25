@@ -365,14 +365,44 @@ async def run_cli(args: argparse.Namespace) -> int:
         if args.command == "usage":
             since = 0.0 if args.days <= 0 else time.time() - args.days * 86400.0
             summary = await backend.get_usage_summary(since_ts=since)
+            by_slot = await backend.get_usage_by_slot(since_ts=since)
             scope = f"last {args.days}d" if args.days > 0 else "all-time"
             print(
                 f"Usage ({scope}): calls={summary.calls} | "
-                f"prompt={summary.prompt_tokens} (cache_hit={summary.prompt_cache_hit_tokens}, "
+                f"prompt={summary.prompt_tokens} (cached={summary.cached_input_tokens}, "
                 f"hit_rate={summary.cache_hit_rate * 100:.1f}%) | "
                 f"completion={summary.completion_tokens} | "
                 f"est_cost_cny=¥{summary.total_cost_cny:.4f}"
             )
+            for row in by_slot:
+                print(
+                    f"  slot={row.slot or '-'}: calls={row.calls} | "
+                    f"prompt={row.prompt_tokens} cached={row.cached_input_tokens} | "
+                    f"hit_rate={row.cache_hit_rate * 100:.1f}% | "
+                    f"completion={row.completion_tokens}"
+                )
+            recent = await backend.list_usage_records(limit=120)
+            recent = [r for r in recent if r.created_at >= since]
+            grouped: dict[str, list] = {}
+            for r in recent:
+                grouped.setdefault(r.slot or "-", []).append(r)
+            for slot, records in grouped.items():
+                tail = records[:3]
+                supports_cache = any(
+                    r.provider in ("deepseek", "gemini", "openai")
+                    or any(tok in (r.model or "").lower() for tok in ("deepseek", "gemini", "gpt"))
+                    for r in tail
+                )
+                if (
+                    supports_cache
+                    and len(tail) >= 3
+                    and all(r.prompt_tokens >= 4000 for r in tail)
+                    and all(r.cached_input_tokens == 0 for r in tail)
+                ):
+                    print(
+                        f"⚠ slot={slot} 最近 {len(tail)} 次请求 prompt≥4000 且缓存命中为 0；"
+                        "请检查 L0/L1 静态前缀是否混入动态内容，以及 tools Schema 顺序是否稳定。"
+                    )
             return 0
         if args.command == "tasks":
             if args.cancel:

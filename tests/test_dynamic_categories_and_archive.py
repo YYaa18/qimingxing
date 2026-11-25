@@ -27,6 +27,8 @@ class DynamicCatMockLLM(LLMRouter):
         self,
         messages: List[Dict[str, Any]],
         profile_name: str | None = None,
+        *,
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         yield self.payload
 

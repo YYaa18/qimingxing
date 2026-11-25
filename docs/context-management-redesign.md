@@ -1,6 +1,6 @@
 # 启明星：上下文管理与模型能力改造方案
 
-- 状态：Phase A 已实施（2026-11-25），Phase B 待开始
+- 状态：Phase A/B 后端已实施（2026-11-25），完整首次配置向导待补
 - 日期：2026-11-25
 - 范围：Brain 上下文拼装、压缩策略、模型配置存储、原生设置页
 - 目标：解决“上下文太紧、模型信息过旧、模型能力不可配”的问题
@@ -177,7 +177,7 @@ Token 估算不是真正 tokenizer：
 
 ### 4.2 Google Gemini
 
-- 当前主线：Gemini 3 系列（Pro / Flash，以及 3.1 / 3.5 Flash 等），主流为 **1,048,576 input / 65,536 output**。
+- 当前主线：Gemini 4 系列（Carbon / Neon / Hydrogen / Argon），主流为 **1,048,576 input / 65,536 output**；Hydrogen 为通用对话默认档。
 - 原生 `GET /v1beta/models`（`x-goog-api-key` Header，不使用 URL Query）返回：
   - `name` / `displayName`
   - `inputTokenLimit`
@@ -260,27 +260,15 @@ CREATE TABLE provider_models (
     FOREIGN KEY (provider_id) REFERENCES providers(provider_id) ON DELETE CASCADE
 );
 
-CREATE TABLE profiles (
-    profile_id              TEXT PRIMARY KEY,
-    label                   TEXT NOT NULL,
-    provider_id             TEXT NOT NULL,
-    model_id                TEXT NOT NULL,
-    slot                    TEXT NOT NULL DEFAULT 'chat',
-    context_window_override INTEGER,
-    max_output_override     INTEGER,
-    temperature             REAL,
-    timeout_seconds         REAL,
-    extra_json              TEXT NOT NULL DEFAULT '{}',  -- TTS voice / DeepSeek effort 等扩展参数
-    enabled                 INTEGER NOT NULL DEFAULT 1,
-    created_at              REAL NOT NULL,
-    updated_at              REAL NOT NULL,
-    FOREIGN KEY (provider_id) REFERENCES providers(provider_id) ON DELETE CASCADE
-);
-
+-- 已拍板：不新增 profiles 实体表，槽位扩展参数放在 model_routing.extra_json。
 CREATE TABLE model_routing (
-    slot       TEXT PRIMARY KEY,  -- chat / fast_utility / vision_ocr / tts / asr
-    profile_id TEXT,
-    FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE SET NULL
+    slot        TEXT PRIMARY KEY,  -- chat / fast_utility / vision_ocr / tts / asr
+    provider_id TEXT NOT NULL,
+    model_id    TEXT NOT NULL,
+    voice       TEXT NOT NULL DEFAULT '',
+    extra_json  TEXT NOT NULL DEFAULT '{}',  -- temperature / effort / max_output_override 等
+    updated_at  REAL NOT NULL,
+    FOREIGN KEY (provider_id) REFERENCES providers(provider_id) ON DELETE RESTRICT
 );
 
 CREATE TABLE meta (
@@ -301,7 +289,7 @@ DeepSeek
   catalog 兜底：1M / 384K
 
 Google Gemini
-  GET /v1beta/models 自动发现（Gemini 3 系列）
+  GET /v1beta/models 自动发现（Gemini 4 系列）
   catalog 兜底：1,048,576 / 65,536
 
 OpenAI / 兼容接口
@@ -376,7 +364,7 @@ OpenAI / 兼容接口
 2. 填 API Key / Base URL（预填）
 3. 点击「获取模型」
    DeepSeek → 自动列出 V4 Flash/Pro + 上下文/输出
-   Gemini   → 自动列出 Gemini 3 系列 + 上下文/输出
+   Gemini   → 自动列出 Gemini 4 系列 + 上下文/输出
    OpenAI 兼容 → 只列 ID，上下文留空
 4. 选择模型
    有元数据：直接显示，允许覆盖
@@ -627,6 +615,52 @@ tool_loop_max = min(32000, window - reserved_output - current_prompt_tokens)
 
 **验收**：迁移不丢 Key；DeepSeek/Gemini 自动拿到上下文；Offline/未知模型手动问；全量测试通过。
 
+### Phase B 实施记录（2026-11-25）
+
+已落地（v1）：
+
+- 独立 `models.db`（0600）：`providers` / `provider_models` / `model_routing` / `meta` 四张表；启动自动建表、种子与 YAML 迁移，旧 `deepseek-chat` / `deepseek-reasoner` 标记 `enabled=0`。
+- 模型能力在 `provider_models` 中按模型存储，字段包含 context/max output/tools/vision/cache/reasoning/source/metadata/last_synced_at。
+- 模型发现：
+  - DeepSeek `/models` 解析 context/output/modalities；
+  - Gemini 原生 `/v1beta/models`，只发送 `x-goog-api-key` Header；同一 Key 不能再作为 `Authorization: Bearer` 发送，否则 Google 会按 OAuth 校验并返回 401。过滤 `generateContent`；
+  - OpenAI-Compatible 只取 ID，能力用目录/手动兜底；
+  - Ollama `/api/tags` 基础支持。
+- 设置 API 的模型部分切到 `models.db`：providers/model_routing 保存到 SQLite，非模型设置继续写 YAML；发现接口 `POST /api/models/discover`。
+- 设置页：默认只保留 DeepSeek / Google Gemini / OpenAI 三家；服务商卡片内可编辑 Base URL、API Key，展开编辑每模型上下文/输出/工具/视觉，并提供「刷新模型」「测连通」；测试/刷新结果直接显示在对应卡片内，输入未保存的 Key 显示「待保存」；刷新设置页时会保留未保存的 Key。支持添加 OpenAI 兼容或 Anthropic 协议的自定义厂商，自定义厂商可移除（清除 Key 与路由，二次确认后随保存生效）；首次无 Key 时显示「开始使用」提示；Quick Entry 无可用 profile 时显示「配置模型」入口。
+- 内置模型种子与实时目录对齐：DeepSeek 为 V4 Flash / V4 Pro，Gemini 为 4 Carbon / 4 Neon / 4 Hydrogen / 4 Argon；启动时只清理本产品写入的过期 catalog 种子，发现结果、迁移结果和手动编辑的模型不删除。
+- 能力路由的模型改为按槽位过滤的下拉选择：对话/后台快任务排除 ASR、OCR、TTS、embedding、图像模型；看屏/OCR 允许 OCR/视觉模型；语音识别、语音合成只列对应模型；切换厂商时自动选择兼容默认模型，不再需要手输模型 ID。
+- DeepSeek 专属能力（思考模式、reasoning_content 回传、原生联网搜索/读链接、引用、图片输入、JSON 模式、缓存/错误码/价格）见 [deepseek-api-adaptation.md](deepseek-api-adaptation.md)。
+- Gemini 原生协议适配（thinkingLevel、thoughtSignature、函数调用、Google Search/URL Context、grounding 引用、多模态、用量/价格）见 [gemini-api-adaptation.md](gemini-api-adaptation.md)。
+- 运行时会为每家厂商最新一代 chat 模型合成可切换 profile（`routed_chat` + `model_*`），避免模型发现后快捷菜单膨胀；更早的模型仍可在设置路由中选择。
+
+尚未完成：
+
+- 完整的多步首次配置向导（当前是提示 + 手动 Save）；
+- ~~单独的 `profiles` 持久表~~：已拍板不新增，槽位扩展参数改放 `model_routing.extra_json`；
+
+- 定时自动刷新（当前是首次/手动刷新）。
+
+`pytest`：172 passed；`models.db` 实测仅保留 DeepSeek / Gemini / OpenAI 三家，DeepSeek 自动发现返回 2 个 V4 模型（1M / 393216），Gemini 种子切换为 4 Carbon / 4 Neon / 4 Hydrogen / 4 Argon；旧厂商与过期 catalog 种子被清理，音频/OCR 模型与手动能力不被误删。
+
+Provider Adapter 与 KV Cache 观测（2026-11-26）：
+
+- `brain/providers.py`：`ProviderAdapter` + OpenAICompatible / DeepSeek / GeminiNative / Anthropic 适配器；LLMRouter 的请求构建、缓存字段归一化统一走 adapter，新增厂商只需扩展 adapter 注册表。
+- `usage_ledger.cached_input_tokens`：DeepSeek `prompt_cache_hit_tokens` / OpenAI·Gemini `prompt_tokens_details.cached_tokens` / Anthropic `cache_read_input_tokens` 统一归一化并钳位到 prompt；旧库启动补列并从旧列回填，JSONL 导出/导入兼容。
+- `cli.py usage` 增加总览 + 分 slot 的加权命中率；连续 3 次 prompt≥4000 且缓存为 0 时输出前缀/工具顺序退化提示。
+- L1 事实查询与渲染按 `fact_id` 稳定排序；工具 schema 按 name 排序并递归规范键序，避免 MCP 注册顺序影响前缀缓存。
+- `tests/test_prefix_cache_guard.py`：PCH-01/02/03；`tests/test_provider_adapters.py`：适配器解析与请求形状。
+
+Phase B 验收硬化（2026-11-26）：
+
+- `model_routing.extra_json` 承载槽位 `voice` / `effort` / `temperature` / `max_output_override`；外键改为 `ON DELETE RESTRICT`，删除被引用 Provider 返回 409；
+- 迁移前生成 `config.yaml.bak-models`（0600）；迁移异常时 `model_store_mode=yaml_fallback`，服务继续用 YAML 启动；
+- L3 单条超长技能/召回按上限头尾截断；图片轮次不更新纯文本 Token 校准；
+- ToolExecutor 收尾请求复用折叠并硬截断残留工具输出；折叠占位符保留工具名、关键参数与 work_history 线索；
+- 滚动摘要改为分段感知裁剪，5 个固定标题保留，缺失【用户偏好与约束】从上一版回填；
+- Ollama 发现并发读取 `/api/show` 的 `*.context_length` / `num_ctx`；Gemini preview 标记 `is_preview`；
+- 发现器使用安全正整数解析；Provider patch 校验 1K–10M 上下文与 max_output < context，非法返回 422。
+
 ---
 
 ## 10. 已确认决策与待确认项
@@ -634,6 +668,7 @@ tool_loop_max = min(32000, window - reserved_output - current_prompt_tokens)
 已确认：
 
 - 模型配置全部进独立 `models.db`，不走 YAML；
+- 不新增 `profiles` 实体表，保持 3 表精简结构；槽位级 `voice` / `effort` / `temperature` / `max_output_override` 存在 `model_routing.extra_json`；
 - `models.db` 权限 0600（含 wal/shm），暂不上 Keychain；
 - Gemini 第一版：原生 `models.list` 发现 + 官方 OpenAI-Compatible 端点对话；
 - 模型发现：首次填 Key 自动拉一次，之后仅手动「刷新模型」；

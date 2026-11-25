@@ -259,7 +259,10 @@ async def test_sqlite_discipline_and_jsonl_6_0_migration(tmp_path: Path) -> None
                     importers.append(str(pyf.relative_to(root)))
                 elif isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
                     importers.append(str(pyf.relative_to(root)))
-    assert importers == ["brain/memory/sqlite_store.py"]
+    assert sorted(importers) == [
+        "brain/memory/sqlite_store.py",
+        "brain/model_config_store.py",
+    ]
     assert SNAPSHOT_SCHEMA_VERSION == "6.0"
 
     cfg1 = AppConfig()

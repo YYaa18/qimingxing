@@ -31,12 +31,16 @@ class SkillDistillMockRouter(LLMRouter):
         self,
         messages: List[Dict[str, Any]],
         profile_name: Optional[str] = None,
+        *,
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         sys_txt = str(messages[0].get("content", ""))
         if "过程性技能" in sys_txt:
             yield self.distill_payload
             return
-        async for tok in super().stream_chat(messages, profile_name=profile_name):
+        async for tok in super().stream_chat(
+            messages, profile_name=profile_name, json_mode=json_mode
+        ):
             yield tok
 
     async def complete_with_tools(

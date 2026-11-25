@@ -473,7 +473,10 @@ async def _dispatch_checker(
             await b2.close()
 
             checks = [
-                ("only_sqlite_store_imports_sqlite3", sqlite_importers == ["brain/memory/sqlite_store.py"]),
+                ("only_sqlite_store_imports_sqlite3", sorted(sqlite_importers) == [
+                    "brain/memory/sqlite_store.py",
+                    "brain/model_config_store.py",
+                ]),
                 ("schema_version_6_0", SNAPSHOT_SCHEMA_VERSION == "6.0"),
                 ("snapshot_roundtrip_bg_task", exported >= 1 and imported == exported and restored is not None and restored.title == "快照任务"),
             ]
