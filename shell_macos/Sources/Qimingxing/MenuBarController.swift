@@ -63,11 +63,10 @@ final class MenuBarController: NSObject {
             },
             onQuit: { NSApp.terminate(nil) }
         )
-        .luminareTint(overridingWith: QMXTheme.accent)
 
         popover.contentViewController = NSHostingController(rootView: root)
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 348, height: 470)
+        popover.contentSize = NSSize(width: 356, height: 470)
     }
 
     private func configureContextMenu() {
@@ -116,7 +115,7 @@ final class MenuBarController: NSObject {
     @objc private func menuQuit() { NSApp.terminate(nil) }
 }
 
-private struct MenuBarPopoverView: View {
+struct MenuBarPopoverView: View {
     @ObservedObject var brainClient: BrainClient
     @ObservedObject var supervisor: ProcessSupervisor
     let desktopActions: DesktopActions
@@ -152,7 +151,10 @@ private struct MenuBarPopoverView: View {
                                 .background(Capsule().fill(Color.primary.opacity(0.08)))
                         }
                         HStack(spacing: 4) {
-                            PulsingDotView(color: statusColor, isPulsing: brainClient.isGenerating || brainClient.phase == .starting)
+                            PulsingDotView(
+                                color: statusColor,
+                                isPulsing: brainClient.isGenerating || brainClient.phase == .starting
+                            )
                             Text(statusLabel)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -164,16 +166,13 @@ private struct MenuBarPopoverView: View {
                     Button(action: onOpenQuickEntry) {
                         HStack(spacing: 5) {
                             Text("对话")
-                                .font(.system(size: 12, weight: .semibold))
-                            KeyCapBadge("⌥Space")
+                            KeyCapBadge("⌥Space", onAccent: true)
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
                     }
-                    .buttonStyle(.luminare(tinted: true))
+                    .buttonStyle(.qmxProminent)
                 }
 
-                // Model & Senses Info Pill
+                // Model & Senses Info Card
                 LuminareSection {
                     LuminareCompose("当前模型") {
                         Text(activeModelLabel)
@@ -194,7 +193,7 @@ private struct MenuBarPopoverView: View {
                                 .font(.system(size: 11, weight: .medium))
                                 .padding(.vertical, 4)
                         }
-                        .frame(width: 196)
+                        .frame(width: 192, height: 28)
                     }
 
                     LuminareToggle(
@@ -205,6 +204,7 @@ private struct MenuBarPopoverView: View {
                         )
                     )
                 }
+                .luminareTint(overridingWith: QMXTheme.accent)
 
                 // Background Tasks Section
                 LuminareSection {
@@ -273,10 +273,11 @@ private struct MenuBarPopoverView: View {
                         .buttonStyle(.borderless)
                     }
                 }
+                .luminareTint(overridingWith: QMXTheme.accent)
 
                 Spacer(minLength: 0)
 
-                // Footer Control Bar
+                // Compact Footer Control Bar
                 HStack(spacing: 8) {
                     Button(action: onOpenSettings) {
                         HStack(spacing: 4) {
@@ -284,40 +285,30 @@ private struct MenuBarPopoverView: View {
                             Text("设置")
                             KeyCapBadge("⌥K")
                         }
-                        .font(.caption)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
                     }
-                    .buttonStyle(.luminare)
+                    .buttonStyle(.qmxSecondary)
 
                     Button {
                         brainClient.cancelActiveTurn(reason: "popover_stop")
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "stop.circle.fill")
-                                .foregroundStyle(QMXTheme.danger)
                             Text("急停")
                         }
-                        .font(.caption)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
                     }
-                    .buttonStyle(.luminare)
+                    .buttonStyle(.qmxDestructive)
 
                     Spacer()
 
                     Button(action: onQuit) {
                         Text("退出")
-                            .font(.caption)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
                     }
-                    .buttonStyle(.luminare)
+                    .buttonStyle(.qmxSecondary)
                 }
             }
             .padding(14)
         }
-        .frame(width: 348)
+        .frame(width: 356)
     }
 
     private var activeModelLabel: String {

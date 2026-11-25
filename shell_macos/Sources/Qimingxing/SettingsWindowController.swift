@@ -182,7 +182,7 @@ final class SettingsViewStore: ObservableObject {
     }
 }
 
-private struct SettingsRootView: View {
+struct SettingsRootView: View {
     @ObservedObject var store: SettingsViewStore
     @ObservedObject var brainClient: BrainClient
     let supervisor: ProcessSupervisor
@@ -265,14 +265,12 @@ private struct SettingsRootView: View {
                                 }
                                 Text(store.isSaving ? "保存中…" : "保存设置")
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
                         }
-                        .buttonStyle(.luminare(tinted: true))
+                        .buttonStyle(.qmxProminent)
                         .disabled(store.isSaving)
                     }
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 10)
                 }
             } header: {
                 HStack(spacing: 8) {
@@ -347,42 +345,40 @@ private struct SettingsRootView: View {
 
             LuminareSection("服务商密钥池", "仅显示脱敏占位，未修改密钥时保存不会覆盖原有密钥。") {
                 ForEach($store.providers) { $prov in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(prov.label)
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text(prov.protocolName)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(width: 96, alignment: .leading)
-
-                            TextField("Base URL", text: $prov.baseURL)
-                                .textFieldStyle(.roundedBorder)
-
-                            if prov.authRequired {
-                                SecureField(
-                                    prov.hasKey ? "已配置 (\(prov.keyMasked))" : "输入 API Key",
-                                    text: $prov.draftApiKey
-                                )
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 175)
-                            }
-
-                            Button("测连通") {
-                                Task {
-                                    let (_, msg) = await brainClient.testProvider([
-                                        "provider_id": prov.name,
-                                        "base_url": prov.baseURL,
-                                        "api_key": prov.draftApiKey,
-                                        "protocol": prov.protocolName
-                                    ])
-                                    store.testResultMessage = "\(prov.label): \(msg)"
-                                }
-                            }
-                            .buttonStyle(.luminare)
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(prov.label)
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(prov.protocolName)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
+                        .frame(width: 96, alignment: .leading)
+
+                        TextField("Base URL", text: $prov.baseURL)
+                            .textFieldStyle(.roundedBorder)
+
+                        if prov.authRequired {
+                            SecureField(
+                                prov.hasKey ? "已配置 (\(prov.keyMasked))" : "输入 API Key",
+                                text: $prov.draftApiKey
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 170)
+                        }
+
+                        Button("测连通") {
+                            Task {
+                                let (_, msg) = await brainClient.testProvider([
+                                    "provider_id": prov.name,
+                                    "base_url": prov.baseURL,
+                                    "api_key": prov.draftApiKey,
+                                    "protocol": prov.protocolName
+                                ])
+                                store.testResultMessage = "\(prov.label): \(msg)"
+                            }
+                        }
+                        .buttonStyle(.qmxSecondary)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
@@ -414,7 +410,7 @@ private struct SettingsRootView: View {
                 }
                 TextField("Model ID", text: slot.model)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: showVoice ? 150 : 210)
+                    .frame(width: showVoice ? 127 : 210)
                 if showVoice {
                     TextField("Voice", text: slot.voice)
                         .textFieldStyle(.roundedBorder)
@@ -439,6 +435,7 @@ private struct SettingsRootView: View {
                     }
                     .padding(.vertical, 8)
                 }
+                .frame(height: 56)
                 .luminareRoundingBehavior(top: true, bottom: true)
             }
 
@@ -494,15 +491,15 @@ private struct SettingsRootView: View {
                                         store.mcpServers = await brainClient.fetchMCPServers()
                                     }
                                 }
-                                .buttonStyle(.luminare)
+                                .buttonStyle(.qmxSecondary)
                             }
-                            Button("移除", role: .destructive) {
+                            Button("移除") {
                                 Task {
                                     await brainClient.deleteMCPServer(name: srv.name)
                                     store.mcpServers = await brainClient.fetchMCPServers()
                                 }
                             }
-                            .buttonStyle(.luminare)
+                            .buttonStyle(.qmxDestructive)
                         }
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {

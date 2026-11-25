@@ -40,7 +40,6 @@ final class ApprovalSheetController {
             )
             self?.closeWindow(approvalId: item.approvalId)
         }
-        .luminareTint(overridingWith: QMXTheme.accent)
 
         let hosting = NSHostingController(rootView: view)
         hosting.view.wantsLayer = true
@@ -63,7 +62,7 @@ final class ApprovalSheetController {
     }
 }
 
-private struct ApprovalModalView: View {
+struct ApprovalModalView: View {
     let item: PendingApprovalItem
     let onRespond: (Bool, Bool, String) -> Void
 
@@ -128,7 +127,7 @@ private struct ApprovalModalView: View {
                                     Button(opt) {
                                         onRespond(true, false, opt)
                                     }
-                                    .buttonStyle(.luminare(tinted: true))
+                                    .buttonStyle(.qmxProminent)
                                 }
                             }
                             .padding(8)
@@ -144,13 +143,13 @@ private struct ApprovalModalView: View {
                                 onRespond(true, false, ans)
                             }
                         }
-                        .buttonStyle(.luminare(tinted: true))
+                        .buttonStyle(.qmxProminent)
                         .disabled(customReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                         Button("取消") {
                             onRespond(false, false, "")
                         }
-                        .buttonStyle(.luminare)
+                        .buttonStyle(.qmxSecondary)
                     }
                 } else {
                     LuminareSection("参数详情") {
@@ -180,7 +179,7 @@ private struct ApprovalModalView: View {
                         Button("拒绝") {
                             onRespond(false, false, "")
                         }
-                        .buttonStyle(.luminare)
+                        .buttonStyle(.qmxDestructive)
                         .keyboardShortcut(.cancelAction)
 
                         Spacer()
@@ -189,13 +188,13 @@ private struct ApprovalModalView: View {
                             Button("本会话记住并允许") {
                                 onRespond(true, true, "")
                             }
-                            .buttonStyle(.luminare)
+                            .buttonStyle(.qmxSecondary)
                         }
 
                         Button("允许执行") {
                             onRespond(true, false, "")
                         }
-                        .buttonStyle(.luminare(tinted: true))
+                        .buttonStyle(.qmxProminent)
                         .keyboardShortcut(.defaultAction)
                     }
                 }

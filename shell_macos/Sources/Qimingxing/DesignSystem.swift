@@ -10,6 +10,8 @@ enum QMXTheme {
     static let panelRadius: CGFloat = 16
     static let cardRadius: CGFloat = 12
     static let controlRadius: CGFloat = 8
+
+    static let isHeadlessDump: Bool = ProcessInfo.processInfo.arguments.contains("--dump-ui")
 }
 
 struct VisualEffectBlur: NSViewRepresentable {
@@ -27,7 +29,13 @@ struct VisualEffectBlur: NSViewRepresentable {
         self.state = state
     }
 
-    func makeNSView(context: Context) -> NSVisualEffectView {
+    func makeNSView(context: Context) -> NSView {
+        if QMXTheme.isHeadlessDump {
+            let v = NSView()
+            v.wantsLayer = true
+            v.layer?.backgroundColor = NSColor(red: 0.09, green: 0.11, blue: 0.16, alpha: 0.98).cgColor
+            return v
+        }
         let view = NSVisualEffectView()
         view.material = material
         view.blendingMode = blendingMode
@@ -36,10 +44,133 @@ struct VisualEffectBlur: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-        nsView.state = state
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let ve = nsView as? NSVisualEffectView else { return }
+        ve.material = material
+        ve.blendingMode = blendingMode
+        ve.state = state
+    }
+}
+
+enum QMXButtonVariant {
+    case prominent
+    case secondary
+    case destructive
+    case icon
+}
+
+struct QMXButtonStyle: ButtonStyle {
+    let variant: QMXButtonVariant
+    let isActive: Bool
+    @State private var isHovering = false
+
+    init(variant: QMXButtonVariant = .secondary, isActive: Bool = false) {
+        self.variant = variant
+        self.isActive = isActive
+    }
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed
+        configuration.label
+            .fixedSize(horizontal: true, vertical: false)
+            .font(.system(size: 12.5, weight: variant == .prominent ? .semibold : .medium))
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, horizontalPad)
+            .padding(.vertical, verticalPad)
+            .background(
+                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
+                    .fill(backgroundColor(pressed: pressed))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
+                    .strokeBorder(borderColor, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous))
+            .scaleEffect(pressed ? 0.98 : 1.0)
+            .onHover { isHovering = $0 }
+    }
+
+    private var horizontalPad: CGFloat {
+        variant == .icon ? 7 : 11
+    }
+
+    private var verticalPad: CGFloat {
+        variant == .icon ? 6 : 6
+    }
+
+    private var foregroundColor: Color {
+        switch variant {
+        case .prominent:
+            return .white
+        case .destructive:
+            return QMXTheme.danger
+        case .secondary, .icon:
+            return isActive ? QMXTheme.accent : .primary
+        }
+    }
+
+    private func backgroundColor(pressed: Bool) -> Color {
+        switch variant {
+        case .prominent:
+            if pressed { return QMXTheme.accent.opacity(0.75) }
+            if isHovering { return QMXTheme.accent.opacity(0.95) }
+            return QMXTheme.accent.opacity(0.85)
+        case .destructive:
+            if pressed { return QMXTheme.danger.opacity(0.28) }
+            if isHovering { return QMXTheme.danger.opacity(0.20) }
+            return QMXTheme.danger.opacity(0.12)
+        case .secondary, .icon:
+            if isActive {
+                return QMXTheme.accent.opacity(pressed ? 0.28 : 0.18)
+            }
+            if pressed { return Color.primary.opacity(0.16) }
+            if isHovering { return Color.primary.opacity(0.11) }
+            return Color.primary.opacity(0.07)
+        }
+    }
+
+    private var borderColor: Color {
+        switch variant {
+        case .prominent:
+            return Color.white.opacity(0.24)
+        case .destructive:
+            return QMXTheme.danger.opacity(0.35)
+        case .secondary, .icon:
+            return isActive ? QMXTheme.accent.opacity(0.45) : Color.primary.opacity(0.12)
+        }
+    }
+}
+
+struct QMXChipButtonStyle: ButtonStyle {
+    @State private var isHovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
+                    .fill(Color.primary.opacity(configuration.isPressed ? 0.14 : (isHovering ? 0.09 : 0.05)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(isHovering ? 0.18 : 0.10), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: QMXTheme.controlRadius, style: .continuous))
+            .onHover { isHovering = $0 }
+    }
+}
+
+extension ButtonStyle where Self == QMXButtonStyle {
+    static var qmxProminent: QMXButtonStyle { QMXButtonStyle(variant: .prominent) }
+    static var qmxSecondary: QMXButtonStyle { QMXButtonStyle(variant: .secondary) }
+    static var qmxDestructive: QMXButtonStyle { QMXButtonStyle(variant: .destructive) }
+    static var qmxIcon: QMXButtonStyle { QMXButtonStyle(variant: .icon) }
+    static func qmxSecondary(active: Bool) -> QMXButtonStyle {
+        QMXButtonStyle(variant: .secondary, isActive: active)
     }
 }
 
@@ -69,24 +200,26 @@ struct HairlineBorderOverlay: View {
 
 struct KeyCapBadge: View {
     let keys: String
+    let onAccent: Bool
 
-    init(_ keys: String) {
+    init(_ keys: String, onAccent: Bool = false) {
         self.keys = keys
+        self.onAccent = onAccent
     }
 
     var body: some View {
         Text(keys)
-            .font(.system(size: 10, weight: .medium, design: .rounded))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .foregroundStyle(onAccent ? Color.white.opacity(0.92) : Color.secondary)
+            .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(onAccent ? Color.white.opacity(0.20) : Color.primary.opacity(0.08))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(onAccent ? Color.white.opacity(0.25) : Color.primary.opacity(0.12), lineWidth: 0.5)
             )
     }
 }

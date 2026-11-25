@@ -25,6 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let args = ProcessInfo.processInfo.arguments
+        if let idx = args.firstIndex(of: "--dump-ui"), idx + 1 < args.count {
+            let dirURL = URL(fileURLWithPath: args[idx + 1], isDirectory: true)
+            UIPreviewDumper.dumpAll(to: dirURL)
+            NSApp.terminate(nil)
+            return
+        }
+
         if ensureSingleInstance() {
             NSApp.terminate(nil)
             return
