@@ -975,17 +975,40 @@ def create_app(
     return app
 
 
-app = create_app()
+_app: Optional[FastAPI] = None
+
+
+def get_app() -> FastAPI:
+    """Build the production app once, on first use.
+
+    Keeping this out of module import means `import brain.main` (tests, CLI,
+    tooling) no longer constructs the Hub, opens models.db or creates artifact
+    temp dirs. `uvicorn brain.main:app` still works via module __getattr__.
+    """
+    global _app
+    if _app is None:
+        _app = create_app()
+    return _app
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main() -> None:
     import os
-    cfg = load_config()
+
+    app = get_app()
+    cfg = app.state.config
     host = os.environ.get("QIMINGXING_HOST") or cfg.server.host
     port_env = os.environ.get("QIMINGXING_PORT")
     port = int(port_env) if port_env else cfg.server.port
+    # Pass the object (not "brain.main:app") so `python -m brain.main` does not
+    # import and execute this module a second time.
     uvicorn.run(
-        "brain.main:app",
+        app,
         host=host,
         port=port,
         reload=False,
