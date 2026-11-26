@@ -39,6 +39,7 @@ struct WorkspaceItem: Identifiable, Codable, Equatable {
     var updatedAt: Date
     var sources: [SourceItem]? = nil
     var media: [MediaItem]? = nil
+    var bundlePath: String? = nil
 }
 
 // MARK: - Store
@@ -161,12 +162,16 @@ final class WorkspaceStore: ObservableObject {
                 parts.append(task.watchdogReason)
             }
             let body = parts.joined(separator: " · ")
+            let media = task.resultMedia.isEmpty ? nil : task.resultMedia
+            let bundle = task.bundlePath.isEmpty ? nil : task.bundlePath
             if let existing,
                existing.title == task.title,
                existing.body == body,
                existing.status == task.status,
                existing.progress == task.progressPct,
-               existing.path == task.artifactPath {
+               existing.path == task.artifactPath,
+               existing.media == media,
+               existing.bundlePath == bundle {
                 continue
             }
             upsert(WorkspaceItem(
@@ -179,7 +184,9 @@ final class WorkspaceStore: ObservableObject {
                 progress: task.progressPct,
                 path: task.artifactPath,
                 createdAt: existing?.createdAt ?? Date(),
-                updatedAt: Date()
+                updatedAt: Date(),
+                media: media,
+                bundlePath: bundle
             ))
         }
     }
@@ -852,6 +859,9 @@ struct WorkspaceRootView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .qmxCard(fill: QMXTheme.surfaceRaised)
             }
+            if let media = item.media, !media.isEmpty {
+                MediaStripView(media: media, mode: .expanded, contextTitle: "任务产物")
+            }
             artifactActions(item)
 
         case .artifact:
@@ -868,14 +878,21 @@ struct WorkspaceRootView: View {
 
     @ViewBuilder
     private func artifactActions(_ item: WorkspaceItem) -> some View {
-        if !item.path.isEmpty {
+        let bundlePath = item.bundlePath ?? ""
+        if !item.path.isEmpty || !bundlePath.isEmpty {
             HStack(spacing: 8) {
-                Button("快速预览") { _ = DesktopActions().quickLook(item.path) }
-                    .buttonStyle(.qmxSecondary)
-                Button("复制文件") { _ = DesktopActions().copyFile(item.path) }
-                    .buttonStyle(.qmxSecondary)
-                Button("在访达中显示") { _ = DesktopActions().revealPath(item.path) }
-                    .buttonStyle(.qmxSecondary)
+                if !bundlePath.isEmpty {
+                    Button("打开产物文件夹") { _ = DesktopActions().revealPath(bundlePath) }
+                        .buttonStyle(.qmxSecondary)
+                }
+                if !item.path.isEmpty {
+                    Button("快速预览") { _ = DesktopActions().quickLook(item.path) }
+                        .buttonStyle(.qmxSecondary)
+                    Button("复制文件") { _ = DesktopActions().copyFile(item.path) }
+                        .buttonStyle(.qmxSecondary)
+                    Button("在访达中显示") { _ = DesktopActions().revealPath(item.path) }
+                        .buttonStyle(.qmxSecondary)
+                }
             }
         }
     }

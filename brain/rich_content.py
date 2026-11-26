@@ -192,7 +192,7 @@ def collect_media(paths: Iterable[str]) -> List[Dict[str, Any]]:
             except Exception:
                 duration = 0.0
         media_id = "media_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
-        result.append({
+        item = {
             "media_id": media_id,
             "kind": kind,
             "title": path.name,
@@ -202,7 +202,17 @@ def collect_media(paths: Iterable[str]) -> List[Dict[str, Any]]:
             "height": height,
             "duration_sec": duration,
             "size_bytes": size,
-        })
+        }
+        if kind == "file":
+            # Office/PDF cards carry a small structural preview so the shell
+            # can render a native card without re-parsing the file in Swift.
+            try:
+                from brain.doc_office import file_media_summary
+
+                item.update(file_media_summary(path))
+            except Exception:
+                pass
+        result.append(item)
         if len(result) >= 20:
             break
     return result

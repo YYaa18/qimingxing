@@ -30,6 +30,8 @@ struct BackgroundTaskItem: Identifiable, Equatable, Sendable {
     var watchdogReason: String = ""
     var followupAck: String = ""
     var resultRefs: [String] = []
+    var bundlePath: String = ""
+    var resultMedia: [MediaItem] = []
 
     var id: String { taskId }
 
@@ -92,6 +94,27 @@ struct SourceItem: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+struct SheetPreviewItem: Codable, Equatable, Sendable {
+    let name: String
+    let columns: [String]
+    let rows: [[String]]
+
+    enum CodingKeys: String, CodingKey { case name, columns, rows }
+
+    init(name: String, columns: [String] = [], rows: [[String]] = []) {
+        self.name = name
+        self.columns = columns
+        self.rows = rows
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        columns = try c.decodeIfPresent([String].self, forKey: .columns) ?? []
+        rows = try c.decodeIfPresent([[String]].self, forKey: .rows) ?? []
+    }
+}
+
 struct MediaItem: Codable, Identifiable, Equatable, Sendable {
     let mediaId: String
     let kind: String
@@ -107,6 +130,12 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
     let license: String
     let attribution: String
     let provider: String
+    let fileExt: String
+    let summaryBadge: String
+    let previewColumns: [String]
+    let previewRows: [[String]]
+    let sheetNames: [String]
+    let sheetPreviews: [SheetPreviewItem]
 
     var id: String { mediaId }
     var fileURL: URL? {
@@ -124,13 +153,22 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         case sourceURL = "source_url"
         case sourceTitle = "source_title"
         case license, attribution, provider
+        case fileExt = "file_ext"
+        case summaryBadge = "summary_badge"
+        case previewColumns = "preview_columns"
+        case previewRows = "preview_rows"
+        case sheetNames = "sheet_names"
+        case sheetPreviews = "sheet_previews"
     }
 
     init(mediaId: String, kind: String, title: String = "", localPath: String = "",
          mimeType: String = "", width: Int = 0, height: Int = 0,
          durationSec: Double = 0, sizeBytes: Int = 0,
          sourceURL: String = "", sourceTitle: String = "", license: String = "",
-         attribution: String = "", provider: String = "") {
+         attribution: String = "", provider: String = "", fileExt: String = "",
+         summaryBadge: String = "", previewColumns: [String] = [],
+         previewRows: [[String]] = [], sheetNames: [String] = [],
+         sheetPreviews: [SheetPreviewItem] = []) {
         self.mediaId = mediaId
         self.kind = kind
         self.title = title
@@ -145,6 +183,12 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         self.license = license
         self.attribution = attribution
         self.provider = provider
+        self.fileExt = fileExt
+        self.summaryBadge = summaryBadge
+        self.previewColumns = previewColumns
+        self.previewRows = previewRows
+        self.sheetNames = sheetNames
+        self.sheetPreviews = sheetPreviews
     }
 
     init?(dict: [String: Any]) {
@@ -164,6 +208,19 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         self.license = (dict["license"] as? String) ?? ""
         self.attribution = (dict["attribution"] as? String) ?? ""
         self.provider = (dict["provider"] as? String) ?? ""
+        self.fileExt = (dict["file_ext"] as? String) ?? ""
+        self.summaryBadge = (dict["summary_badge"] as? String) ?? ""
+        self.previewColumns = (dict["preview_columns"] as? [String]) ?? []
+        self.previewRows = (dict["preview_rows"] as? [[String]]) ?? []
+        self.sheetNames = (dict["sheet_names"] as? [String]) ?? []
+        self.sheetPreviews = (dict["sheet_previews"] as? [[String: Any]])?.compactMap { raw in
+            guard let name = raw["name"] as? String else { return nil }
+            return SheetPreviewItem(
+                name: name,
+                columns: (raw["columns"] as? [String]) ?? [],
+                rows: (raw["rows"] as? [[String]]) ?? []
+            )
+        } ?? []
     }
 
     init(from decoder: Decoder) throws {
@@ -182,6 +239,12 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         license = try c.decodeIfPresent(String.self, forKey: .license) ?? ""
         attribution = try c.decodeIfPresent(String.self, forKey: .attribution) ?? ""
         provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? ""
+        fileExt = try c.decodeIfPresent(String.self, forKey: .fileExt) ?? ""
+        summaryBadge = try c.decodeIfPresent(String.self, forKey: .summaryBadge) ?? ""
+        previewColumns = try c.decodeIfPresent([String].self, forKey: .previewColumns) ?? []
+        previewRows = try c.decodeIfPresent([[String]].self, forKey: .previewRows) ?? []
+        sheetNames = try c.decodeIfPresent([String].self, forKey: .sheetNames) ?? []
+        sheetPreviews = try c.decodeIfPresent([SheetPreviewItem].self, forKey: .sheetPreviews) ?? []
     }
 }
 

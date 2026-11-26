@@ -13,22 +13,62 @@ def _runner(ctx: ToolExecutionContext):
     return ctx.task_runner
 
 
+_WORKER_RECIPE_MARKERS = (
+    "\n步骤要求", "\n执行步骤", "\n操作步骤", "\n步骤：", "\n步骤:",
+    "\n第一步", "\n1. ", "\n1、",
+)
+_TOOL_RECIPE_HINTS = (
+    "doc_match_rename", "doc_generate", "sheet_transform", "pdf_ops",
+    "table_path", "sequence_column", "match_columns", "output_dir",
+)
+
+
+def compact_dispatch_goal(goal: str) -> str:
+    """Keep only the business objective when the Router writes a tool recipe.
+
+    A natural request ("rename these invoices by the Excel 序号 and tell me
+    which are missing") must reach the Worker as a goal, not as a step list
+    naming tools and parameters. The first paragraph already carries the
+    input/output locations and read-only constraints.
+    """
+    text = str(goal or "").strip()
+    if not any(hint in text for hint in _TOOL_RECIPE_HINTS):
+        return text
+    for marker in _WORKER_RECIPE_MARKERS:
+        index = text.find(marker)
+        if 40 <= index <= 600:
+            head = text[:index].strip()
+            if len(head) >= 20:
+                return head
+    return text
+
+
 class TaskDispatchTool(Tool):
     name = "task_dispatch"
     description = (
         "把多步、跨工具、耗时的任务派发给隔离后台 Worker 执行，立即返回 task_id。"
         "Router 不应直接执行 shell、整页抓取或多步写操作；复杂任务必须先走本工具。"
+        "办公文件任务（表格/PDF/Word 核对、按表格序号重命名文件、PDF 合并拆分、生成报告）"
+        "使用 doc_office 能力包；Worker 可使用 doc_match_rename 完成表格键值匹配重命名并生成 CSV 核对报告。"
+        "用户通常只描述业务意图：请从上下文/附件推断输入目录，packs 填 doc_office，"
+        "并把输入目录与期望输出目录一并放进 writable_paths（没有写入授权会被硬拒绝）。"
     )
     default_risk: RiskLevel = "safe"
     parameters_schema = {
         "type": "object",
         "properties": {
-            "goal": {"type": "string", "description": "完整、可执行的任务目标"},
+            "goal": {
+                "type": "string",
+                "description": (
+                    "业务目标（1-2 句，含输入位置与期望结果）；"
+                    "不要写分步步骤、工具名或参数配方，具体工具由 Worker 选择"
+                ),
+            },
             "title": {"type": "string", "description": "可选短标题"},
             "packs": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "能力包：web_research / dev_ops / macos_office / media_studio / mcp:<server>",
+                "description": "能力包：web_research / dev_ops / macos_office / media_studio / doc_office / mcp:<server>",
             },
             "writable_paths": {
                 "type": "array",
@@ -77,14 +117,15 @@ class TaskDispatchTool(Tool):
         runner = _runner(ctx)
         if runner is None or not hasattr(runner, "submit"):
             return ToolResult(ok=False, output="后台 Worker 未就绪。", summary="Worker 未挂载", status="error")
-        goal = str(arguments.get("goal") or "").strip()
+        raw_goal = str(arguments.get("goal") or "").strip()
+        goal = compact_dispatch_goal(raw_goal)
         if not goal:
             return ToolResult(ok=False, output="goal 不能为空。", summary="缺少目标", status="error")
         title = str(arguments.get("title") or goal[:40]).strip()[:120]
         packs = arguments.get("packs")
         if not isinstance(packs, list) or not packs:
             packs = ["web_research"]
-        accepted = {"web_research", "dev_ops", "macos_office", "media_studio"}
+        accepted = {"web_research", "dev_ops", "macos_office", "media_studio", "doc_office"}
         clean_packs = [
             str(p).strip() for p in packs
             if str(p).strip() in accepted or str(p).strip().startswith("mcp:")
@@ -94,10 +135,15 @@ class TaskDispatchTool(Tool):
         writable = arguments.get("writable_paths")
         if not isinstance(writable, list):
             writable = []
+        writable_paths = [str(p).strip() for p in writable if str(p).strip()]
+        if goal != raw_goal and writable_paths:
+            # The recipe we dropped named the approved output folder; carry
+            # just that fact into the compact business goal.
+            goal = f"{goal}\n输出目录：{writable_paths[0]}"
         mandate = {
             "origin": "explicit_user",
             "allowed_packs": clean_packs,
-            "writable_paths": [str(p) for p in writable if str(p).strip()],
+            "writable_paths": writable_paths,
         }
         record = await runner.submit(
             title=title,

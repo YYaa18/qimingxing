@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -11,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from brain.config import AppConfig
 from brain.llm_router import LLMRouter, LLMUsage
 from brain.memory.backend import MemoryBackend
+from brain.rich_content import collect_media
 from brain.memory.models import (
     BackgroundTaskRecord,
     BackgroundTaskStatus,
@@ -33,6 +36,7 @@ from brain.worker import (
     verify_delivery,
 )
 from protocol.models import (
+    MediaItem,
     OutputArtifactCapsulePayload,
     OutputProactiveNoticePayload,
     RiskLevel,
@@ -49,6 +53,10 @@ logger = logging.getLogger("qimingxing.task_runner")
 _LOCK_WAIT_SECONDS = 120.0
 _LOCK_RETRY_SECONDS = 3.0
 _LOCK_LEASE_SECONDS = 120.0
+
+_TERMINAL_TASK_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "interrupted", "stalled"}
+)
 
 TaskStatusCallback = Callable[[TaskStatusPayload], Awaitable[None]]
 NoticeCallback = Callable[[OutputProactiveNoticePayload], Awaitable[None]]
@@ -67,8 +75,103 @@ _BG_TASK_SYSTEM_PROMPT = (
     "当前运行在独立隔离上下文中，主对话不受阻塞。\n"
     "请严谨调用可用工具收集与核实信息，禁止编造未观测的结果或路径；\n"
     "如果遇到需要用户确认的操作，请正常发起工具调用以触发原生审批弹窗。\n"
-    "最终输出结构化、清晰简洁的中文结论报告。"
+    "最终输出必须结果优先：先用 1-3 句给出结论与关键数字，再说明未完成/异常。"
+    "产物文件由系统以附件卡片自动呈现，正文不要罗列绝对路径或文件清单；"
+    "只生成用户要求的最终交付物，不要在输出目录制造校验/中间/临时文件；"
+    "办公文件的表格键值匹配重命名（如按序号/票号改名 PDF）优先用 doc_match_rename 一步完成，"
+    "它已产出副本与核对报告，不要拆成 sheet_transform + doc_rename 多步；"
+    "禁止复述工具调用步骤、内心独白、‘我将/我会先…’等过程性叙述。"
 )
+
+_RESULT_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,4}\s*)?(?:结论|结果|交付结果|核对结果|最终结果|交付物)\s*[:：]?\s*$",
+    re.MULTILINE,
+)
+_PROCESS_LEAD_RE = re.compile(
+    r"^\s*(?:"
+    r"我(?:先|会|将|已经|已|来|再)|"
+    r"首先|接下来|现在|第一步|让我|下面我|先(?:列出|读取|查看|检查|扫描|枚举)"
+    r")[^\n]{0,160}[。\n]",
+)
+
+
+def clean_result_narration(text: str) -> str:
+    """Drop a process preface before the real result section.
+
+    Workers occasionally open with "我先列出目录…" before the actual
+    conclusion. Prefer an explicit result heading; otherwise strip one
+    leading process sentence so summaries start with the deliverable.
+    """
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"^\*{1,3}\s+", "", cleaned)
+    match = _RESULT_HEADING_RE.search(cleaned, 0, min(len(cleaned), 400))
+    if match and match.start() > 0:
+        cleaned = cleaned[match.start():].lstrip()
+        cleaned = re.sub(r"^#{1,4}\s*", "", cleaned, count=1).lstrip()
+        heading_end = cleaned.find("\n")
+        if heading_end >= 0:
+            cleaned = cleaned[heading_end + 1:].lstrip()
+    for _ in range(2):
+        stripped = _PROCESS_LEAD_RE.sub("", cleaned, count=1)
+        if stripped == cleaned:
+            break
+        stripped = stripped.lstrip()
+        if not stripped:
+            break
+        cleaned = stripped
+    return cleaned.strip()
+
+
+def result_summary_preview(text: str, limit: int = 500) -> str:
+    """Truncate for the live card at a sentence boundary, not mid-word."""
+    cleaned = str(text or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    head = cleaned[: max(1, limit - 2)]
+    cut = max(
+        head.rfind("\n"),
+        head.rfind("。"),
+        head.rfind("；"),
+        head.rfind("！"),
+        head.rfind("？"),
+    )
+    if cut >= int(limit * 0.55):
+        return (head[: cut + 1].rstrip() + "\n…")[:limit]
+    return (head.rstrip() + "…")[:limit]
+
+
+def with_doc_key_facts(summary_text: str, trace_steps: list) -> str:
+    """Guarantee the invoice workflow leads with its deterministic numbers."""
+    match_fact = next(
+        (
+            step.summary
+            for step in reversed(trace_steps)
+            if getattr(step, "tool_name", "") == "doc_match_rename"
+            and getattr(step, "status", "") == "ok"
+            and getattr(step, "summary", "")
+        ),
+        "",
+    )
+    if match_fact and "关键数字" not in summary_text[:80]:
+        return f"关键数字：{match_fact}\n\n{summary_text}"
+    return summary_text
+
+
+def friendly_failure_fallback(raw_error: str) -> str:
+    """Never show raw provider errors or stack traces to the user."""
+    lower = (raw_error or "").lower()
+    fallback = "任务执行中断，详情可在工作区查看。"
+    if "timeout" in lower or "超时" in lower:
+        fallback = "任务超时已停止，可以稍后重试。"
+    elif "dsml" in lower or "tool_call" in lower:
+        fallback = "模型接口这次没有正常返回，任务已停止，可以直接重试。"
+    elif "approval" in lower or "审批" in lower:
+        fallback = "等待授权没有完成，任务已停止。"
+    elif "http" in lower or "api" in lower or "llm" in lower:
+        fallback = "模型服务暂时不可用，任务已停止，稍后重试即可。"
+    return fallback
 
 
 class BackgroundTaskRunner:
@@ -303,6 +406,7 @@ class BackgroundTaskRunner:
                 task_id,
                 status="failed",
                 current_step="Watchdog 已中止无解循环",
+                result_summary=(decision.reason or "任务已停止")[:120],
                 error_message=(decision.reason or "Watchdog 判定任务无解")[:500],
                 watchdog_state=state,
                 last_heartbeat_at=time.time(),
@@ -501,6 +605,13 @@ class BackgroundTaskRunner:
         return await self.backend.list_background_tasks(status=status, limit=limit)
 
     async def _emit_status(self, rec: BackgroundTaskRecord) -> None:
+        # Parsing Office previews is expensive; only build attachment media on
+        # terminal states where the shell actually renders them.
+        result_media = (
+            [MediaItem(**item) for item in collect_media(rec.result_files)]
+            if rec.status in _TERMINAL_TASK_STATUSES
+            else []
+        )
         if self.on_task_status is not None:
             payload = TaskStatusPayload(
                 task_id=rec.task_id,
@@ -511,6 +622,9 @@ class BackgroundTaskRunner:
                 active_count=self.active_count(),
                 result_summary=rec.result_summary,
                 artifact_path=rec.artifact_path,
+                bundle_path=rec.bundle_path,
+                result_files=list(rec.result_files),
+                result_media=result_media,
                 error_message=rec.error_message,
             )
             try:
@@ -538,6 +652,9 @@ class BackgroundTaskRunner:
                             or ""
                         ),
                         result_refs=list(rec.result_refs),
+                        bundle_path=rec.bundle_path,
+                        result_files=list(rec.result_files),
+                        result_media=result_media,
                     )
                 )
             except Exception:
@@ -816,6 +933,9 @@ class BackgroundTaskRunner:
                                 "macos_calendar_create",
                                 "macos_reminders_create",
                                 "macos_mail_draft",
+                                "sheet_transform",
+                                "pdf_ops",
+                                "doc_generate",
                             )
                         ),
                         "prompt_tokens_total": sum(u.prompt_tokens for u in usages),
@@ -885,12 +1005,11 @@ class BackgroundTaskRunner:
                         current_step="交付自检未通过，正在局部返工…",
                     )
                     rework_messages = list(messages) + [
-                        {"role": "assistant", "content": summary_text},
                         {
-                            "role": "system",
+                            "role": "user",
                             "content": (
                                 "交付自检发现以下问题，请仅修正它们并重新给出最终结论，"
-                                "不要编造或声称未真实生成的文件：\n- "
+                                "不要编造或声称未真实生成的文件；上一版草稿中的过程叙述不要重复：\n- "
                                 + "\n- ".join(verify_issues[:5])
                             ),
                         },
@@ -919,7 +1038,13 @@ class BackgroundTaskRunner:
                             + summary_text
                         )
 
+                summary_text = clean_result_narration(summary_text)
+                summary_text = with_doc_key_facts(summary_text, trace_steps)
                 artifact_path = self._write_report_artifact(record, summary_text)
+                bundle_path = str(Path(artifact_path).parent)
+                result_files = [artifact_path] + self._copy_task_results(
+                    Path(bundle_path), self._collect_result_files(trace_steps)
+                )
                 refs = [result_ref(task_id, "report"), artifact_ref(task_id, artifact_path)]
                 seen_steps = set()
                 for trace_step in trace_steps[-10:]:
@@ -937,8 +1062,10 @@ class BackgroundTaskRunner:
                     status="completed",
                     progress_pct=100,
                     current_step="任务已完成",
-                    result_summary=summary_text[:500],
+                    result_summary=result_summary_preview(summary_text),
                     artifact_path=artifact_path,
+                    bundle_path=bundle_path,
+                    result_files=result_files,
                     result_refs=refs,
                     last_heartbeat_at=time.time(),
                     finished_at=time.time(),
@@ -991,10 +1118,12 @@ class BackgroundTaskRunner:
             err_msg = f"后台任务执行超时（超过 {timeout_sec} 秒）"
             await self._record_bg_usage(record.source_session_id, task_id, usages, slot=usage_slot)
             await self._archive_work_history(record, err_msg, trace_steps, status="error")
+            friendly = await self._humanize_failure(record, err_msg)
             fail_rec = await self.backend.update_background_task(
                 task_id,
                 status="failed",
                 current_step="执行超时",
+                result_summary=friendly,
                 error_message=err_msg,
                 finished_at=time.time(),
             )
@@ -1005,10 +1134,12 @@ class BackgroundTaskRunner:
             logger.exception("Background task failed task_id=%s", task_id)
             await self._record_bg_usage(record.source_session_id, task_id, usages, slot=usage_slot)
             await self._archive_work_history(record, safe_err, trace_steps, status="error")
+            friendly = await self._humanize_failure(record, safe_err)
             fail_rec = await self.backend.update_background_task(
                 task_id,
                 status="failed",
                 current_step="执行失败",
+                result_summary=friendly,
                 error_message=safe_err[:500],
                 finished_at=time.time(),
             )
@@ -1021,9 +1152,45 @@ class BackgroundTaskRunner:
             self._cancel_events.pop(task_id, None)
             self._resume_events.pop(task_id, None)
 
+    async def _humanize_failure(
+        self, record: BackgroundTaskRecord, raw_error: str
+    ) -> str:
+        """One short, user-facing reason. Raw errors stay in error_message."""
+        lower = (raw_error or "").lower()
+        fallback = friendly_failure_fallback(raw_error)
+        try:
+            cur = self.llm_router.get_profile()
+            if cur.provider == "mock" or not self.config.has_explicit_routing:
+                return fallback
+            prompt = (
+                "用一句中文告诉用户后台任务为什么没完成，最多 40 字；"
+                "不要出现错误码、堆栈、文件路径或英文技术名词。\n"
+                f"任务：{record.title}\n原始错误：{str(raw_error)[:800]}"
+            )
+
+            async def _ask() -> str:
+                chunks: List[str] = []
+                async for token in self.llm_router.stream_chat(
+                    [{"role": "user", "content": prompt}],
+                    profile_name="@slot:fast_utility",
+                ):
+                    chunks.append(token)
+                    if sum(len(c) for c in chunks) > 160:
+                        break
+                return " ".join("".join(chunks).split())
+
+            text = await asyncio.wait_for(_ask(), timeout=6.0)
+            if text:
+                return text[:80]
+        except Exception:
+            logger.debug("Failure humanization skipped", exc_info=True)
+        return fallback
+
     def _write_report_artifact(self, record: BackgroundTaskRecord, summary_text: str) -> str:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        report_path = self.artifact_dir / f"{record.task_id}.md"
+        bundle_dir = self.artifact_dir / record.task_id
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        report_path = bundle_dir / "report.md"
         content = (
             f"# {record.title}\n\n"
             f"- 任务 ID: `{record.task_id}`\n"
@@ -1033,6 +1200,75 @@ class BackgroundTaskRunner:
         )
         report_path.write_text(content, encoding="utf-8")
         return str(report_path.resolve())
+
+    @staticmethod
+    def _collect_result_files(trace_steps: list) -> List[str]:
+        paths: List[str] = []
+        seen: set[str] = set()
+        write_tools = {
+            "shell_exec", "doc_generate", "doc_rename", "doc_match_rename",
+            "pdf_ops", "sheet_transform",
+        }
+        # doc_inspect reports the *input* file as media; never treat read-only
+        # inspection as a produced artifact.
+        read_only_media_tools = {"doc_inspect"}
+        for step in trace_steps:
+            if getattr(step, "status", "") != "ok":
+                continue
+            tool_name = getattr(step, "tool_name", "")
+            candidates = (
+                []
+                if tool_name in read_only_media_tools
+                else list(getattr(step, "media_paths", []) or [])
+            )
+            if tool_name in write_tools:
+                args = getattr(step, "arguments", {}) or {}
+                for key in ("path", "output_path", "target_path", "artifact_path"):
+                    value = str(args.get(key) or "").strip()
+                    if value:
+                        candidates.append(value)
+            for raw in candidates:
+                path = Path(raw).expanduser()
+                try:
+                    path = path.resolve()
+                except OSError:
+                    continue
+                key = str(path)
+                if key in seen or not path.is_file():
+                    continue
+                # Underscore-prefixed names are Worker scratch files, and an
+                # empty file is not a deliverable; neither belongs in the
+                # user-facing result bundle.
+                name = path.name
+                if (
+                    name.startswith("_")
+                    or path.stat().st_size <= 0
+                    or any(tok in name for tok in ("中间", "临时", "中段", "校验", "源表副本"))
+                    or any(tok in name.lower() for tok in ("temp", "scratch"))
+                    or re.fullmatch(r"sheet_[0-9a-fA-F]{6,12}\.(csv|xlsx)", name)
+                ):
+                    continue
+                seen.add(key)
+                paths.append(key)
+        return paths
+
+    @staticmethod
+    def _copy_task_results(bundle_dir: Path, paths: List[str]) -> List[str]:
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        copied: List[str] = []
+        for raw in paths:
+            source = Path(raw)
+            if source.parent == bundle_dir:
+                copied.append(str(source))
+                continue
+            target = bundle_dir / source.name
+            counter = 2
+            while target.exists():
+                target = bundle_dir / f"{source.stem}_{counter}{source.suffix}"
+                counter += 1
+            shutil.copy2(source, target)
+            copied.append(str(target))
+        return copied
 
     async def _record_bg_usage(
         self,

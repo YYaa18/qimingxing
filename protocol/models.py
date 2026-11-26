@@ -282,6 +282,12 @@ class SourceItem(ProtocolModel):
     domain: str = ""
 
 
+class SheetPreview(ProtocolModel):
+    name: str = ""
+    columns: List[str] = Field(default_factory=list)
+    rows: List[List[str]] = Field(default_factory=list)
+
+
 class MediaItem(ProtocolModel):
     media_id: str
     kind: Literal["image", "audio", "video", "file"]
@@ -297,6 +303,13 @@ class MediaItem(ProtocolModel):
     license: str = ""
     attribution: str = ""
     provider: str = ""
+    # Optional, additive file-card metadata (v1.0-compatible defaults).
+    file_ext: str = ""
+    summary_badge: str = ""
+    preview_columns: List[str] = Field(default_factory=list)
+    preview_rows: List[List[str]] = Field(default_factory=list)
+    sheet_names: List[str] = Field(default_factory=list)
+    sheet_previews: List[SheetPreview] = Field(default_factory=list)
 
 
 class OutputTurnEndPayload(ProtocolModel):
@@ -446,6 +459,9 @@ class TaskStatusPayload(ProtocolModel):
     active_count: int = 0
     result_summary: str = ""
     artifact_path: str = ""
+    bundle_path: str = ""
+    result_files: List[str] = Field(default_factory=list)
+    result_media: List[MediaItem] = Field(default_factory=list)
     error_message: str = ""
 
 
@@ -457,6 +473,9 @@ class TaskStateChangedPayload(ProtocolModel):
     progress_pct: int = 0
     block_reason: str = ""
     result_refs: List[str] = Field(default_factory=list)
+    bundle_path: str = ""
+    result_files: List[str] = Field(default_factory=list)
+    result_media: List[MediaItem] = Field(default_factory=list)
 
 
 class TaskFollowupAckedPayload(ProtocolModel):

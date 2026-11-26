@@ -15,7 +15,7 @@ def get_app_version() -> str:
                 return val
     except OSError:
         pass
-    return "1.0.1"
+    return "1.0.2"
 
 
 def truncate_head_tail(

@@ -43,6 +43,7 @@ from brain.model_config_store import (
 )
 from brain.model_discovery import discover_provider_models
 from brain.memory.retrieval import MemoryRetriever
+from brain.rich_content import collect_media
 from brain.scheduler import TaskScheduler
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.task_runner import BackgroundTaskRunner
@@ -784,6 +785,13 @@ def create_app(
                         "current_step": t.current_step,
                         "result_summary": t.result_summary,
                         "artifact_path": t.artifact_path,
+                        "bundle_path": t.bundle_path,
+                        "result_files": list(t.result_files),
+                        "result_media": (
+                            collect_media(t.result_files)
+                            if t.status in ("completed", "failed", "cancelled", "interrupted", "stalled")
+                            else []
+                        ),
                         "error_message": t.error_message,
                         "created_at": t.created_at,
                         "started_at": t.started_at,

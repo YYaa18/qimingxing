@@ -42,6 +42,8 @@ struct MediaStripView: View {
                 ForEach(visible) { item in
                     if item.kind == "audio" {
                         audioPill(item, expanded: false)
+                    } else if item.kind == "file" {
+                        fileDeliveryCard(item)
                     } else {
                         thumbnailTile(item)
                     }
@@ -157,6 +159,65 @@ struct MediaStripView: View {
         }
     }
 
+    private func fileDeliveryCard(_ item: MediaItem) -> some View {
+        Button {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            openViewer(item)
+        } label: {
+            HStack(spacing: 9) {
+                Image(nsImage: fileIcon(item))
+                    .resizable()
+                    .frame(width: 26, height: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title.isEmpty ? "文件" : item.title)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(QMXTheme.textPrimary)
+                        .lineLimit(1)
+                    Text(item.summaryBadge.isEmpty ? byteLabel(item.sizeBytes) : item.summaryBadge)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(QMXTheme.textTertiary)
+            }
+            .padding(.horizontal, 10)
+            .frame(width: 230, height: 56)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(QMXTheme.surfaceMuted.opacity(0.6))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help(item.title)
+        .contextMenu {
+            if let path = item.fileURL?.path {
+                Button("快速预览") { _ = DesktopActions().quickLook(path) }
+                Button("在访达中显示") { _ = DesktopActions().revealPath(path) }
+            }
+        }
+    }
+
+    private func fileIcon(_ item: MediaItem) -> NSImage {
+        if let path = item.fileURL?.path, FileManager.default.fileExists(atPath: path) {
+            return NSWorkspace.shared.icon(forFile: path)
+        }
+        return NSImage(systemSymbolName: "doc.fill", accessibilityDescription: "文件")
+            ?? NSImage(size: NSSize(width: 26, height: 26))
+    }
+
+    private func byteLabel(_ size: Int) -> String {
+        guard size > 0 else { return "本地文件" }
+        return ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+    }
+
     private func quickLook(_ item: MediaItem) {
         guard let path = item.fileURL?.path else { return }
         _ = DesktopActions().quickLook(path)
@@ -265,8 +326,15 @@ struct MediaStripView: View {
     private func fileRow(_ item: MediaItem) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "doc")
-            Text(item.title)
-                .font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.system(size: 12))
+                if !item.summaryBadge.isEmpty {
+                    Text(item.summaryBadge)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                }
+            }
             Spacer()
             if let path = item.fileURL?.path {
                 Button("快速预览") { _ = DesktopActions().quickLook(path) }

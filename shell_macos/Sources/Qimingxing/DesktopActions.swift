@@ -115,7 +115,7 @@ final class DesktopActions: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDe
         return (true, "")
     }
 
-    func showProactiveNotification(title: String, body: String, taskId: String = "") {
+    func showProactiveNotification(title: String, body: String, taskId: String = "", announce: Bool = true) {
         guard Bundle.main.bundleURL.pathExtension == "app" else { return }
         let content = UNMutableNotificationContent()
         content.title = title.isEmpty ? "启明星" : title
@@ -134,7 +134,7 @@ final class DesktopActions: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDe
         let spoken = [title, body]
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "。")
-        if !spoken.isEmpty {
+        if announce && !spoken.isEmpty {
             speak(spoken)
         }
     }

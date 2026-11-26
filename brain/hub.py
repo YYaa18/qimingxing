@@ -2243,6 +2243,21 @@ class Hub:
                                 f"【用户直投图片 OCR 识别 ({rec.filename})】\n{prepared_att}"
                             )
                     else:
+                        suffix = Path(rec.filename).suffix.lower()
+                        if suffix in {".pdf", ".xlsx", ".xlsm", ".csv", ".docx", ".md", ".markdown", ".txt"}:
+                            try:
+                                from brain.doc_office import inspect_document, inspect_text_summary
+
+                                inspected = await asyncio.to_thread(
+                                    inspect_document, rec.path, max_rows=20
+                                )
+                                extra_l3_sections.append(
+                                    f"【用户直投文件附件 ({rec.filename})，本地路径: {rec.path}】\n"
+                                    + inspect_text_summary(inspected, max_chars=6000)
+                                )
+                                continue
+                            except Exception:
+                                pass
                         extracted, err_msg = self.artifact_store.extract_text(
                             aid, max_chars=8000, redact_fn=self.config.redact_secrets
                         )
@@ -2596,7 +2611,12 @@ class Hub:
                 media_paths.extend(s.media_paths)
                 tool_media_items.extend(s.media_items)
                 tool_sources.extend(s.sources)
-                raw_out_path = str(s.arguments.get("path") or "").strip()
+                raw_out_path = str(
+                    s.arguments.get("path")
+                    or s.arguments.get("output_path")
+                    or s.arguments.get("target_path")
+                    or ""
+                ).strip()
                 if raw_out_path and os.path.isfile(os.path.expanduser(raw_out_path)):
                     media_paths.append(raw_out_path)
                     if s.status == "ok" and any(

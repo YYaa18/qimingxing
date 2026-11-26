@@ -14,6 +14,7 @@ ROUTER_TOOL_NAMES: Set[str] = {
     "ask_user",
     "cancel_task",
     "clipboard_read",
+    "doc_inspect",
     "finder_get_selection",
     "list_tasks",
     "macos_calendar_create",
@@ -47,6 +48,14 @@ WORKER_PACK_TOOLS: Dict[str, Set[str]] = {
         "macos_browser_tabs",
     },
     "media_studio": {"finder_get_selection", "web_image_search"},
+    "doc_office": {
+        "doc_inspect",
+        "sheet_transform",
+        "pdf_ops",
+        "doc_generate",
+        "doc_rename",
+        "doc_match_rename",
+    },
 }
 
 _WRITE_PATH_KEYS = ("path", "output_path", "dest", "destination", "artifact_path", "target_path")
@@ -56,6 +65,11 @@ _WRITE_TOOLS = {
     "macos_calendar_create",
     "macos_reminders_create",
     "macos_mail_draft",
+    "sheet_transform",
+    "pdf_ops",
+    "doc_generate",
+    "doc_rename",
+    "doc_match_rename",
 }
 
 
@@ -127,7 +141,7 @@ class WorkerMandate:
     origin: str = "explicit_user"
     allowed_packs: List[str] = field(default_factory=list)
     writable_paths: List[str] = field(default_factory=list)
-    max_steps: int = 16
+    max_steps: int = 24
     max_prompt_tokens_total: int = 180_000
     max_wall_seconds: int = 600
     require_approval_risks: List[str] = field(default_factory=lambda: ["high", "destructive"])
@@ -142,7 +156,7 @@ class WorkerMandate:
             origin=str(data.get("origin") or "explicit_user"),
             allowed_packs=_strs("allowed_packs"),
             writable_paths=_strs("writable_paths"),
-            max_steps=max(1, min(64, int(data.get("max_steps") or 16))),
+            max_steps=max(1, min(64, int(data.get("max_steps") or 24))),
             max_prompt_tokens_total=max(10_000, int(data.get("max_prompt_tokens_total") or 180_000)),
             max_wall_seconds=max(30, min(3600, int(data.get("max_wall_seconds") or 600))),
             require_approval_risks=_strs("require_approval_risks") or ["high", "destructive"],

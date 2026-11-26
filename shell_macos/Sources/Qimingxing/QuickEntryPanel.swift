@@ -477,6 +477,7 @@ final class QuickEntryInputState: ObservableObject {
     @Published var text: String = ""
     @Published var includeScreen: Bool = false
     @Published var stagedAttachments: [StagedAttachment] = []
+    @Published var uploadingNames: [String] = []
     @Published var focusRequestToken: UUID = UUID()
     @Published var isExpanded: Bool = false
     @Published var forceExpanded: Bool = false
@@ -505,6 +506,7 @@ struct QuickEntryRootView: View {
     @State private var caughtUpAnswerCount = -1
     @State private var copiedAnswer = false
     @State private var answerRating: String?
+    @State private var isDropTargeted = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -546,6 +548,44 @@ struct QuickEntryRootView: View {
                 cornerRadius: QMXTheme.commandRadius
             )
         )
+        .overlay {
+            if isDropTargeted {
+                ZStack {
+                    RoundedRectangle(cornerRadius: QMXTheme.commandRadius, style: .continuous)
+                        .strokeBorder(QMXTheme.accent.opacity(0.75), lineWidth: 1.5)
+                    VStack(spacing: 6) {
+                        Image(systemName: "arrow.down.doc")
+                            .font(.system(size: 22, weight: .light))
+                        Text("松开以添加 PDF / 表格 / 文档")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(QMXTheme.accent)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(QMXTheme.surfaceRaised.opacity(0.94)))
+                }
+                .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+            for provider in providers {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    var url: URL?
+                    if let data = item as? Data {
+                        url = URL(dataRepresentation: data, relativeTo: nil)
+                    } else if let itemURL = item as? URL {
+                        url = itemURL
+                    }
+                    guard let url else { return }
+                    Task { @MainActor in
+                        if let attachment = await brainClient.uploadArtifact(fileURL: url) {
+                            inputState.stagedAttachments.append(attachment)
+                        }
+                    }
+                }
+            }
+            return true
+        }
         .ignoresSafeArea()
         .scaleEffect(appeared ? 1.0 : 0.96)
         .opacity(appeared ? 1.0 : 0.0)
@@ -602,6 +642,15 @@ struct QuickEntryRootView: View {
             answerContentHeight = 0
             turnPeakHeight = 0
         }
+        .onChange(of: inputState.text) { _ in
+            onDesiredHeightChange(chatHeight)
+        }
+        .onChange(of: inputState.stagedAttachments.count) { _ in
+            onDesiredHeightChange(chatHeight)
+        }
+        .onChange(of: inputState.uploadingNames.count) { _ in
+            onDesiredHeightChange(chatHeight)
+        }
         .onChange(of: latestTurn?.media.map(\.mediaId)) { _ in
             guard !MediaViewerWindowController.shared.isVisible else { return }
             guard inputState.isWorkspaceWingOpen else { return }
@@ -615,6 +664,11 @@ struct QuickEntryRootView: View {
     private var chatColumn: some View {
         VStack(spacing: 0) {
             inputRow
+
+            if attachmentBarHeight > 0 {
+                attachmentBar
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             if inputState.isExpanded {
                 Divider().opacity(0.5)
@@ -655,7 +709,11 @@ struct QuickEntryRootView: View {
                     Task { await uploadPastedImage(data) }
                 }
             )
-            .frame(maxWidth: .infinity, minHeight: 68, maxHeight: 68)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: QuickEntryLayout.inputHeight + inputExtraHeight,
+                maxHeight: QuickEntryLayout.inputHeight + inputExtraHeight
+            )
 
             HStack(spacing: 10) {
                 Image(systemName: "mic")
@@ -673,7 +731,68 @@ struct QuickEntryRootView: View {
             }
         }
         .padding(.horizontal, 20)
-        .frame(height: 68)
+        .frame(height: QuickEntryLayout.inputHeight + inputExtraHeight)
+    }
+
+    private var attachmentBar: some View {
+        HStack(spacing: 7) {
+            ForEach(inputState.stagedAttachments) { attachment in
+                HStack(spacing: 6) {
+                    Image(systemName: attachmentSymbol(attachment.kind))
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(QMXTheme.accent)
+                    Text(attachment.filename)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(QMXTheme.textPrimary)
+                        .lineLimit(1)
+                    Button {
+                        inputState.stagedAttachments.removeAll { $0.id == attachment.id }
+                        onDesiredHeightChange(chatHeight)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                            .frame(width: 14, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(Capsule().fill(QMXTheme.surfaceRaised))
+                .overlay(Capsule().strokeBorder(QMXTheme.hairline, lineWidth: 0.5))
+            }
+
+            ForEach(inputState.uploadingNames, id: \.self) { name in
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.65)
+                        .frame(width: 12, height: 12)
+                    Text(name)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(Capsule().fill(QMXTheme.surfaceMuted))
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .frame(height: attachmentBarHeight)
+    }
+
+    private func attachmentSymbol(_ kind: String) -> String {
+        switch kind.lowercased() {
+        case "image": return "photo"
+        case "audio": return "waveform"
+        case "video": return "film"
+        case "pdf": return "doc.richtext"
+        default: return "doc"
+        }
     }
 
     // MARK: Live stage
@@ -684,7 +803,8 @@ struct QuickEntryRootView: View {
                 Text(turn.prompt)
                     .font(.system(size: 12))
                     .foregroundStyle(QMXTheme.textTertiary)
-                    .lineLimit(1)
+                    .lineLimit(8)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if isThinking {
@@ -909,12 +1029,40 @@ struct QuickEntryRootView: View {
         (latestTurn?.media.isEmpty == false) ? 94 : 0
     }
 
+    private var attachmentBarHeight: CGFloat {
+        (inputState.stagedAttachments.isEmpty && inputState.uploadingNames.isEmpty) ? 0 : 38
+    }
+
+    /// Let the composer grow up to three extra lines so a pasted multi-line
+    /// instruction stays readable instead of hiding behind a one-line frame.
+    private var inputExtraHeight: CGFloat {
+        let text = inputState.text
+        guard !text.isEmpty else { return 0 }
+        let charsPerLine = 28
+        var lines = 0
+        for line in text.components(separatedBy: "\n") {
+            lines += max(1, Int(ceil(Double(line.count) / Double(charsPerLine))))
+        }
+        return CGFloat(min(max(lines - 1, 0), 8)) * 24
+    }
+
+    private var promptBlockHeight: CGFloat {
+        guard let prompt = latestTurn?.prompt, !prompt.isEmpty else { return 0 }
+        let charsPerLine = 56
+        var lines = 0
+        for line in prompt.components(separatedBy: "\n") {
+            lines += max(1, Int(ceil(Double(line.count) / Double(charsPerLine))))
+        }
+        return CGFloat(min(max(lines, 1), 8)) * 17 + 8
+    }
+
     private var maxLinesContentHeight: CGFloat {
         let visibleHeight = NSScreen.main?.visibleFrame.height ?? 960
-        let prompt: CGFloat = latestTurn?.prompt.isEmpty == false ? 28 : 0
+        let prompt = promptBlockHeight
         let screenCap = max(
             160,
-            visibleHeight - 24 - QuickEntryLayout.panelChrome - 40 - prompt - 26 - 12 - sourceBarHeight - mediaBarHeight
+            visibleHeight - 24 - QuickEntryLayout.panelChrome - inputExtraHeight - 40 - prompt - 26 - 12
+                - sourceBarHeight - mediaBarHeight - attachmentBarHeight
         )
         return min(CGFloat(answerMaxLines) * answerLineHeight, screenCap)
     }
@@ -922,26 +1070,34 @@ struct QuickEntryRootView: View {
     private var naturalAnswerChatHeight: CGFloat {
         let measured = answerContentHeight
         guard measured > 0 else {
-            return QuickEntryLayout.thinkingHeight
+            return QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight
         }
-        let promptBlock: CGFloat = latestTurn?.prompt.isEmpty == false ? 28 : 0
+        let promptBlock = promptBlockHeight
         let capped = min(measured, maxLinesContentHeight)
-        let stage = 40 + promptBlock + capped + sourceBarHeight + mediaBarHeight + 26 + 12
-        return max(QuickEntryLayout.thinkingHeight, QuickEntryLayout.panelChrome + stage)
+        let stage = 40 + promptBlock + capped + sourceBarHeight + mediaBarHeight
+            + attachmentBarHeight + 26 + 12
+        return max(
+            QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight,
+            QuickEntryLayout.panelChrome + inputExtraHeight + stage
+        )
     }
 
     /// Pure chat-column height. The wing floor is applied by the window
     /// controller and never written back into this value.
     private var chatHeight: CGFloat {
         if !inputState.isExpanded {
-            return QuickEntryLayout.idleHeight
+            return QuickEntryLayout.idleHeight + attachmentBarHeight + inputExtraHeight
         }
         if isThinking || latestTurn?.answer.isEmpty != false {
-            return QuickEntryLayout.thinkingHeight
+            return QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight
         }
         let natural = naturalAnswerChatHeight
         if brainClient.isGenerating || !answerRevealFinished {
-            return max(QuickEntryLayout.thinkingHeight, turnPeakHeight, natural)
+            return max(
+                QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight,
+                turnPeakHeight,
+                natural
+            )
         }
         return natural
     }
@@ -992,6 +1148,7 @@ struct QuickEntryRootView: View {
     private var canSend: Bool {
         brainClient.phase == .connected &&
         !brainClient.profiles.isEmpty &&
+        inputState.uploadingNames.isEmpty &&
         (!inputState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
          !inputState.stagedAttachments.isEmpty)
     }
@@ -1043,6 +1200,7 @@ struct QuickEntryRootView: View {
         answerRating = nil
         inputState.forceExpanded = false
         inputState.stagedAttachments = []
+        inputState.uploadingNames = []
         brainClient.clearHistory()
         inputState.focusRequestToken = UUID()
         onDesiredHeightChange(QuickEntryLayout.idleHeight)
@@ -1062,29 +1220,54 @@ struct QuickEntryRootView: View {
     }
 
     private func pickAttachmentFile() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        if panel.runModal() == .OK {
-            for url in panel.urls {
-                Task {
-                    if let attachment = await brainClient.uploadArtifact(fileURL: url) {
+        let chooser = NSOpenPanel()
+        chooser.allowsMultipleSelection = true
+        chooser.canChooseDirectories = false
+        chooser.canChooseFiles = true
+        chooser.level = .floating
+        // The quick-entry panel is a floating non-activating panel; left in
+        // place it keeps key status and the file chooser cannot be clicked.
+        let host = NSApp.windows.first(where: { $0 is FloatingQuickEntryPanel })
+        host?.orderOut(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        let response = chooser.runModal()
+        host?.makeKeyAndOrderFront(nil)
+        host?.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+        if response == .OK {
+            let urls = chooser.urls
+            for url in urls {
+                inputState.uploadingNames.append(url.lastPathComponent)
+            }
+            onDesiredHeightChange(chatHeight)
+            Task {
+                for url in urls {
+                    let attachment = await brainClient.uploadArtifact(fileURL: url)
+                    inputState.uploadingNames.removeAll { $0 == url.lastPathComponent }
+                    if let attachment {
                         inputState.stagedAttachments.append(attachment)
                     }
+                    onDesiredHeightChange(chatHeight)
                 }
             }
         }
+        // The modal panel steals key status; put the caret back in the input.
+        inputState.focusRequestToken = UUID()
     }
 
     private func uploadPastedImage(_ data: Data) async {
+        let name = "粘贴图片-\(UUID().uuidString.prefix(4)).png"
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("qmx_paste_\(UUID().uuidString.prefix(8)).png")
+        inputState.uploadingNames.append(name)
+        onDesiredHeightChange(chatHeight)
         try? data.write(to: tmp)
         if let attachment = await brainClient.uploadArtifact(fileURL: tmp) {
             inputState.stagedAttachments.append(attachment)
         }
+        inputState.uploadingNames.removeAll { $0 == name }
         try? FileManager.default.removeItem(at: tmp)
+        onDesiredHeightChange(chatHeight)
     }
 }
 
@@ -1118,6 +1301,7 @@ private struct AnswerScrollView: View {
                         },
                         onFinish: onFinish
                     )
+                    .id(turnID)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
                         GeometryReader { geo in
@@ -1393,7 +1577,7 @@ private struct ChineseIMETextView: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = false
+        scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
         scroll.verticalScrollElasticity = .none
@@ -1411,7 +1595,7 @@ private struct ChineseIMETextView: NSViewRepresentable {
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
-        tv.textContainerInset = NSSize(width: 0, height: 20)
+        tv.textContainerInset = NSSize(width: 0, height: 10)
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.containerSize = NSSize(
@@ -1441,6 +1625,7 @@ private struct ChineseIMETextView: NSViewRepresentable {
         if !tv.hasMarkedText() && tv.string != text {
             tv.string = text
             tv.needsDisplay = true
+            tv.updateVerticalInsetIfNeeded()
         }
         tv.placeholder = placeholder
         tv.onSubmit = onSubmit
@@ -1448,8 +1633,10 @@ private struct ChineseIMETextView: NSViewRepresentable {
         tv.onPasteImage = onPasteImage
 
         let width = nsView.contentSize.width
-        if width > 0, abs(tv.frame.width - width) > 0.5 {
-            tv.frame = NSRect(x: 0, y: 0, width: width, height: max(68, tv.frame.height))
+        let height = max(68, nsView.contentSize.height)
+        if width > 0,
+           abs(tv.frame.width - width) > 0.5 || abs(tv.frame.height - height) > 0.5 {
+            tv.frame = NSRect(x: 0, y: 0, width: width, height: height)
             tv.textContainer?.containerSize = NSSize(
                 width: width,
                 height: CGFloat.greatestFiniteMagnitude
@@ -1478,6 +1665,7 @@ private struct ChineseIMETextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
             tv.needsDisplay = true
+            tv.scrollRangeToVisible(tv.selectedRange())
             guard !tv.hasMarkedText() else { return }
             parent.text = tv.string
         }
@@ -1490,6 +1678,38 @@ private final class QMXTextView: NSTextView {
     var onPasteImage: ((Data) -> Void)?
     var placeholder: String = "" {
         didSet { needsDisplay = true }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command),
+              let key = event.charactersIgnoringModifiers?.lowercased()
+        else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch key {
+        case "c":
+            copy(nil)
+            return true
+        case "v":
+            paste(nil)
+            return true
+        case "x":
+            cut(nil)
+            return true
+        case "a":
+            selectAll(nil)
+            return true
+        case "z":
+            if flags.contains(.shift) {
+                undoManager?.redo()
+            } else {
+                undoManager?.undo()
+            }
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -1512,6 +1732,30 @@ private final class QMXTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
+        updateVerticalInsetIfNeeded()
+    }
+
+    override func layout() {
+        super.layout()
+        updateVerticalInsetIfNeeded()
+    }
+
+    /// Single-line content sits at the optical center of the composer. Once
+    /// the text wraps or gains a newline, it switches to a compact top inset
+    /// so the auto-grown editor can show several lines without clipping.
+    func updateVerticalInsetIfNeeded() {
+        guard let font else { return }
+        let text = string
+        let containerWidth = textContainer?.containerSize.width ?? bounds.width
+        let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
+        let isSingleLine = !text.contains("\n") && textWidth <= max(0, containerWidth)
+        let lineHeight = ceil(font.boundingRectForFont.height)
+        let desired = isSingleLine
+            ? max(8, (bounds.height - lineHeight) / 2)
+            : 10
+        if abs(textContainerInset.height - desired) > 0.5 {
+            textContainerInset = NSSize(width: 0, height: desired)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1521,6 +1765,8 @@ private final class QMXTextView: NSTextView {
             .font: font ?? NSFont.systemFont(ofSize: 22),
             .foregroundColor: NSColor.tertiaryLabelColor
         ]
+        // The text container inset is what centers an empty single-line
+        // composer, so the placeholder shares the caret's baseline.
         (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: attrs)
     }
 
@@ -1534,5 +1780,7 @@ private final class QMXTextView: NSTextView {
             return
         }
         super.paste(sender)
+        scrollRangeToVisible(selectedRange())
+        updateVerticalInsetIfNeeded()
     }
 }

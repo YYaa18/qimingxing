@@ -1,5 +1,6 @@
 import AppKit
 import AVKit
+import PDFKit
 import SwiftUI
 
 enum MediaViewerMode {
@@ -643,32 +644,289 @@ private struct MediaViewerAudioStage: View {
 private struct MediaViewerFileStage: View {
     let item: MediaItem
 
+    private var path: String? {
+        guard let path = item.fileURL?.path,
+              FileManager.default.fileExists(atPath: path) else { return nil }
+        return path
+    }
+
+    private var ext: String {
+        if !item.fileExt.isEmpty { return item.fileExt.lowercased() }
+        return (path as NSString?)?.pathExtension.lowercased() ?? ""
+    }
+
     var body: some View {
+        if path == nil {
+            missingFile
+        } else if ext == "pdf" {
+            PDFFileStage(item: item, path: path!)
+        } else if ["xlsx", "xlsm", "csv"].contains(ext) {
+            SpreadsheetFileStage(item: item, path: path!)
+        } else if ["md", "markdown"].contains(ext) {
+            MarkdownFileStage(item: item, path: path!)
+        } else {
+            genericFile
+        }
+    }
+
+    private var missingFile: some View {
         VStack(spacing: 10) {
-            Image(systemName: "doc.fill")
-                .font(.system(size: 54, weight: .ultraLight))
+            Image(systemName: "doc.questionmark")
+                .font(.system(size: 44, weight: .ultraLight))
                 .foregroundStyle(QMXTheme.textSecondary)
             Text(item.title.isEmpty ? "文件" : item.title)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(QMXTheme.textPrimary)
                 .lineLimit(2)
-            if item.sizeBytes > 0 {
-                Text(ByteCountFormatter.string(fromByteCount: Int64(item.sizeBytes), countStyle: .file))
+            Text("文件已被移动或删除")
+                .font(.system(size: 11))
+                .foregroundStyle(QMXTheme.textTertiary)
+            Button("打开所在目录") { openMediaCacheDirectory(item) }
+                .buttonStyle(.qmxSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var genericFile: some View {
+        VStack(spacing: 10) {
+            if let path {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                    .resizable()
+                    .frame(width: 54, height: 54)
+            } else {
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 54, weight: .ultraLight))
+                    .foregroundStyle(QMXTheme.textSecondary)
+            }
+            Text(item.title.isEmpty ? "文件" : item.title)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(QMXTheme.textPrimary)
+                .lineLimit(2)
+            if let badge = badgeText {
+                Text(badge)
                     .font(.system(size: 10))
                     .foregroundStyle(QMXTheme.textTertiary)
             }
-            if let path = item.fileURL?.path, FileManager.default.fileExists(atPath: path) {
-                Button("打开文件") { _ = DesktopActions().quickLook(path) }
+            if let path {
+                Button("快速预览") { _ = DesktopActions().quickLook(path) }
                     .buttonStyle(.qmxSecondary)
-            } else {
-                Text("文件已不存在")
-                    .font(.system(size: 11))
-                    .foregroundStyle(QMXTheme.textTertiary)
-                Button("打开缓存目录") { openMediaCacheDirectory(item) }
+                Button("用默认应用打开") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
                     .buttonStyle(.qmxSecondary)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var badgeText: String? {
+        if !item.summaryBadge.isEmpty { return item.summaryBadge }
+        if item.sizeBytes > 0 {
+            return ByteCountFormatter.string(fromByteCount: Int64(item.sizeBytes), countStyle: .file)
+        }
+        return nil
+    }
+}
+
+private struct PDFFileStage: View {
+    let item: MediaItem
+    let path: String
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            PDFKitView(url: URL(fileURLWithPath: path))
+                .background(QMXTheme.surface)
+            if !item.summaryBadge.isEmpty {
+                Text(item.summaryBadge)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(QMXTheme.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(QMXTheme.surfaceRaised.opacity(0.92)))
+                    .padding(12)
+            }
+        }
+    }
+}
+
+private struct PDFKitView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.backgroundColor = .clear
+        view.document = PDFDocument(url: url)
+        return view
+    }
+
+    func updateNSView(_ view: PDFView, context: Context) {
+        if view.document?.documentURL != url {
+            view.document = PDFDocument(url: url)
+        }
+    }
+}
+
+private struct SpreadsheetFileStage: View {
+    let item: MediaItem
+    let path: String
+    @State private var selectedSheet: String = ""
+
+    private var activePreview: SheetPreviewItem? {
+        if let selected = item.sheetPreviews.first(where: { $0.name == selectedSheet }) {
+            return selected
+        }
+        return item.sheetPreviews.first
+    }
+    private var columns: [String] { activePreview?.columns ?? item.previewColumns }
+    private var rows: [[String]] { activePreview?.rows ?? item.previewRows }
+    private var firstSheet: String { item.sheetNames.first ?? "Sheet1" }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                    .resizable()
+                    .frame(width: 20, height: 20)
+                Text(item.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(QMXTheme.textPrimary)
+                    .lineLimit(1)
+                if !item.summaryBadge.isEmpty {
+                    Text(item.summaryBadge)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                }
+                Spacer(minLength: 0)
+                Button("快速预览") { _ = DesktopActions().quickLook(path) }
+                    .buttonStyle(.qmxSecondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 42)
+
+            if item.sheetNames.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(item.sheetNames, id: \.self) { sheet in
+                            Button {
+                                selectedSheet = sheet
+                            } label: {
+                                Text(sheet)
+                                    .font(.system(size: 10.5, weight: selectedSheet == sheet ? .medium : .regular))
+                                    .foregroundStyle(selectedSheet == sheet ? QMXTheme.textPrimary : QMXTheme.textSecondary)
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 22)
+                                    .background(Capsule().fill(selectedSheet == sheet ? QMXTheme.surfaceRaised : Color.clear))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                }
+                .frame(height: 30)
+            }
+
+            Divider().opacity(0.4)
+            if columns.isEmpty || rows.isEmpty {
+                emptyPreview
+            } else {
+                table
+            }
+        }
+        .onAppear { if selectedSheet.isEmpty { selectedSheet = firstSheet } }
+    }
+
+    private var emptyPreview: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "tablecells")
+                .font(.system(size: 26, weight: .light))
+            Text("没有可用的表格预览")
+                .font(.system(size: 11))
+            Button("用快速预览查看") { _ = DesktopActions().quickLook(path) }
+                .buttonStyle(.qmxSecondary)
+        }
+        .foregroundStyle(QMXTheme.textTertiary)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var table: some View {
+        ScrollView([.horizontal, .vertical]) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
+                        Text(column)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(QMXTheme.textPrimary)
+                            .lineLimit(1)
+                            .frame(minWidth: 92, maxWidth: 220, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 7)
+                    }
+                }
+                .background(QMXTheme.surfaceRaised)
+                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                    GridRow {
+                        ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, _ in
+                            Text(columnIndex < row.count ? row[columnIndex] : "")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(QMXTheme.textSecondary)
+                                .lineLimit(2)
+                                .frame(minWidth: 92, maxWidth: 220, alignment: .leading)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                        }
+                    }
+                    .background(rowIndex.isMultiple(of: 2) ? Color.clear : QMXTheme.surfaceMuted.opacity(0.25))
+                }
+            }
+            .padding(10)
+        }
+        .scrollIndicators(.visible)
+    }
+}
+
+private struct MarkdownFileStage: View {
+    let item: MediaItem
+    let path: String
+
+    private var content: AttributedString? {
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        return try? AttributedString(markdown: raw)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                    .resizable()
+                    .frame(width: 20, height: 20)
+                Text(item.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(QMXTheme.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Button("快速预览") { _ = DesktopActions().quickLook(path) }
+                    .buttonStyle(.qmxSecondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 42)
+            Divider().opacity(0.4)
+            ScrollView {
+                if let content {
+                    Text(content)
+                        .font(.system(size: 13))
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(18)
+                } else {
+                    Text("Markdown 文件无法读取")
+                        .font(.system(size: 11))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .padding(18)
+                }
+            }
+        }
     }
 }
 
@@ -706,7 +964,13 @@ private struct MediaViewerThumb: View {
         ZStack {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(QMXTheme.surfaceMuted)
-            if let image {
+            if item.kind == "file", let path = item.fileURL?.path,
+               FileManager.default.fileExists(atPath: path) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 32, height: 32)
+            } else if let image {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)

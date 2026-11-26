@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
@@ -21,6 +22,66 @@ from brain.providers import (
 from protocol.models import ProfileInfo
 
 logger = logging.getLogger("qimingxing.llm_router")
+
+# DeepSeek's chat template can leak its native tool-call markup as plain text
+# when the upstream does not convert it into OpenAI tool_calls. Parse it here
+# rather than treating the markup as the task's final answer.
+_DSML_INVOKE_RE = re.compile(
+    r"<[^>]*?DSML[^>]*?\binvoke\b[^>]*?\bname=\"([^\"]+)\"[^>]*>(.*?)</[^>]*?DSML[^>]*?\binvoke\s*>",
+    re.DOTALL,
+)
+_DSML_PARAM_RE = re.compile(
+    r"<(?P<attrs>[^>]*?DSML[^>]*?\bparameter\b[^>]*?)>(?P<value>.*?)</[^>]*?DSML[^>]*?\bparameter\s*>",
+    re.DOTALL,
+)
+_DSML_ANY_RE = re.compile(r"<[^>]*?DSML[^>]*?>")
+
+
+def parse_dsml_tool_calls(content: str) -> tuple[str, List["ToolCallRequest"]]:
+    """Extract leaked DSML invokes from text; return cleaned text and calls."""
+    text = str(content or "")
+    if "DSML" not in text or "invoke" not in text:
+        return text, []
+    calls: List[ToolCallRequest] = []
+    invoke_spans: List[tuple[int, int]] = []
+    for match in _DSML_INVOKE_RE.finditer(text):
+        name = match.group(1).strip()
+        body = match.group(2)
+        if not name:
+            continue
+        args: Dict[str, Any] = {}
+        for param in _DSML_PARAM_RE.finditer(body):
+            attrs = param.group("attrs")
+            name_match = re.search(r"\bname=\"([^\"]+)\"", attrs)
+            if not name_match:
+                continue
+            key = name_match.group(1)
+            raw = param.group("value").strip()
+            if re.search(r"\bstring=\"(?:true|True|1)\"", attrs):
+                args[key] = raw
+            else:
+                try:
+                    args[key] = json.loads(raw)
+                except (ValueError, TypeError):
+                    args[key] = raw
+        calls.append(
+            ToolCallRequest(
+                id=f"dsml_{len(calls) + 1}",
+                name=name,
+                arguments_json=json.dumps(args, ensure_ascii=False),
+            )
+        )
+        invoke_spans.append((match.start(), match.end()))
+    if not calls:
+        return text, []
+    cleaned_parts: List[str] = []
+    cursor = 0
+    for start, end in invoke_spans:
+        cleaned_parts.append(text[cursor:start])
+        cursor = end
+    cleaned_parts.append(text[cursor:])
+    cleaned = _DSML_ANY_RE.sub("", "".join(cleaned_parts)).strip()
+    return cleaned, calls
 
 
 def estimate_cny_cost(
@@ -1064,13 +1125,18 @@ class LLMRouter:
             if entry["name"]
         ]
         full_content = "".join(content_parts)
-        if refusal and not full_content.strip():
+        if not tool_calls:
+            cleaned_content, dsml_calls = parse_dsml_tool_calls(full_content)
+            if dsml_calls:
+                tool_calls = dsml_calls
+                full_content = cleaned_content
+        if refusal and not full_content.strip() and not tool_calls:
             refusal_note = f"（内容安全策略拒绝了这次请求：{refusal}）"
             full_content = refusal_note
             content_parts.append(refusal_note)
             if on_text_delta is not None:
                 await on_text_delta(refusal_note)
-        if not full_content.strip():
+        if not full_content.strip() and not tool_calls:
             finish_notes = {
                 "insufficient_system_resource": "（DeepSeek 当前资源紧张，这次没有完成生成，请稍后重试。）",
                 "aborted": "（本次生成被中止，请重试。）",

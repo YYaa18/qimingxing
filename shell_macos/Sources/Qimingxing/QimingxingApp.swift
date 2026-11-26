@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         NSApp.setActivationPolicy(.accessory)
+        installMainMenu()
 
         supervisor = ProcessSupervisor()
         desktopActions = DesktopActions()
@@ -114,6 +115,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioPlayer?.stop()
         brainClient?.stop()
         supervisor?.terminateAll()
+    }
+
+    /// Accessory apps have no visible menu bar, but standard editing keyboard
+    /// shortcuts are routed through the main menu. Without this, Cmd+C/V/X
+    /// silently do nothing in the Quick Entry composer.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(
+            withTitle: "关于启明星",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "隐藏启明星",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        )
+        appMenu.addItem(
+            withTitle: "退出启明星",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "编辑")
+        editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func ensureSingleInstance() -> Bool {

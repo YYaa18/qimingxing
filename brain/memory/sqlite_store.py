@@ -223,6 +223,8 @@ CREATE TABLE IF NOT EXISTS background_tasks (
     current_step TEXT NOT NULL DEFAULT '',
     result_summary TEXT NOT NULL DEFAULT '',
     artifact_path TEXT NOT NULL DEFAULT '',
+    bundle_path TEXT NOT NULL DEFAULT '',
+    result_files_json TEXT NOT NULL DEFAULT '[]',
     error_message TEXT NOT NULL DEFAULT '',
     slot_used TEXT NOT NULL DEFAULT 'bg_task',
     worker_session_id TEXT NOT NULL DEFAULT '',
@@ -338,6 +340,8 @@ class SQLiteMemoryStore(MemoryBackend):
                 "result_refs_json": "TEXT NOT NULL DEFAULT '[]'",
                 "watchdog_state_json": "TEXT NOT NULL DEFAULT '{}'",
                 "last_heartbeat_at": "REAL NOT NULL DEFAULT 0",
+                "bundle_path": "TEXT NOT NULL DEFAULT ''",
+                "result_files_json": "TEXT NOT NULL DEFAULT '[]'",
             }
             for col, decl in bg_additions.items():
                 if col not in bg_cols:
@@ -1482,11 +1486,11 @@ class SQLiteMemoryStore(MemoryBackend):
                 INSERT INTO background_tasks (
                     task_id, title, goal_prompt, source_session_id, status,
                     progress_pct, current_step, result_summary, artifact_path,
-                    error_message, slot_used, worker_session_id, origin,
-                    mandate_json, checkpoint_json, result_refs_json,
-                    watchdog_state_json, last_heartbeat_at, created_at,
-                    started_at, finished_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    bundle_path, result_files_json, error_message, slot_used,
+                    worker_session_id, origin, mandate_json, checkpoint_json,
+                    result_refs_json, watchdog_state_json, last_heartbeat_at,
+                    created_at, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.task_id,
@@ -1498,6 +1502,8 @@ class SQLiteMemoryStore(MemoryBackend):
                     task.current_step,
                     task.result_summary,
                     task.artifact_path,
+                    task.bundle_path,
+                    json.dumps(task.result_files, ensure_ascii=False),
                     task.error_message,
                     task.slot_used,
                     task.worker_session_id,
@@ -1554,6 +1560,8 @@ class SQLiteMemoryStore(MemoryBackend):
         current_step: Optional[str] = None,
         result_summary: Optional[str] = None,
         artifact_path: Optional[str] = None,
+        bundle_path: Optional[str] = None,
+        result_files: Optional[List[str]] = None,
         error_message: Optional[str] = None,
         slot_used: Optional[str] = None,
         worker_session_id: Optional[str] = None,
@@ -1586,6 +1594,12 @@ class SQLiteMemoryStore(MemoryBackend):
             new_artifact = (
                 artifact_path if artifact_path is not None else row["artifact_path"]
             )
+            new_bundle = bundle_path if bundle_path is not None else row["bundle_path"]
+            new_result_files = (
+                json.dumps(result_files, ensure_ascii=False)
+                if result_files is not None
+                else row["result_files_json"]
+            )
             new_error = error_message if error_message is not None else row["error_message"]
             new_slot = slot_used if slot_used is not None else row["slot_used"]
             new_worker = worker_session_id if worker_session_id is not None else row["worker_session_id"]
@@ -1601,7 +1615,8 @@ class SQLiteMemoryStore(MemoryBackend):
                 """
                 UPDATE background_tasks
                 SET status = ?, progress_pct = ?, current_step = ?, result_summary = ?,
-                    artifact_path = ?, error_message = ?, slot_used = ?,
+                    artifact_path = ?, bundle_path = ?, result_files_json = ?,
+                    error_message = ?, slot_used = ?,
                     worker_session_id = ?, origin = ?, mandate_json = ?,
                     checkpoint_json = ?, result_refs_json = ?, watchdog_state_json = ?,
                     last_heartbeat_at = ?, started_at = ?, finished_at = ?
@@ -1613,6 +1628,8 @@ class SQLiteMemoryStore(MemoryBackend):
                     new_step,
                     new_summary,
                     new_artifact,
+                    new_bundle,
+                    new_result_files,
                     new_error,
                     new_slot,
                     new_worker,
@@ -2151,11 +2168,11 @@ class SQLiteMemoryStore(MemoryBackend):
                             INSERT OR REPLACE INTO background_tasks (
                                 task_id, title, goal_prompt, source_session_id, status,
                                 progress_pct, current_step, result_summary, artifact_path,
-                                error_message, slot_used, worker_session_id, origin,
-                                mandate_json, checkpoint_json, result_refs_json,
-                                watchdog_state_json, last_heartbeat_at, created_at,
-                                started_at, finished_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                bundle_path, result_files_json, error_message, slot_used,
+                                worker_session_id, origin, mandate_json, checkpoint_json,
+                                result_refs_json, watchdog_state_json, last_heartbeat_at,
+                                created_at, started_at, finished_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["task_id"],
@@ -2167,6 +2184,8 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec.get("current_step", ""),
                                 rec.get("result_summary", ""),
                                 rec.get("artifact_path", ""),
+                                rec.get("bundle_path", ""),
+                                rec.get("result_files_json", "[]"),
                                 rec.get("error_message", ""),
                                 rec.get("slot_used", "bg_task"),
                                 rec.get("worker_session_id", ""),
@@ -2321,6 +2340,8 @@ def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
         current_step=str(row["current_step"] or ""),
         result_summary=str(row["result_summary"] or ""),
         artifact_path=str(row["artifact_path"] or ""),
+        bundle_path=str(row["bundle_path"] or "") if "bundle_path" in keys else "",
+        result_files=_parse_str_list(row["result_files_json"]) if "result_files_json" in keys else [],
         error_message=str(row["error_message"] or ""),
         slot_used=str(row["slot_used"] or "bg_task"),
         worker_session_id=str(row["worker_session_id"] or "") if "worker_session_id" in keys else "",
@@ -2422,6 +2443,8 @@ def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
         current_step=str(row["current_step"] or ""),
         result_summary=str(row["result_summary"] or ""),
         artifact_path=str(row["artifact_path"] or ""),
+        bundle_path=str(row["bundle_path"] or "") if "bundle_path" in keys else "",
+        result_files=_parse_str_list(row["result_files_json"]) if "result_files_json" in keys else [],
         error_message=str(row["error_message"] or ""),
         slot_used=str(row["slot_used"] or "bg_task"),
         worker_session_id=str(row["worker_session_id"] or "") if "worker_session_id" in keys else "",

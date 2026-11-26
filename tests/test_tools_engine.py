@@ -475,3 +475,97 @@ async def test_p4_01_shell_remember_for_session_is_scoped_and_blocks_mutating(tm
         "echo hi > out.txt",
     ]
     assert (tmp_path / "out.txt").exists()
+
+
+async def test_circuit_breaker_replies_to_every_tool_call_id() -> None:
+    """A provider rejects the wrap-up request if an assistant tool_calls
+    message is missing tool replies for any declared id."""
+    cfg = AppConfig()
+    broken = DummyTool("flaky_tool", risk="safe", fail=True)
+    reg = ToolRegistry([broken])
+    router = ScriptedToolRouter(
+        cfg,
+        [
+            LLMCompletionResult(
+                tool_calls=[
+                    ToolCallRequest(id="c1", name="flaky_tool", arguments_json="{}"),
+                    ToolCallRequest(id="c2", name="flaky_tool", arguments_json="{}"),
+                    ToolCallRequest(id="c3", name="flaky_tool", arguments_json="{}"),
+                ]
+            ),
+            LLMCompletionResult(content="工具连续报错，已止损。"),
+        ],
+    )
+    res = await ToolExecutor(router).run(
+        messages=[{"role": "user", "content": "run"}],
+        registry=reg,
+        ctx=ToolExecutionContext(turn_id="t4", session_id="s1", config=cfg),
+        max_steps=6,
+    )
+    assert res.stopped_reason == "circuit_breaker"
+    assert len(broken.calls) == 2
+
+    wrap_messages = router.recorded_messages[-1]
+    assistant_ids = {
+        tc["id"]
+        for m in wrap_messages
+        if m.get("role") == "assistant"
+        for tc in (m.get("tool_calls") or [])
+    }
+    tool_ids = {m.get("tool_call_id") for m in wrap_messages if m.get("role") == "tool"}
+    assert assistant_ids == {"c1", "c2", "c3"}
+    assert assistant_ids <= tool_ids
+    assert any("SKIPPED" in str(m.get("content", "")) for m in wrap_messages if m.get("role") == "tool")
+
+
+async def test_mandate_covers_doc_write_without_second_approval(tmp_path: Path) -> None:
+    cfg = AppConfig()
+    doc_tool = DummyTool("doc_generate", risk="confirm")
+    reg = ToolRegistry([doc_tool])
+    router = ScriptedToolRouter(
+        cfg,
+        [
+            LLMCompletionResult(
+                tool_calls=[ToolCallRequest(id="d1", name="doc_generate", arguments_json='{"x": "1"}')]
+            ),
+            LLMCompletionResult(content="已生成。"),
+        ],
+    )
+    from brain.worker import WorkerMandate
+
+    ctx = ToolExecutionContext(
+        turn_id="t5",
+        session_id="s1",
+        config=cfg,
+        worker_mandate=WorkerMandate(
+            origin="explicit_user",
+            allowed_packs=["doc_office"],
+            writable_paths=[str(tmp_path)],
+        ),
+    )
+    res = await ToolExecutor(router).run(
+        messages=[{"role": "user", "content": "生成"}],
+        registry=reg,
+        ctx=ctx,
+    )
+    assert res.stopped_reason == "completed"
+    assert len(doc_tool.calls) == 1
+
+
+def test_compact_dispatch_goal_keeps_business_paragraph() -> None:
+    from brain.tools.orchestration_tools import compact_dispatch_goal
+
+    goal = (
+        "在目录 /tmp/invoices 下把行程单按 Excel 序号重命名一份副本，并核对缺 PDF 的项目；原件只读。\n"
+        "步骤要求：\n"
+        "1. 先枚举目录内所有 xlsx 和 pdf。\n"
+        "2. 调用 doc_match_rename，参数 table_path=... output_dir=...\n"
+        "3. 生成核对报告。"
+    )
+    compact = compact_dispatch_goal(goal)
+    assert compact.startswith("在目录 /tmp/invoices")
+    assert "doc_match_rename" not in compact
+    assert "步骤要求" not in compact
+
+    plain = "帮我查一下今天的汇率并给出结论。"
+    assert compact_dispatch_goal(plain) == plain

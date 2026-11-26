@@ -816,6 +816,47 @@
           "default": "",
           "title": "Provider",
           "type": "string"
+        },
+        "file_ext": {
+          "default": "",
+          "title": "File Ext",
+          "type": "string"
+        },
+        "summary_badge": {
+          "default": "",
+          "title": "Summary Badge",
+          "type": "string"
+        },
+        "preview_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Preview Columns",
+          "type": "array"
+        },
+        "preview_rows": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Preview Rows",
+          "type": "array"
+        },
+        "sheet_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sheet Names",
+          "type": "array"
+        },
+        "sheet_previews": {
+          "items": {
+            "$ref": "#/$defs/SheetPreview"
+          },
+          "title": "Sheet Previews",
+          "type": "array"
         }
       },
       "required": [
@@ -1200,6 +1241,34 @@
         "turn_id"
       ],
       "title": "SensesCaptureRequestPayload",
+      "type": "object"
+    },
+    "SheetPreview": {
+      "properties": {
+        "name": {
+          "default": "",
+          "title": "Name",
+          "type": "string"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "rows": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "title": "SheetPreview",
       "type": "object"
     },
     "SourceItem": {
@@ -1629,6 +1698,25 @@
           },
           "title": "Result Refs",
           "type": "array"
+        },
+        "bundle_path": {
+          "default": "",
+          "title": "Bundle Path",
+          "type": "string"
+        },
+        "result_files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Result Files",
+          "type": "array"
+        },
+        "result_media": {
+          "items": {
+            "$ref": "#/$defs/MediaItem"
+          },
+          "title": "Result Media",
+          "type": "array"
         }
       },
       "required": [
@@ -1677,6 +1765,25 @@
           "default": "",
           "title": "Artifact Path",
           "type": "string"
+        },
+        "bundle_path": {
+          "default": "",
+          "title": "Bundle Path",
+          "type": "string"
+        },
+        "result_files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Result Files",
+          "type": "array"
+        },
+        "result_media": {
+          "items": {
+            "$ref": "#/$defs/MediaItem"
+          },
+          "title": "Result Media",
+          "type": "array"
         },
         "error_message": {
           "default": "",

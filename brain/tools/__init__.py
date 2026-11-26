@@ -12,6 +12,14 @@ from brain.tools.bg_task_tools import (
     BgTaskSubmitTool,
 )
 from brain.tools.clipboard_tool import ClipboardTool
+from brain.tools.doc_tools import (
+    DocGenerateTool,
+    DocInspectTool,
+    DocMatchRenameTool,
+    DocRenameTool,
+    PDFOpsTool,
+    SheetTransformTool,
+)
 from brain.tools.desktop_io import (
     BatchPathContextStore,
     FinderGetSelectionTool,
@@ -85,6 +93,12 @@ def build_default_tool_registry(
     ))
     registry.register(InboxScanTool(config))
     registry.register(WorkHistoryInspectTool())
+    registry.register(DocInspectTool())
+    registry.register(SheetTransformTool())
+    registry.register(PDFOpsTool())
+    registry.register(DocGenerateTool())
+    registry.register(DocRenameTool())
+    registry.register(DocMatchRenameTool())
     registry.register(AskUserTool())
     registry.register(OpenQimingxingUITool())
     registry.register(ScheduleTaskTool())
@@ -121,6 +135,10 @@ __all__ = [
     "CancelTaskTool",
     "ClipboardTool",
     "DeepSeekSearchProvider",
+    "DocGenerateTool",
+    "DocInspectTool",
+    "DocMatchRenameTool",
+    "DocRenameTool",
     "FinderGetSelectionTool",
     "FileTokenStorage",
     "ImageSearchTool",
@@ -144,8 +162,10 @@ __all__ = [
     "MacOSRemindersCreateTool",
     "MacOSRemindersListTool",
     "OpenQimingxingUITool",
+    "PDFOpsTool",
     "ScheduleTaskTool",
     "SearchProvider",
+    "SheetTransformTool",
     "ShellTool",
     "Tool",
     "ToolExecutionContext",

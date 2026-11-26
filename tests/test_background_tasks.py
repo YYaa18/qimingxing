@@ -301,4 +301,230 @@ def test_bg_task_confirm_approval_and_foreground_chat_over_ws(tmp_path: Path) ->
 
             r_list = client.get("/api/tasks")
             assert r_list.status_code == 200
-            assert any(t["task_id"] == task_rec.task_id and t["status"] == "completed" for t in r_list.json()["tasks"])
+            listed = [t for t in r_list.json()["tasks"] if t["task_id"] == task_rec.task_id]
+            assert listed and listed[0]["status"] == "completed"
+            assert "bundle_path" in listed[0] and "result_files" in listed[0]
+            assert "result_media" in listed[0]
+
+
+class _MockWriteRouter(LLMRouter):
+    def __init__(self, config: AppConfig, output_path: Path) -> None:
+        super().__init__(config)
+        self.output_path = output_path
+
+    async def complete_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        profile_name: Optional[str] = None,
+        on_text_delta=None,
+    ) -> LLMCompletionResult:
+        if not any(m.get("role") == "tool" for m in messages):
+            return LLMCompletionResult(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc_write_1",
+                        name="dummy_produce_tool",
+                        arguments_json=json.dumps({"output_path": str(self.output_path)}),
+                    )
+                ],
+                usage=LLMUsage(
+                    prompt_tokens=90,
+                    completion_tokens=12,
+                    total_tokens=102,
+                    model="mock-bg",
+                    profile="mock_local",
+                    provider="mock",
+                ),
+            )
+        return LLMCompletionResult(
+            content="已完成核对，共生成 2 个文件。",
+            tool_calls=[],
+            usage=LLMUsage(
+                prompt_tokens=120,
+                completion_tokens=20,
+                total_tokens=140,
+                model="mock-bg",
+                profile="mock_local",
+                provider="mock",
+            ),
+        )
+
+
+class _ProduceTool(Tool):
+    name = "dummy_produce_tool"
+    description = "Writes one deterministic CSV for result-bundle tests."
+    parameters_schema = {
+        "type": "object",
+        "properties": {"output_path": {"type": "string"}},
+        "required": ["output_path"],
+    }
+    default_risk: RiskLevel = "safe"
+
+    async def execute(self, arguments: Dict[str, Any], ctx: ToolExecutionContext) -> ToolResult:
+        out = Path(str(arguments["output_path"]))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("序号,票号\n1,123\n2,456\n", encoding="utf-8")
+        return ToolResult(
+            ok=True,
+            output=f"已写入 {out}",
+            summary="已写入 1 个文件",
+            metadata={"media_paths": [str(out)]},
+        )
+
+
+async def test_bg_task_result_bundle_and_attachments(tmp_path: Path) -> None:
+    """A finished task exposes a folder bundle and attachment media, and
+    read-only inspection never leaks input files into the results."""
+
+    cfg = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="mock-v1")},
+    )
+    cfg.memory.sqlite_path = str(tmp_path / "bg_bundle.db")
+    backend = create_memory_backend(cfg.memory)
+    await backend.initialize()
+
+    out_path = tmp_path / "deliverables" / "核对结果.csv"
+    router = _MockWriteRouter(cfg, out_path)
+    registry = build_default_tool_registry(cfg)
+    registry.register(_ProduceTool())
+    statuses: List[Any] = []
+
+    async def _on_status(payload) -> None:
+        statuses.append(payload)
+
+    runner = BackgroundTaskRunner(
+        backend,
+        router,
+        cfg,
+        registry,
+        artifact_dir=tmp_path / "artifacts",
+        on_task_status=_on_status,
+    )
+    try:
+        rec = await runner.submit(
+            title="产物包测试",
+            goal_prompt="生成核对结果",
+            source_session_id="s_bundle",
+        )
+        cur = None
+        for _ in range(100):
+            cur = await runner.get_task(rec.task_id)
+            if cur is not None and cur.status in ("completed", "failed"):
+                break
+            await asyncio.sleep(0.05)
+        assert cur is not None and cur.status == "completed", cur
+        bundle = Path(cur.bundle_path)
+        assert bundle == (tmp_path / "artifacts" / rec.task_id).resolve()
+        assert Path(cur.artifact_path) == bundle / "report.md"
+        assert Path(cur.artifact_path).is_file()
+        names = {Path(p).name for p in cur.result_files}
+        assert "report.md" in names
+        assert "核对结果.csv" in names
+        # The delivered copy lives inside the bundle, while the original output
+        # stays where the write tool put it.
+        copied = bundle / "核对结果.csv"
+        assert copied.is_file() and copied.read_text(encoding="utf-8").startswith("序号")
+        assert out_path.is_file()
+
+        terminal = [p for p in statuses if p.task_id == rec.task_id and p.status == "completed"]
+        assert terminal
+        payload = terminal[-1]
+        assert payload.bundle_path == cur.bundle_path
+        assert payload.result_files == cur.result_files
+        assert payload.result_media
+        csv_media = next(m for m in payload.result_media if m.local_path.endswith("核对结果.csv"))
+        assert csv_media.kind == "file"
+        assert csv_media.file_ext == "csv"
+
+        # Read-only inspection reports its input as media, but that must not be
+        # collected as a produced artifact.
+        from brain.tools.base import ToolTraceStep
+
+        inspected = tmp_path / "input.xlsx"
+        inspected.write_bytes(b"not-a-real-xlsx")
+        steps = [
+            ToolTraceStep(
+                step=1,
+                tool_name="doc_inspect",
+                arguments={"path": str(inspected)},
+                risk_level="safe",
+                status="ok",
+                media_paths=[str(inspected)],
+            ),
+            ToolTraceStep(
+                step=2,
+                tool_name="sheet_transform",
+                arguments={"output_path": str(out_path)},
+                risk_level="confirm",
+                status="ok",
+                media_paths=[str(out_path)],
+            ),
+        ]
+        empty = tmp_path / "empty.csv"
+        empty.write_text("", encoding="utf-8")
+        scratch = tmp_path / "_scratch.csv"
+        scratch.write_text("x", encoding="utf-8")
+        interim = tmp_path / "汇总块（中间文件）.csv"
+        interim.write_text("x", encoding="utf-8")
+        sheet_tmp = tmp_path / "sheet_7aa8afab0a.csv"
+        sheet_tmp.write_text("x", encoding="utf-8")
+        steps[1].media_paths.extend([str(empty), str(scratch), str(interim), str(sheet_tmp)])
+        collected = BackgroundTaskRunner._collect_result_files(steps)
+        assert collected == [str(out_path.resolve())]
+    finally:
+        await runner.shutdown()
+        await backend.close()
+
+
+def test_clean_result_narration_drops_process_preface() -> None:
+    from brain.task_runner import clean_result_narration
+
+    assert clean_result_narration("我先列出该目录下的全部文件。## 结论\n\nExcel 共 152 行。") == "Excel 共 152 行。"
+    assert clean_result_narration("我先列出该目录下的全部文件。\n\nExcel 共 152 行。") == "Excel 共 152 行。"
+    # A conclusion-only sentence must not be blanked out.
+    assert clean_result_narration("现在给出结论：全部完成。") == "现在给出结论：全部完成。"
+    assert clean_result_narration("** 共 2 张 PDF，全部匹配成功。") == "共 2 张 PDF，全部匹配成功。"
+
+    from brain.task_runner import result_summary_preview
+
+    long_text = "第一句结论。" * 100
+    preview = result_summary_preview(long_text)
+    assert len(preview) <= 501
+    assert preview.endswith("。\n…")
+    assert result_summary_preview("短结论。") == "短结论。"
+
+
+def test_with_doc_key_facts_prefixes_deterministic_numbers() -> None:
+    from brain.task_runner import with_doc_key_facts
+    from brain.tools.base import ToolTraceStep
+
+    step = ToolTraceStep(
+        step=1,
+        tool_name="doc_match_rename",
+        arguments={},
+        risk_level="confirm",
+        status="ok",
+        summary="Excel 152 · 匹配 2 · PDF 未匹配 0 · 缺 PDF 149",
+    )
+    summary = with_doc_key_facts("- 匹配结果：两个副本。", [step])
+    assert summary.startswith("关键数字：Excel 152 · 匹配 2")
+    assert "匹配结果" in summary
+    # An existing results-first summary is not duplicated.
+    already = "关键数字：Excel 152\n\n其余说明。"
+    assert with_doc_key_facts(already, [step]) == already
+
+
+def test_friendly_failure_fallback_hides_raw_errors() -> None:
+    from brain.task_runner import friendly_failure_fallback
+
+    raw = 'LLMError: 上游 API 返回 HTTP 400 {"error":{"message":"An assistant tool_calls..."}}'
+    text = friendly_failure_fallback(raw)
+    assert "LLMError" not in text
+    assert "HTTP" not in text
+    assert "{" not in text
+    assert len(text) <= 40
+    assert "重试" in text or "工作区" in text

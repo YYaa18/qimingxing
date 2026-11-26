@@ -63,7 +63,7 @@ def test_ws_origin_guard_rejects_evil_origins(tmp_path: Path) -> None:
             )
             welcome = json.loads(ws.receive_text())
             assert welcome["type"] == "system.welcome"
-            assert welcome["payload"]["server_version"] == "1.0.1"
+            assert welcome["payload"]["server_version"] == "1.0.2"
 
 
 def test_ui_state_ui_command_and_approval_reconnect_sync(tmp_path: Path) -> None:

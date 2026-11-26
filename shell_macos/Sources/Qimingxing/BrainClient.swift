@@ -29,6 +29,7 @@ final class BrainClient: ObservableObject {
     @Published var taskWatchdogAlerts: [String: String] = [:]
     @Published var pendingApprovals: [PendingApprovalItem] = []
     @Published var artifactCapsules: [ArtifactCapsuleItem] = []
+    private var terminalTaskStatuses: [String: String] = [:]
 
     var onAvatarEnabledChanged: ((Bool) -> Void)?
     var onShortcutsSynced: ((String, String, String) -> Void)?
@@ -377,9 +378,13 @@ final class BrainClient: ObservableObject {
                     blockReason: existing?.blockReason ?? "",
                     watchdogReason: existing?.watchdogReason ?? taskWatchdogAlerts[taskId] ?? "",
                     followupAck: existing?.followupAck ?? taskFollowupAcks[taskId] ?? "",
-                    resultRefs: existing?.resultRefs ?? []
+                    resultRefs: existing?.resultRefs ?? [],
+                    bundlePath: (payload["bundle_path"] as? String) ?? existing?.bundlePath ?? "",
+                    resultMedia: Self.mediaItems(from: payload["result_media"])
+                        ?? existing?.resultMedia ?? []
                 )
                 upsertBackgroundTask(item)
+                synthesizeTaskResultIfNeeded(taskId: taskId)
             }
 
         case "task.state_changed":
@@ -397,9 +402,34 @@ final class BrainClient: ObservableObject {
                     blockReason: (payload["block_reason"] as? String) ?? "",
                     watchdogReason: existing?.watchdogReason ?? "",
                     followupAck: existing?.followupAck ?? "",
-                    resultRefs: (payload["result_refs"] as? [String]) ?? existing?.resultRefs ?? []
+                    resultRefs: (payload["result_refs"] as? [String]) ?? existing?.resultRefs ?? [],
+                    bundlePath: (payload["bundle_path"] as? String) ?? existing?.bundlePath ?? "",
+                    resultMedia: Self.mediaItems(from: payload["result_media"])
+                        ?? existing?.resultMedia ?? []
                 )
                 upsertBackgroundTask(item)
+                let previous = terminalTaskStatuses[taskId]
+                terminalTaskStatuses[taskId] = item.status
+                if ["completed", "failed"].contains(item.status), previous != item.status {
+                    let message = friendlyTaskMessage(item)
+                    let toastTitle = item.status == "completed"
+                        ? "任务完成 · \(item.title)"
+                        : "任务失败 · \(item.title)"
+                    TaskToastController.shared.show(
+                        title: toastTitle,
+                        message: message,
+                        isError: item.status == "failed"
+                    ) {
+                        NotificationCenter.default.post(name: .qmxOpenWorkspace, object: nil)
+                    }
+                    desktopActions.showProactiveNotification(
+                        title: toastTitle,
+                        body: message,
+                        taskId: item.taskId,
+                        announce: false
+                    )
+                }
+                synthesizeTaskResultIfNeeded(taskId: taskId)
             }
 
         case "task.followup_acked":
@@ -677,6 +707,84 @@ final class BrainClient: ObservableObject {
         }
     }
 
+    static func mediaItems(from value: Any?) -> [MediaItem]? {
+        guard let raw = value as? [[String: Any]] else { return nil }
+        return raw.compactMap(MediaItem.init(dict:))
+    }
+
+    /// Short human-facing line for the completion banner. It never falls back
+    /// to error_message: users should not see HTTP codes or stack traces here.
+    private func friendlyTaskMessage(_ item: BackgroundTaskItem) -> String {
+        var raw = item.resultSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.isEmpty {
+            return item.status == "completed"
+                ? "任务已完成，产物见下方附件。"
+                : "任务没有完成，详情可在工作区查看。"
+        }
+        raw = raw
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .replacingOccurrences(of: "^#{1,4}\\s*", with: "", options: .regularExpression)
+        let lines = raw
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let headings: Set<String> = ["关键数字", "结论", "结果", "摘要", "交付结果", "完成"]
+        var first = lines.first ?? raw
+        if headings.contains(first), lines.count > 1 {
+            first = lines.dropFirst().prefix(2).joined(separator: " · ")
+        }
+        var text = first.hasPrefix("- ") ? String(first.dropFirst(2)) : first
+        text = text.replacingOccurrences(of: " · - ", with: " · ")
+        if text.count > 96 {
+            let cut = text.index(text.startIndex, offsetBy: 96)
+            text = String(text[..<cut]) + "…"
+        }
+        return text
+    }
+
+    /// A finished background task becomes a real conversation turn so its
+    /// produced files appear as attachments, not as a bare path. The entry is
+    /// keyed by task id, so repeated status events update it instead of
+    /// stacking duplicates.
+    private func synthesizeTaskResultIfNeeded(taskId: String) {
+        guard let item = backgroundTasks.first(where: { $0.taskId == taskId }) else { return }
+        guard item.status == "completed" || item.status == "failed" else { return }
+        let text: String
+        if item.status == "completed" {
+            if !item.resultSummary.isEmpty {
+                text = item.resultSummary
+            } else {
+                text = item.resultMedia.isEmpty ? "任务已完成。" : "任务已完成，产物见下方附件。"
+            }
+        } else {
+            text = item.resultSummary.isEmpty
+                ? "任务没有完成，详情可在工作区查看。"
+                : item.resultSummary
+        }
+        let turnId = "task_\(taskId)"
+        if let idx = messages.firstIndex(where: { $0.turnId == turnId && !$0.isUser }) {
+            guard messages[idx].text != text || messages[idx].media != item.resultMedia else {
+                return
+            }
+            messages[idx].text = text
+            messages[idx].media = item.resultMedia
+            return
+        }
+        guard !text.isEmpty || !item.resultMedia.isEmpty else { return }
+        messages.append(
+            ChatEntry(
+                id: "task_\(taskId)_result",
+                turnId: turnId,
+                isUser: false,
+                meta: item.status == "completed" ? "启明星 · 后台任务已完成" : "启明星 · 后台任务失败",
+                text: text,
+                isStreaming: false,
+                media: item.resultMedia
+            )
+        )
+    }
+
     // MARK: - HTTP REST APIs
 
     func refreshTasks() async {
@@ -694,7 +802,9 @@ final class BrainClient: ObservableObject {
                         currentStep: (t["current_step"] as? String) ?? "",
                         resultSummary: (t["result_summary"] as? String) ?? "",
                         artifactPath: (t["artifact_path"] as? String) ?? "",
-                        errorMessage: (t["error_message"] as? String) ?? ""
+                        errorMessage: (t["error_message"] as? String) ?? "",
+                        bundlePath: (t["bundle_path"] as? String) ?? "",
+                        resultMedia: Self.mediaItems(from: t["result_media"]) ?? []
                     )
                 }
             }

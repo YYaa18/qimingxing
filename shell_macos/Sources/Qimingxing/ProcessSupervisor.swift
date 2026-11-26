@@ -87,7 +87,7 @@ final class ProcessSupervisor: ObservableObject {
            !ver.isEmpty {
             self.appVersion = ver
         } else {
-            self.appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+            self.appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.2"
         }
     }
 

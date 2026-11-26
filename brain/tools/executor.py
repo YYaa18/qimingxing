@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from brain.context_builder import estimate_tokens
-from brain.llm_router import LLMRouter, LLMUsage
+from brain.llm_router import LLMError, LLMRouter, LLMUsage
 from brain.tools.base import ToolExecutionContext, ToolResult, ToolTraceStep
 from brain.tools.registry import ToolRegistry
 from brain.utils import truncate_head_tail
@@ -24,6 +24,13 @@ _ROUTER_APP_LOCKS = {
     "macos_reminders_create": "app:reminders",
     "macos_mail_draft": "app:mail",
 }
+
+# Document writes already covered by the user's task_dispatch approval (an
+# explicit-user mandate with writable roots). Re-prompting for every generated
+# file would make background work impossible to leave unattended.
+_MANDATE_COVERED_WRITE_TOOLS = frozenset(
+    {"doc_generate", "doc_rename", "doc_match_rename", "pdf_ops", "sheet_transform"}
+)
 
 
 @dataclass
@@ -102,8 +109,13 @@ class ToolExecutor:
             ctx.usage_collector.append(res.usage)
 
             if not res.tool_calls:
+                if "<｜｜DSML" in (res.content or ""):
+                    raise LLMError(
+                        "UNPARSED_DSML_TOOL_CALL",
+                        "模型返回了未解析的工具调用标记（DSML），请重试。",
+                    )
                 return ToolLoopResult(
-                    final_text="".join(spoken_parts),
+                    final_text=(res.content or "".join(spoken_parts)),
                     trace_steps=trace_steps,
                     usages=usages,
                     stopped_reason="completed",
@@ -142,6 +154,17 @@ class ToolExecutor:
             for tc in res.tool_calls:
                 if ctx.is_cancelled():
                     raise asyncio.CancelledError("Turn cancelled during tool dispatch")
+                if circuit_broken:
+                    # The assistant message declared this tool_call; providers
+                    # reject the next request unless every id gets a tool reply.
+                    working_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": "SKIPPED: 同一轮后续工具调用因熔断未执行。",
+                        }
+                    )
+                    continue
 
                 called_tools.append(tc.name)
                 args = tc.parsed_arguments()
@@ -229,6 +252,15 @@ class ToolExecutor:
                         circuit_broken = True
                         stopped_reason = "circuit_breaker"
                     continue
+
+                if (
+                    risk == "confirm"
+                    and ctx.worker_mandate is not None
+                    and ctx.worker_mandate.origin == "explicit_user"
+                    and tc.name in _MANDATE_COVERED_WRITE_TOOLS
+                    and ctx.worker_mandate.writable_paths
+                ):
+                    risk = "safe"
 
                 scope_key = tool.approval_scope_key(args)
                 if risk == "confirm" and not (
@@ -401,7 +433,6 @@ class ToolExecutor:
                     )
                     circuit_broken = True
                     stopped_reason = "circuit_breaker"
-                    break
 
             if circuit_broken:
                 break

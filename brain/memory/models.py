@@ -422,6 +422,8 @@ class BackgroundTaskRecord:
     current_step: str = ""
     result_summary: str = ""
     artifact_path: str = ""
+    bundle_path: str = ""
+    result_files: List[str] = field(default_factory=list)
     error_message: str = ""
     slot_used: str = "bg_task"
     worker_session_id: str = ""

@@ -262,6 +262,11 @@ struct WorkspaceWingView: View {
                 }
             }
             .frame(height: 2)
+
+            if let media = task.media, !media.isEmpty {
+                MediaStripView(media: media, mode: .compact, contextTitle: "任务产物")
+                    .padding(.top, 2)
+            }
         }
     }
 
