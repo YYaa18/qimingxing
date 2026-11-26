@@ -795,11 +795,6 @@ struct QuickEntryRootView: View {
             )
 
             HStack(spacing: 10) {
-                Image(systemName: "mic")
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(QMXTheme.textSecondary)
-                    .help("按住右 Option 说话")
-
                 Button(action: onClose) {
                     Text("esc")
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -1050,6 +1045,27 @@ struct QuickEntryRootView: View {
             }
 
             Spacer()
+
+            Button {
+                // Voice input is not wired to a microphone pipeline yet.
+                // Keep the microphone target in place for the upcoming PTT work.
+            } label: {
+                Image(systemName: "mic")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(.qmxIcon)
+            .help("语音输入（即将支持）")
+            .accessibilityLabel("语音输入")
+
+            Button {
+                brainClient.setTTSEnabled(!brainClient.ttsEnabled)
+            } label: {
+                Image(systemName: brainClient.ttsEnabled ? "speaker.wave.2.fill" : "speaker.slash")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(QMXButtonStyle(variant: .icon, isActive: brainClient.ttsEnabled))
+            .help(brainClient.ttsEnabled ? "关闭朗读回答" : "朗读回答")
+            .accessibilityLabel(brainClient.ttsEnabled ? "关闭朗读回答" : "朗读回答")
 
             Button {
                 pickAttachmentFile()
