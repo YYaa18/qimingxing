@@ -2,7 +2,15 @@
 
 - **目标版本**：`v1.0.0`（分支 `feat/ga-1.0`）
 - **版本唯一口径**：`version.txt` = `1.0.0`（同步至 `pyproject.toml`、`brain/hub.py:SERVER_VERSION`、`Qimingxing.app/Contents/Info.plist` 与 `system.hello.app_version`）
-- **应用产物**：`dist/Qimingxing.app`（`166M`，原生 `arm64` Swift 6 壳，默认不打包/不启动 Godot）
+- **应用产物**：`dist/Qimingxing.app`（原生 `arm64` Swift 6 壳，默认不打包/不启动 Godot）
+
+> **最终签收状态（2026-11-26，`v1.0.0-ga`）**
+>
+> - 最终分支：`feat/ga-1.0`；在 GA 基线上合并 provider adapter、模型 SQLite 配置、KV 缓存观测、Tavily 图片搜索、工作区媒体与 MediaPreview。
+> - 自动化：`pytest` **191 passed**；`brain.memory.cli eval` **18 / 18**；`swift build -c release --arch arm64` 通过。
+> - 新增媒体链路：`SourceItem` / `MediaItem`、`output.turn_end.sources/media`、持久 `data/media/image_search`、工作区媒体侧翼与全量详情、媒体预览双标签侧翼/独立窗口拆分停靠。
+> - 已验证：真实 Tavily 中文搜图；单击打开预览、双击 QuickLook、方向键切图、拆分/停靠、新回答提示条；Tavily Key 通过设置页 0600 保存并热更新。
+> - 已知限制：Tavily 顶层图片可能没有来源页；静态图 EXIF 未做统一剥离；本机为 ad-hoc 签名，分发前仍需 Developer ID 签名与公证。
 
 ---
 
@@ -29,7 +37,7 @@
 
 | 验收项目 | 验证方式 | 结果 |
 | --- | --- | --- |
-| 全量单元测试 | `.venv/bin/pytest -q` | **111 passed**（100 基线 + 11 新增 GA 1.0 用例，100% 通过） |
+| 全量单元测试 | `.venv/bin/pytest -q` | **191 passed**（最终 GA 1.0 回归） |
 | 个人金标回归评测 | `.venv/bin/python -m brain.memory.cli eval` | **18 / 18 通过（100.0%）** |
 | Web 调试台语法检查 | `node --check body_web/app.js` | **通过（退出码 0）** |
 | Swift 6 原生壳编译 | `cd shell_macos && swift build -c release --arch arm64` | **通过（0 错误 0 警告）** |

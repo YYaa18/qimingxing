@@ -1,6 +1,6 @@
-# 启明星（Qimingxing）— MVP 3.0
+# 启明星（Qimingxing）— GA 1.0
 
-通用 AI 桌面数字人助手 — 阶段三（MVP 3.0：上下文工程优化 + 可演进长期记忆底座）实现。
+通用 AI 桌面数字人助手 — v1.0.0（原生 macOS SwiftUI 壳 + Python Brain + 长期记忆/上下文工程 + 联网搜索与富媒体）。
 
 ## 架构概览
 
@@ -11,10 +11,12 @@
   - `context_builder.py`：Prefix-Cache 友好 4 层静动分层 Prompt 拼装（`L0 静态人设` → `L1 稳定画像` → `L2 滚动摘要/近期原文` → `L3 召回记忆/焦点/OCR`）、硬性 Token 预算分配与超长 OCR 头尾保留截断。
   - `memory/`：后端无关的三层长期记忆子包（`MemoryBackend` + 默认 `SQLiteMemoryStore` WAL/FTS5 + 动态分类注册表 `memory_categories` + 热/冷消息分离 `messages_archive`、`NullEmbeddingProvider` + `OpenAICompatibleEmbeddingProvider` RRF 混合留槽、`MemoryExtractor` 异步批量/口令提炼与 `ADD/UPDATE/DELETE/NONE` 冲突消解、日常闲聊分级沉淀、会话滚动压缩、脱敏桌面足迹沉淀、运维 `cli.py`）。
   - `hub.py`、`artifact_store.py`、`context_store.py`、`intent_detector.py`、`screen_router.py`、`stream_parser.py`、`llm_router.py`。
+  - `rich_content.py`、`media_cache.py`、`tools/image_search.py`：结构化来源/媒体元数据、Tavily 图片搜索、受限 HTTPS 下载与持久媒体缓存。
 - `senses/`：跨平台真实桌面感官客户端（macOS / Windows 双平台 `WindowProvider` 极薄隔离 + `PrivacyGuard` 三档隐私模式与敏感黑名单 + `ScreenCapture` 跨平台截屏压缩上传）。
 - `mock_senses/`：离线模拟感官客户端（供无桌面环境或单测使用）。
 - `body_web/`：零构建三文件前端（`index.html`、`app.js`、`styles.css`），阶段三零前端改动。
-- `tests/`：全量自动化测试集（45 项用例，覆盖阶段一至阶段三、动态分类与冷热分离及 5,000 条 FTS5 性能基准）。
+- `shell_macos/`：原生 Swift 6 壳，包含 Quick Entry、Live Line、工作区/媒体预览双宿主、设置中心、审批与菜单栏。
+- `tests/`：全量自动化测试集（191 项用例，覆盖上下文、记忆、联网、图片搜索、富媒体与壳侧模型/缓存约束）。
 
 ## 快速开始
 
