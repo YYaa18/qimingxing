@@ -24,6 +24,7 @@ from brain.tools.desktop_io import (
 )
 from brain.tools.executor import ToolExecutor, ToolLoopResult
 from brain.tools.history_tool import WorkHistoryInspectTool
+from brain.tools.image_search import ImageSearchTool, TavilyImageSearchProvider
 from brain.tools.macos_apps import (
     MacOSBrowserTabsTool,
     MacOSCalendarCreateTool,
@@ -64,6 +65,9 @@ def build_default_tool_registry(
         provider = search_provider or DeepSeekSearchProvider(config.tools.web_search)
         registry.register(WebSearchTool(config.tools.web_search, provider=provider))
         registry.register(WebFetchTool(config.tools.web_search, provider=provider))
+
+    if config.tools.image_search.enabled:
+        registry.register(ImageSearchTool(config.tools.image_search))
 
     if config.tools.shell.enabled:
         registry.register(ShellTool(config.tools.shell))
@@ -109,6 +113,7 @@ __all__ = [
     "DeepSeekSearchProvider",
     "FinderGetSelectionTool",
     "FileTokenStorage",
+    "ImageSearchTool",
     "InboxScanTool",
     "ListTasksTool",
     "MCPClientManager",
@@ -135,6 +140,7 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "ToolTraceStep",
+    "TavilyImageSearchProvider",
     "WebFetchTool",
     "WebSearchTool",
     "WorkHistoryInspectTool",

@@ -22,6 +22,9 @@ class ToolTraceStep:
     summary: str = ""
     output_preview: str = ""
     elapsed_ms: int = 0
+    media_paths: List[str] = field(default_factory=list)
+    media_items: List[Dict[str, Any]] = field(default_factory=list)
+    sources: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

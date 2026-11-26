@@ -160,6 +160,16 @@ tools:
     timeout_seconds: 15
     max_results: 5
     max_fetch_chars: 6000
+  image_search:
+    enabled: true
+    provider: "tavily"
+    base_url: "https://api.tavily.com"
+    api_key: "${TAVILY_API_KEY}"
+    timeout_seconds: 20
+    max_results: 4
+    max_bytes: 10485760
+    safe_search: true
+    cache_dir: "data/media/image_search"
   shell:
     enabled: true
     safe_commands:

@@ -292,6 +292,11 @@ class MediaItem(ProtocolModel):
     height: int = 0
     duration_sec: float = 0.0
     size_bytes: int = 0
+    source_url: str = ""
+    source_title: str = ""
+    license: str = ""
+    attribution: str = ""
+    provider: str = ""
 
 
 class OutputTurnEndPayload(ProtocolModel):

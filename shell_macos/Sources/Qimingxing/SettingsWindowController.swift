@@ -251,6 +251,10 @@ final class SettingsViewStore: ObservableObject {
     @Published var geminiThinkingLevel: String = "auto"
     @Published var geminiGoogleSearch: Bool = false
     @Published var geminiURLContext: Bool = false
+    @Published var imageSearchEnabled: Bool = true
+    @Published var imageSearchKey: String = ""
+    @Published var imageSearchHasKey: Bool = false
+    @Published var imageSearchMasked: String = ""
     @Published var pttHotkey: String = "right_option"
     @Published var chatInputHotkey: String = "option+space"
     @Published var cancelHotkey: String = "option+esc"
@@ -304,6 +308,11 @@ final class SettingsViewStore: ObservableObject {
                 geminiThinkingLevel = (gem["thinking_level"] as? String) ?? "auto"
                 geminiGoogleSearch = (gem["google_search"] as? Bool) ?? false
                 geminiURLContext = (gem["url_context"] as? Bool) ?? false
+            }
+            if let img = settings["image_search"] as? [String: Any] {
+                imageSearchEnabled = (img["enabled"] as? Bool) ?? true
+                imageSearchHasKey = (img["has_key"] as? Bool) ?? false
+                imageSearchMasked = (img["key_masked"] as? String) ?? ""
             }
             if let sc = settings["shortcuts"] as? [String: Any] {
                 pttHotkey = (sc["ptt_hotkey"] as? String) ?? pttHotkey
@@ -380,6 +389,7 @@ final class SettingsViewStore: ObservableObject {
         for index in providers.indices {
             providers[index].draftApiKey = ""
         }
+        imageSearchKey = ""
     }
 }
 
@@ -822,6 +832,33 @@ struct SettingsRootView: View {
                 Toggle("内容安全校验", isOn: $store.deepseekSafety)
                     .frame(minHeight: 40)
                     .help("按 DeepSeek high 级别审核输入输出；会额外消耗少量安全 token，并可能拒答风险内容。")
+            }
+
+            Section("图片搜索") {
+                Toggle("启用 Tavily 图片搜索", isOn: $store.imageSearchEnabled)
+                    .frame(minHeight: 40)
+                    .help("使用 Tavily /search 的 include_images 搜索图片，下载后放入回答下方媒体条；图片会保留来源页面。")
+
+                HStack(spacing: 8) {
+                    Text("Tavily Key")
+                        .font(.system(size: 11))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                        .frame(width: 72, alignment: .leading)
+                    SecureField(
+                        "",
+                        text: $store.imageSearchKey,
+                        prompt: Text(store.imageSearchHasKey ? "已配置 \(store.imageSearchMasked)" : "tvly-…")
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                }
+                .labelsHidden()
+                .frame(minHeight: 34)
+
+                Text("只需要 Tavily API Key；留空会保留已有 Key。图片搜索与 DeepSeek/Gemini 的文本联网是独立开关。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(QMXTheme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("Gemini 能力") {
@@ -1357,6 +1394,11 @@ struct SettingsRootView: View {
                 "thinking_level": store.geminiThinkingLevel,
                 "google_search": store.geminiGoogleSearch,
                 "url_context": store.geminiURLContext
+            ],
+            "image_search": [
+                "enabled": store.imageSearchEnabled,
+                "provider": "tavily",
+                "api_key": store.imageSearchKey
             ],
             "shortcuts": [
                 "ptt_hotkey": store.pttHotkey,

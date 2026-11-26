@@ -67,7 +67,16 @@ struct MediaStripView: View {
             if !images.isEmpty {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
                     ForEach(images) { item in
-                        thumbnailTile(item, width: nil, height: 150)
+                        VStack(alignment: .leading, spacing: 4) {
+                            thumbnailTile(item, width: nil, height: 150)
+                            if let caption = attributionCaption(item) {
+                                Text(caption)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(QMXTheme.textTertiary)
+                                    .lineLimit(1)
+                                    .help(caption)
+                            }
+                        }
                     }
                 }
             }
@@ -122,12 +131,16 @@ struct MediaStripView: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(TactileButtonStyle(haptic: .alignment))
-        .help(item.title)
+        .help(attributionCaption(item) ?? item.title)
         .contextMenu {
             if let path = item.fileURL?.path {
                 Button("快速预览") { _ = DesktopActions().quickLook(path) }
                 Button("复制文件") { _ = DesktopActions().copyFile(path) }
                 Button("在访达中显示") { _ = DesktopActions().revealPath(path) }
+            }
+            if !item.sourceURL.isEmpty, let url = URL(string: item.sourceURL),
+               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                Button("打开来源页面") { NSWorkspace.shared.open(url) }
             }
         }
     }
@@ -246,6 +259,13 @@ struct MediaStripView: View {
             return expanded ? durationLabel(item.durationSec) : "0:00 / \(durationLabel(item.durationSec))"
         }
         return "\(durationLabel(audio.progress)) / \(durationLabel(max(audio.duration, item.durationSec)))"
+    }
+
+    private func attributionCaption(_ item: MediaItem) -> String? {
+        let source = item.sourceTitle.isEmpty ? item.sourceURL : item.sourceTitle
+        let license = item.license.isEmpty ? "" : " · \(item.license)"
+        if source.isEmpty && license.isEmpty { return nil }
+        return source + license
     }
 
     private func durationLabel(_ seconds: Double) -> String {

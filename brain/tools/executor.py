@@ -277,6 +277,7 @@ class ToolExecutor:
                     step_idx,
                     limit,
                 )
+                result_meta = result.metadata if isinstance(result.metadata, dict) else {}
                 trace_steps.append(
                     ToolTraceStep(
                         step=step_idx,
@@ -287,6 +288,21 @@ class ToolExecutor:
                         summary=result.summary,
                         output_preview=result.output[:300],
                         elapsed_ms=elapsed_ms,
+                        media_paths=[
+                            str(item)
+                            for item in (result_meta.get("media_paths") or [])
+                            if str(item).strip()
+                        ],
+                        media_items=[
+                            dict(item)
+                            for item in (result_meta.get("media_items") or [])
+                            if isinstance(item, dict)
+                        ],
+                        sources=[
+                            dict(item)
+                            for item in (result_meta.get("sources") or [])
+                            if isinstance(item, dict)
+                        ],
                     )
                 )
                 tool_output = truncate_head_tail(

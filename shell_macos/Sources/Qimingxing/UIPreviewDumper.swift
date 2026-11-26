@@ -52,7 +52,11 @@ enum UIPreviewDumper {
                 title: "live-line-preview.png",
                 localPath: repoPath + "/body_godot/assets/sprites/happy.png",
                 mimeType: "image/png",
-                width: 256, height: 256, sizeBytes: 49_207
+                width: 256, height: 256, sizeBytes: 49_207,
+                sourceURL: "https://www.weather.com.cn/",
+                sourceTitle: "中央气象台",
+                license: "示例许可",
+                provider: "tavily"
             ),
             MediaItem(
                 mediaId: "media_demo_audio",

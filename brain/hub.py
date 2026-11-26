@@ -1144,6 +1144,16 @@ class Hub:
         inbox_tool = self.tool_registry.get("inbox_scan")
         if inbox_tool is not None and hasattr(inbox_tool, "config"):
             inbox_tool.config = fresh_cfg  # type: ignore[attr-defined]
+        image_tool = self.tool_registry.get("image_search")
+        if fresh_cfg.tools.image_search.enabled:
+            if image_tool is not None and hasattr(image_tool, "update_config"):
+                image_tool.update_config(fresh_cfg.tools.image_search)  # type: ignore[attr-defined]
+            elif image_tool is None:
+                from brain.tools.image_search import ImageSearchTool
+
+                self.tool_registry.register(ImageSearchTool(fresh_cfg.tools.image_search))
+        elif image_tool is not None:
+            self.tool_registry.unregister("image_search")
         await self._broadcast_welcome_to_bodies()
         await self._broadcast_privacy_state()
         await self._broadcast_shortcuts_sync()
@@ -2287,6 +2297,8 @@ class Hub:
             turn_usages: List[LLMUsage] = []
             trace_steps: List[ToolTraceStep] = []
             loop_sources: List[Dict[str, Any]] = []
+            tool_sources: List[Dict[str, Any]] = []
+            tool_media_items: List[Dict[str, Any]] = []
             media_paths: List[str] = []
 
             tts_targets = (
@@ -2502,6 +2514,9 @@ class Hub:
                 tts_queue.put_nowait(None)
 
             for s in trace_steps:
+                media_paths.extend(s.media_paths)
+                tool_media_items.extend(s.media_items)
+                tool_sources.extend(s.sources)
                 raw_out_path = str(s.arguments.get("path") or "").strip()
                 if raw_out_path and os.path.isfile(os.path.expanduser(raw_out_path)):
                     media_paths.append(raw_out_path)
@@ -2518,11 +2533,23 @@ class Hub:
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             assistant_reply = "".join(collected_spoken).strip()
-            raw_sources = loop_sources if use_tools else self.llm_router.last_annotations
+            base_sources = loop_sources if use_tools else self.llm_router.last_annotations
+            raw_sources = list(base_sources) + tool_sources
             assistant_reply, source_payloads = clean_answer_and_sources(
                 assistant_reply, raw_sources
             )
             media_payloads = collect_media(media_paths)
+            if tool_media_items:
+                by_path = {
+                    str(item.get("local_path") or ""): item
+                    for item in media_payloads
+                    if item.get("local_path")
+                }
+                for item in tool_media_items:
+                    path = str(item.get("local_path") or "")
+                    if path:
+                        by_path[path] = item
+                media_payloads = list(by_path.values())[:20]
             turn_sources = [SourceItem(**item) for item in source_payloads]
             turn_media = [MediaItem(**item) for item in media_payloads]
             scene_summary = self.context_store.get_window_summary()

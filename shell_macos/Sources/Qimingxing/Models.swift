@@ -96,6 +96,11 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
     let height: Int
     let durationSec: Double
     let sizeBytes: Int
+    let sourceURL: String
+    let sourceTitle: String
+    let license: String
+    let attribution: String
+    let provider: String
 
     var id: String { mediaId }
     var fileURL: URL? {
@@ -110,11 +115,16 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         case width, height
         case durationSec = "duration_sec"
         case sizeBytes = "size_bytes"
+        case sourceURL = "source_url"
+        case sourceTitle = "source_title"
+        case license, attribution, provider
     }
 
     init(mediaId: String, kind: String, title: String = "", localPath: String = "",
          mimeType: String = "", width: Int = 0, height: Int = 0,
-         durationSec: Double = 0, sizeBytes: Int = 0) {
+         durationSec: Double = 0, sizeBytes: Int = 0,
+         sourceURL: String = "", sourceTitle: String = "", license: String = "",
+         attribution: String = "", provider: String = "") {
         self.mediaId = mediaId
         self.kind = kind
         self.title = title
@@ -124,6 +134,11 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         self.height = height
         self.durationSec = durationSec
         self.sizeBytes = sizeBytes
+        self.sourceURL = sourceURL
+        self.sourceTitle = sourceTitle
+        self.license = license
+        self.attribution = attribution
+        self.provider = provider
     }
 
     init?(dict: [String: Any]) {
@@ -138,6 +153,29 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         self.height = (dict["height"] as? Int) ?? 0
         self.durationSec = (dict["duration_sec"] as? Double) ?? 0
         self.sizeBytes = (dict["size_bytes"] as? Int) ?? 0
+        self.sourceURL = (dict["source_url"] as? String) ?? ""
+        self.sourceTitle = (dict["source_title"] as? String) ?? ""
+        self.license = (dict["license"] as? String) ?? ""
+        self.attribution = (dict["attribution"] as? String) ?? ""
+        self.provider = (dict["provider"] as? String) ?? ""
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mediaId = try c.decode(String.self, forKey: .mediaId)
+        kind = try c.decode(String.self, forKey: .kind)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        localPath = try c.decodeIfPresent(String.self, forKey: .localPath) ?? ""
+        mimeType = try c.decodeIfPresent(String.self, forKey: .mimeType) ?? ""
+        width = try c.decodeIfPresent(Int.self, forKey: .width) ?? 0
+        height = try c.decodeIfPresent(Int.self, forKey: .height) ?? 0
+        durationSec = try c.decodeIfPresent(Double.self, forKey: .durationSec) ?? 0
+        sizeBytes = try c.decodeIfPresent(Int.self, forKey: .sizeBytes) ?? 0
+        sourceURL = try c.decodeIfPresent(String.self, forKey: .sourceURL) ?? ""
+        sourceTitle = try c.decodeIfPresent(String.self, forKey: .sourceTitle) ?? ""
+        license = try c.decodeIfPresent(String.self, forKey: .license) ?? ""
+        attribution = try c.decodeIfPresent(String.self, forKey: .attribution) ?? ""
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? ""
     }
 }
 

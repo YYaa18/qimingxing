@@ -301,6 +301,19 @@ class WebSearchToolConfig:
 
 
 @dataclass
+class ImageSearchToolConfig:
+    enabled: bool = True
+    provider: str = "tavily"
+    base_url: str = "https://api.tavily.com"
+    api_key: str = ""
+    timeout_seconds: float = 20.0
+    max_results: int = 4
+    max_bytes: int = 10 * 1024 * 1024
+    safe_search: bool = True
+    cache_dir: str = "data/media/image_search"
+
+
+@dataclass
 class ShellToolConfig:
     enabled: bool = True
     safe_commands: List[str] = field(default_factory=lambda: list(DEFAULT_SAFE_SHELL_COMMANDS))
@@ -333,6 +346,7 @@ class ToolsConfig:
     max_tool_steps: int = 8
     approval_timeout_sec: int = 60
     web_search: WebSearchToolConfig = field(default_factory=WebSearchToolConfig)
+    image_search: ImageSearchToolConfig = field(default_factory=ImageSearchToolConfig)
     shell: ShellToolConfig = field(default_factory=ShellToolConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     usage_alert: UsageAlertConfig = field(default_factory=UsageAlertConfig)
@@ -656,6 +670,8 @@ class AppConfig:
             secrets.append(self.memory.embedding.api_key)
         if self.tools.web_search.api_key:
             secrets.append(self.tools.web_search.api_key)
+        if self.tools.image_search.api_key:
+            secrets.append(self.tools.image_search.api_key)
         if self.audio.asr.api_key:
             secrets.append(self.audio.asr.api_key)
         if self.audio.tts.api_key:
@@ -921,6 +937,10 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     tools_raw = raw.get("tools") or {}
     ws_raw = tools_raw.get("web_search") or {}
     ws_key = _expand_env_vars(str(ws_raw.get("api_key", "") or "")) or ocr_key
+    is_raw = tools_raw.get("image_search") or {}
+    is_key = _expand_env_vars(str(is_raw.get("api_key", "") or "")) or os.environ.get(
+        "TAVILY_API_KEY", ""
+    )
     shell_raw = tools_raw.get("shell") or {}
     skills_raw = tools_raw.get("skills") or {}
     usage_raw = tools_raw.get("usage_alert") or {}
@@ -940,6 +960,17 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
             timeout_seconds=float(ws_raw.get("timeout_seconds", 15.0)),
             max_results=int(ws_raw.get("max_results", 5)),
             max_fetch_chars=int(ws_raw.get("max_fetch_chars", 6000)),
+        ),
+        image_search=ImageSearchToolConfig(
+            enabled=bool(is_raw.get("enabled", True)),
+            provider=str(is_raw.get("provider", "tavily")),
+            base_url=str(is_raw.get("base_url", "https://api.tavily.com") or "").rstrip("/"),
+            api_key=is_key,
+            timeout_seconds=float(is_raw.get("timeout_seconds", 20.0)),
+            max_results=max(1, min(8, int(is_raw.get("max_results", 4)))),
+            max_bytes=max(1_000_000, int(is_raw.get("max_bytes", 10 * 1024 * 1024))),
+            safe_search=bool(is_raw.get("safe_search", True)),
+            cache_dir=str(is_raw.get("cache_dir", "data/media/image_search")),
         ),
         shell=ShellToolConfig(
             enabled=bool(shell_raw.get("enabled", True)),
@@ -1276,6 +1307,14 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
             "base_url": cfg.tools.web_search.base_url,
             "has_key": bool(cfg.tools.web_search.api_key),
             "key_masked": mask_secret(cfg.tools.web_search.api_key),
+        },
+        "image_search": {
+            "enabled": cfg.tools.image_search.enabled,
+            "provider": cfg.tools.image_search.provider,
+            "base_url": cfg.tools.image_search.base_url,
+            "has_key": bool(cfg.tools.image_search.api_key),
+            "key_masked": mask_secret(cfg.tools.image_search.api_key),
+            "max_results": cfg.tools.image_search.max_results,
         },
         "audio": {
             "enabled": cfg.audio.enabled,
@@ -1779,6 +1818,23 @@ def save_settings_to_yaml(
             for key in ("google_search", "url_context"):
                 if key in gem_up:
                     gem_sec[key] = bool(gem_up[key])
+
+    # 6d. Image search provider
+    img_up = updates.get("image_search")
+    if isinstance(img_up, dict):
+        img_sec = raw.setdefault("tools", {}).setdefault("image_search", {})
+        if isinstance(img_sec, dict):
+            if "enabled" in img_up:
+                img_sec["enabled"] = bool(img_up["enabled"])
+            if "provider" in img_up:
+                provider = str(img_up["provider"] or "tavily").strip().lower()
+                if provider in ("tavily",):
+                    img_sec["provider"] = provider
+            if "max_results" in img_up and img_up["max_results"] is not None:
+                img_sec["max_results"] = max(1, min(8, int(img_up["max_results"])))
+            new_key = str(img_up.get("api_key") or "").strip()
+            if new_key and not _is_masked_placeholder(new_key):
+                img_sec["api_key"] = new_key
 
     # 7. Providers pool & 5-slot model routing (preserving masked placeholders & 0600 secrets)
     prov_updates = updates.get("providers")
