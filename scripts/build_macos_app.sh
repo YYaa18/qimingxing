@@ -268,6 +268,13 @@ rsync -a \
   --exclude '__editable__*' \
   --exclude 'qimingxing*.dist-info' \
   --exclude 'qimingxing.egg-info' \
+  --exclude 'PyObjCTest*' \
+  --exclude 'pip' \
+  --exclude 'pip-*' \
+  --exclude 'setuptools' \
+  --exclude 'setuptools-*' \
+  --exclude '_distutils_hack' \
+  --exclude 'distutils-precedence.pth' \
   "${SITE_SRC}/" "${PY_DEST}/lib/python3.12/site-packages/"
 
 # 6. Optional Godot runtime
