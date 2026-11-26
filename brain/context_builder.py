@@ -143,6 +143,38 @@ class BuiltContext:
     stats: BuildStats = field(default_factory=BuildStats)
 
 
+
+def sanitize_recent_messages(
+    messages: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """Keep provider-safe alternating history.
+
+    A failed turn can leave a user message in SQLite without an assistant
+    reply; DeepSeek then rejects the next request with "an assistant message
+    must follow a user message". Coalesce same-role neighbours and drop a
+    trailing unanswered user message; the live user turn is appended by
+    ``build`` itself.
+    """
+    cleaned: List[Dict[str, str]] = []
+    for msg in messages or []:
+        role = str(msg.get("role") or "")
+        if role not in ("user", "assistant"):
+            continue
+        content = msg.get("content")
+        text = content if isinstance(content, str) else str(content or "")
+        text = text.strip()
+        if not text:
+            continue
+        if cleaned and cleaned[-1]["role"] == role:
+            cleaned[-1]["content"] = cleaned[-1]["content"] + "\n\n" + text
+        else:
+            cleaned.append({"role": role, "content": text})
+    while cleaned and cleaned[0]["role"] == "assistant":
+        cleaned.pop(0)
+    while cleaned and cleaned[-1]["role"] == "user":
+        cleaned.pop()
+    return cleaned
+
 class ContextBuilder:
     """4-layer Prefix-Cache-friendly prompt assembler with strict per-slot Token budgets."""
 
@@ -181,6 +213,7 @@ class ContextBuilder:
         resolved_budget: Optional[Any] = None,
         tools_tokens: int = 0,
     ) -> BuiltContext:
+        recent_messages = sanitize_recent_messages(recent_messages)
         stats = BuildStats(
             retrieval_ms=retrieval_ms,
             recalled_count=len(recalled_memories),

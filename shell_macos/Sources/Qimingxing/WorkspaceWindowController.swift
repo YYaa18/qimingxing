@@ -777,8 +777,11 @@ struct WorkspaceRootView: View {
                 if let sources = turn.sources, !sources.isEmpty {
                     SourceChipsView(sources: sources)
                 }
-                if let media = turn.media, !media.isEmpty {
-                    MediaStripView(media: media, mode: .expanded, contextTitle: "工作区")
+                if let media = turn.media {
+                    let stripMedia = qmxMediaWithoutInlineTables(media, answer: turn.body)
+                    if !stripMedia.isEmpty {
+                        MediaStripView(media: stripMedia, mode: .expanded, contextTitle: "工作区")
+                    }
                 }
             }
         }

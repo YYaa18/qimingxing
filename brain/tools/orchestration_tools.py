@@ -52,8 +52,10 @@ class TaskDispatchTool(Tool):
         "使用 doc_office 能力包；Worker 可使用 doc_match_rename 完成表格键值匹配重命名并生成 CSV 核对报告。"
         "用户通常只描述业务意图：请从上下文/附件推断输入目录，packs 填 doc_office，"
         "并把输入目录与期望输出目录一并放进 writable_paths（没有写入授权会被硬拒绝）。"
-        "浏览器自动化使用 browser_auto 能力包：默认 browser_mode=isolated；"
-        "只有确实需要用户已登录的主浏览器时才用 live，并必须提供 allowed_domains。"
+        "浏览器自动化使用 browser_auto 能力包：用户说“试一下浏览器/打开网页/操作网页/抓取动态页面/登录后台”"
+        "就必须用它；默认 browser_mode=isolated，只有确实需要用户已登录的主浏览器时才用 live 并提供 allowed_domains。"
+        "用户只说“试一下浏览器”却没给网址时，默认打开 https://example.com 演示标题/截图，不要反问；"
+        "浏览器自动化不依赖看屏或屏幕录制权限，不要因为隐私窗口拒绝。"
     )
     default_risk: RiskLevel = "safe"
     parameters_schema = {

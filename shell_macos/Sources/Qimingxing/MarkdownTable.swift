@@ -328,3 +328,12 @@ struct QMXTableNotice: View {
         return "\(table.summary) · 表格"
     }
 }
+
+/// Tables render as an inline single-line entry inside the answer body, so
+/// the media strip should not repeat the same virtual table card. If the
+/// answer has no inline table block (e.g. the table came from a card event),
+/// keep the media card as the only entry point.
+func qmxMediaWithoutInlineTables(_ media: [MediaItem], answer: String) -> [MediaItem] {
+    guard !QMXMarkdownTables.scan(answer).isEmpty else { return media }
+    return media.filter { !$0.isMarkdownTable }
+}

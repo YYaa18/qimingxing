@@ -2073,6 +2073,7 @@ class Hub:
         parser = StreamParser()
         seq = 0
         collected_spoken: List[str] = []
+        collected_cards: List[str] = []
         artifact_id_to_burn = ""
         artifacts_to_burn: List[str] = list(attachments or [])
         extra_l3_sections: List[str] = []
@@ -2436,7 +2437,8 @@ class Hub:
                     nonlocal seq
                     events = parser.feed(chunk)
                     seq = await self._emit_parser_events(
-                        conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta
+                        conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
+                        collected_cards=collected_cards,
                     )
 
                 async def _on_status(
@@ -2580,7 +2582,8 @@ class Hub:
                 async for chunk in self.llm_router.stream_chat(messages, profile_name=profile.name):
                     events = parser.feed(chunk)
                     seq = await self._emit_parser_events(
-                        conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta
+                        conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
+                        collected_cards=collected_cards,
                     )
                 if self.llm_router.last_usage is not None:
                     turn_usages.append(self.llm_router.last_usage)
@@ -2596,7 +2599,8 @@ class Hub:
 
             tail_events = parser.finish()
             seq = await self._emit_parser_events(
-                conn, turn_id, tail_events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta
+                conn, turn_id, tail_events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
+                collected_cards=collected_cards,
             )
 
             if chunker is not None and tts_queue is not None:
@@ -2632,8 +2636,15 @@ class Hub:
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             raw_assistant_reply = "".join(collected_spoken).strip()
+            # Tables may be emitted inside a <<<CARD>>> (the system prompt
+            # encourages cards for long content). Cards are streamed as a
+            # separate event, so scan their markdown too or the table would
+            # silently disappear from the shell.
+            table_source = "\n\n".join(
+                [raw_assistant_reply] + [text for text in collected_cards if text.strip()]
+            ).strip()
             table_media_payloads = extract_table_media(
-                raw_assistant_reply, turn_id=turn_id
+                table_source, turn_id=turn_id
             )
             base_sources = loop_sources if use_tools else self.llm_router.last_annotations
             raw_sources = list(base_sources) + tool_sources
@@ -2880,6 +2891,7 @@ class Hub:
         seq: int,
         collected_spoken: List[str],
         on_spoken_delta: Optional[Any] = None,
+        collected_cards: Optional[List[str]] = None,
     ) -> int:
         for ev in events:
             if isinstance(ev, EmotionEvent):
@@ -2911,6 +2923,8 @@ class Hub:
                     ),
                 )
             elif isinstance(ev, CardEvent):
+                if collected_cards is not None and ev.content_markdown:
+                    collected_cards.append(str(ev.content_markdown))
                 actions = []
                 if ev.card_type == "spoiler_steps":
                     actions.append(CardAction(id="more_hint", label="还是没头绪，看第 2 级提示"))

@@ -873,8 +873,9 @@ private struct TableGrid: View {
     var headerLineLimit: Int = 1
 
     var body: some View {
-        ScrollView([.horizontal, .vertical]) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+        GeometryReader { geo in
+            ScrollView([.horizontal, .vertical]) {
+                Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
                         Text(column)
@@ -902,9 +903,11 @@ private struct TableGrid: View {
                     .background(rowIndex.isMultiple(of: 2) ? Color.clear : QMXTheme.surfaceMuted.opacity(0.25))
                 }
             }
-            .padding(10)
+                .padding(10)
+                .frame(minWidth: geo.size.width, alignment: .leading)
+            }
+            .scrollIndicators(.visible)
         }
-        .scrollIndicators(.visible)
     }
 }
 
@@ -957,6 +960,7 @@ private struct TableMediaStage: View {
                     lineLimit: 3,
                     headerLineLimit: 2
                 )
+                .id(item.mediaId)
             }
         }
     }

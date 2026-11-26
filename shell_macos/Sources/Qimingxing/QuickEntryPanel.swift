@@ -46,6 +46,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private var currentAnimatedHeight: CGFloat = QuickEntryLayout.idleHeight
     private var heightVelocity: CGFloat = 0
     private var heightDriverTask: Task<Void, Never>?
+    private var focusObservers: [NSObjectProtocol] = []
 
     var debugPanel: FloatingQuickEntryPanel? { panel }
     var debugInputState: QuickEntryInputState { inputState }
@@ -60,10 +61,58 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         self.workspaceStore = workspaceStore
         super.init()
         wireExpansion()
+        installFocusRecovery()
         inputState.$isWorkspaceWingOpen
             .removeDuplicates()
             .sink { [weak self] open in self?.layoutWing(open: open) }
             .store(in: &cancellables)
+    }
+
+    /// Auxiliary windows (settings, workspace, media viewer) can take key
+    /// status and never hand it back. The panel then looks focused but swallows
+    /// no keystrokes. Re-key it when the app becomes active or another app
+    /// window closes.
+    private func installFocusRecovery() {
+        let center = NotificationCenter.default
+        focusObservers.append(
+            center.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                guard let self,
+                      let closing = note.object as? NSWindow,
+                      closing !== self.panel
+                else { return }
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    guard let self,
+                          let panel = self.panel,
+                          panel.isVisible
+                    else { return }
+                    guard NSApp.keyWindow == nil || NSApp.keyWindow === panel else { return }
+                    panel.makeKeyAndOrderFront(nil)
+                    self.inputState.focusRequestToken = UUID()
+                }
+            }
+        )
+        focusObservers.append(
+            center.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          let panel = self.panel,
+                          panel.isVisible,
+                          !panel.isKeyWindow
+                    else { return }
+                    panel.makeKey()
+                    self.inputState.focusRequestToken = UUID()
+                }
+            }
+        )
     }
 
     private var panelWidth: CGFloat {
@@ -611,7 +660,12 @@ struct QuickEntryRootView: View {
                 caughtUpAnswerCount = -1
                 turnPeakHeight = 0
                 onDesiredHeightChange(chatHeight)
-            } else if !inputState.isExpanded {
+            } else {
+                // The answer is done: keep the caret in the composer so the
+                // next question can be typed immediately.
+                inputState.focusRequestToken = UUID()
+            }
+            if !inputState.isExpanded {
                 onDesiredHeightChange(QuickEntryLayout.idleHeight)
             } else if reduceMotion || QMXTheme.isHeadlessDump {
                 answerRevealFinished = true
@@ -821,8 +875,21 @@ struct QuickEntryRootView: View {
                 if !turn.sources.isEmpty {
                     SourceChipsView(sources: turn.sources)
                 }
-                if !turn.media.isEmpty {
-                    MediaStripView(media: turn.media, contextTitle: "本轮回答")
+                let stripMedia = qmxMediaWithoutInlineTables(turn.media, answer: turn.answer)
+                if !stripMedia.isEmpty {
+                    MediaStripView(media: stripMedia, contextTitle: "本轮回答")
+                }
+                workspaceLink
+            } else if let turn = latestTurn,
+                      !turn.media.isEmpty || !turn.sources.isEmpty {
+                // Card-only answers (e.g. a table emitted inside <<<CARD>>>)
+                // have no spoken text, but their media must still be visible.
+                if !turn.sources.isEmpty {
+                    SourceChipsView(sources: turn.sources)
+                }
+                let stripMedia = qmxMediaWithoutInlineTables(turn.media, answer: turn.answer)
+                if !stripMedia.isEmpty {
+                    MediaStripView(media: stripMedia, contextTitle: "本轮回答")
                 }
                 workspaceLink
             } else {

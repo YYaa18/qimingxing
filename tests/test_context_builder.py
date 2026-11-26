@@ -146,3 +146,37 @@ def test_desktop_focus_denoising_and_two_view_rendering() -> None:
     )
     assert b_activity.stats.timeline_expanded is True
     assert "最近桌面活动时间线" in b_activity.messages[-1]["content"]
+
+
+def test_sanitize_recent_messages_coalesces_failed_turns() -> None:
+    from brain.context_builder import sanitize_recent_messages
+
+    history = [
+        {"role": "assistant", "content": "开场"},
+        {"role": "user", "content": "失败的一轮"},
+        {"role": "user", "content": "下一轮"},
+        {"role": "assistant", "content": "回答"},
+        {"role": "user", "content": "还没回答的当前轮"},
+    ]
+    cleaned = sanitize_recent_messages(history)
+    assert [m["role"] for m in cleaned] == ["user", "assistant"]
+    assert cleaned[0]["content"] == "失败的一轮\n\n下一轮"
+
+    builder = ContextBuilder(ContextBudgetConfig(total_max_tokens=4000))
+    built = builder.build(
+        user_text="现在的问题",
+        user_content="现在的问题",
+        core_facts=[],
+        rolling_summary="",
+        recent_messages=history,
+        recalled_memories=[],
+        context_store=ContextStore(),
+    )
+    assert built.messages[-1]["role"] == "user"
+    assert str(built.messages[-1]["content"]).endswith("现在的问题")
+    roles = [m["role"] for m in built.messages]
+    assert roles[0] == "system"
+    for left, right in zip(roles, roles[1:]):
+        assert not (left == "user" and right == "user")
+    history_roles = roles[1:-1]
+    assert not history_roles or history_roles[0] == "user"

@@ -198,9 +198,12 @@ struct WorkspaceWingView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let media = turn.media, !media.isEmpty {
-                MediaStripView(media: media, mode: .compact, contextTitle: "工作区")
-                    .padding(.top, 2)
+            if let media = turn.media {
+                let stripMedia = qmxMediaWithoutInlineTables(media, answer: turn.body)
+                if !stripMedia.isEmpty {
+                    MediaStripView(media: stripMedia, mode: .compact, contextTitle: "工作区")
+                        .padding(.top, 2)
+                }
             }
         }
     }
