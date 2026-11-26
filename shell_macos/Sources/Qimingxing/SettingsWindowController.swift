@@ -723,8 +723,15 @@ struct SettingsRootView: View {
 
                 Toggle("状态提示音", isOn: $store.earconsEnabled)
                     .frame(minHeight: 40)
-                Toggle("可选桌面头像插件", isOn: $store.avatarEnabled)
-                    .frame(minHeight: 40)
+                if supervisor.isGodotPluginAvailable {
+                    Toggle("可选桌面头像插件", isOn: $store.avatarEnabled)
+                        .frame(minHeight: 40)
+                } else {
+                    Text("可选桌面头像插件未随此安装包提供")
+                        .font(.system(size: 11))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .frame(minHeight: 32)
+                }
             }
 
             Section("回答显示") {

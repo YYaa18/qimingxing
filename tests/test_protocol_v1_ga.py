@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -61,7 +63,7 @@ def test_ws_origin_guard_rejects_evil_origins(tmp_path: Path) -> None:
             )
             welcome = json.loads(ws.receive_text())
             assert welcome["type"] == "system.welcome"
-            assert welcome["payload"]["server_version"] == "1.0.0"
+            assert welcome["payload"]["server_version"] == "1.0.1"
 
 
 def test_ui_state_ui_command_and_approval_reconnect_sync(tmp_path: Path) -> None:
@@ -152,6 +154,52 @@ def test_ui_state_ui_command_and_approval_reconnect_sync(tmp_path: Path) -> None
             assert cmd_res["type"] == "ui.command_result"
             assert cmd_res["payload"]["ok"] is False
             assert cmd_res["payload"]["error"] == "dangerous_executable_blocked"
+
+            # A harmless-looking symlink must be resolved before extension
+            # checks: link.md -> Evil.app still counts as a dangerous .app.
+            evil_app = tmp_path / "Evil.app"
+            evil_app.mkdir()
+            link_path = tmp_path / "innocent.md"
+            os.symlink(evil_app, link_path)
+            shell_ws.send_text(
+                json.dumps(
+                    {
+                        "v": "1.0",
+                        "id": "c_symlink",
+                        "ts": 3,
+                        "source": "body",
+                        "type": "ui.command",
+                        "payload": {
+                            "command_id": "cmd_symlink",
+                            "target": "shell",
+                            "action": "open_path",
+                            "args": {"path": str(link_path)},
+                        },
+                    }
+                )
+            )
+            symlink_res = json.loads(shell_ws.receive_text())
+            assert symlink_res["type"] == "ui.command_result"
+            assert symlink_res["payload"]["error"] == "dangerous_executable_blocked"
+            assert symlink_res["payload"]["data"]["suffix"] == ".app"
+
+            # Explicit body_macos priority even when a Godot body exists first.
+            hub = app.state.hub
+            original_clients = hub.clients
+            hub.clients = {
+                "godot": SimpleNamespace(
+                    role="body",
+                    client_type="body_godot",
+                    capabilities=SimpleNamespace(audio_output=True, native_desktop=False),
+                ),
+                "macos": SimpleNamespace(
+                    role="body",
+                    client_type="body_macos",
+                    capabilities=SimpleNamespace(audio_output=False, native_desktop=True),
+                ),
+            }
+            assert hub._get_primary_body_conn() is hub.clients["macos"]
+            hub.clients = original_clients
 
             # Offline avatar target returns target_offline
             shell_ws.send_text(

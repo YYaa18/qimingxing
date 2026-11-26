@@ -110,7 +110,6 @@ class SensesAgent:
         self.action_hotkeys: Dict[str, str] = self._platform_action_hotkeys({
             "chat_input": cfg.shortcuts.chat_input_hotkey if cfg else "option+space",
             "cancel": cfg.shortcuts.cancel_hotkey if cfg else "option+esc",
-            "toggle_dock": cfg.shortcuts.toggle_dock_hotkey if cfg else "option+h",
             "settings": cfg.shortcuts.settings_hotkey if cfg else "option+k",
         })
         self.audio_sample_rate = (
@@ -302,13 +301,14 @@ class SensesAgent:
 
     @staticmethod
     def _platform_action_hotkeys(mapping: Dict[str, str]) -> Dict[str, str]:
-        """On macOS the native shell owns Quick Entry/settings/emergency-stop hotkeys.
+        """On macOS the native SwiftUI shell owns every UI hotkey.
 
-        Senses keeps only PTT and the avatar dock toggle to avoid double-firing
-        the same Carbon/Quartz shortcut.
+        Senses is responsible only for PTT and the audio/PTT pipeline here;
+        registering action hotkeys in both processes would double-fire the same
+        Carbon/Quartz shortcut. Non-macOS hosts may still use this mapping.
         """
         if sys.platform == "darwin":
-            return {key: value for key, value in mapping.items() if key == "toggle_dock"}
+            return {}
         return mapping
 
     def _apply_shortcuts_sync(self, sc: Dict[str, Any]) -> None:
@@ -316,7 +316,6 @@ class SensesAgent:
         self.action_hotkeys = self._platform_action_hotkeys({
             "chat_input": str(sc.get("chat_input_hotkey") or "option+space"),
             "cancel": str(sc.get("cancel_hotkey") or "option+esc"),
-            "toggle_dock": str(sc.get("toggle_dock_hotkey") or "option+h"),
             "settings": str(sc.get("settings_hotkey") or "option+k"),
         })
         if self._hotkey_listener is not None and hasattr(self._hotkey_listener, "update_hotkeys"):

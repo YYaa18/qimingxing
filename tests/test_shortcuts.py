@@ -17,6 +17,7 @@ from brain.config import (
 from brain.main import create_app
 from senses.audio.base import _MOD_FLAG_ALT, is_disabled_hotkey
 from senses.audio.macos_ptt import MacOSPTTListener
+from senses.main import SensesAgent
 
 
 def _recv_until(ws: Any, expected_type: str) -> Dict[str, Any]:
@@ -61,6 +62,9 @@ def test_shortcuts_config_load_sanitize_and_save_sync(tmp_path: Path) -> None:
 
 
 def test_macos_listener_multi_action_and_live_reload() -> None:
+    # On macOS the native SwiftUI shell owns every UI hotkey; Senses only
+    # keeps PTT, so its action map must be empty.
+    assert SensesAgent._platform_action_hotkeys({"chat_input": "option+space"}) == {}
     assert is_disabled_hotkey("disabled") is True
     assert is_disabled_hotkey("option+space") is False
 

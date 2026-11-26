@@ -7,7 +7,7 @@ APP_NAME="Qimingxing"
 if [[ -f "${ROOT_DIR}/version.txt" ]]; then
   APP_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/version.txt")"
 else
-  APP_VERSION="1.0.0"
+  APP_VERSION="1.0.1"
 fi
 BUNDLE_ID="com.qimingxing.desktop"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
@@ -27,7 +27,7 @@ for arg in "$@"; do
 Usage: scripts/build_macos_app.sh [--install] [--dmg] [--with-godot]
   --install     Install built Qimingxing.app to /Applications/Qimingxing.app
   --dmg         Create distributable drag-and-drop DMG in dist/
-  --with-godot  Optionally bundle Godot.app & body_godot/ (disabled by default in GA 1.0)
+  --with-godot  Optionally bundle Godot.app & body_godot/ (disabled by default in v1.0.1)
 EOF
       exit 0
       ;;

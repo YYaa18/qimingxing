@@ -28,6 +28,19 @@ final class ProcessSupervisor: ObservableObject {
     var httpBase: String { "http://\(host):\(port)" }
     var wsURL: String { "ws://\(host):\(port)/ws" }
 
+    /// True only when both a Godot binary and the optional body_godot project
+    /// are actually present. Packaged builds intentionally omit them.
+    var isGodotPluginAvailable: Bool {
+        let fm = FileManager.default
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("Godot.app/Contents/MacOS/Godot"),
+            URL(fileURLWithPath: "/Applications/Godot.app/Contents/MacOS/Godot"),
+            fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Godot.app/Contents/MacOS/Godot"),
+        ].compactMap { $0 }
+        let hasBinary = candidates.contains { fm.isExecutableFile(atPath: $0.path) }
+        return hasBinary && fm.fileExists(atPath: appDir.appendingPathComponent("body_godot").path)
+    }
+
     init() {
         self.host = ProcessInfo.processInfo.environment["QIMINGXING_HOST"] ?? "127.0.0.1"
         self.port = Int(ProcessInfo.processInfo.environment["QIMINGXING_PORT"] ?? "18790") ?? 18790
@@ -74,7 +87,7 @@ final class ProcessSupervisor: ObservableObject {
            !ver.isEmpty {
             self.appVersion = ver
         } else {
-            self.appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
+            self.appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
         }
     }
 

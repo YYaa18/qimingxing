@@ -1011,7 +1011,10 @@ class Hub:
     ) -> None:
         if payload.action == "open_path":
             raw_path = str((payload.args or {}).get("path") or "").strip()
-            suffix = Path(raw_path).suffix.lower()
+            # Resolve symlinks before checking the extension: a benign-looking
+            # .md link must not be able to point at a .app/.command payload.
+            resolved_path = os.path.realpath(os.path.expanduser(raw_path))
+            suffix = Path(resolved_path).suffix.lower()
             if suffix in _DANGEROUS_OPEN_EXTENSIONS:
                 await conn.send_envelope(
                     make_envelope(
@@ -1021,7 +1024,7 @@ class Hub:
                             command_id=payload.command_id,
                             ok=False,
                             error="dangerous_executable_blocked",
-                            data={"path": raw_path, "suffix": suffix},
+                            data={"path": resolved_path, "suffix": suffix},
                         ),
                     )
                 )
@@ -1096,6 +1099,14 @@ class Hub:
         self, fallback_conn: Optional[ClientConnection] = None
     ) -> Optional[ClientConnection]:
         bodies = [c for c in self.clients.values() if c.role == "body"]
+        # The native macOS shell is the product primary surface. Godot is an
+        # optional decorative plugin and must never steal primary routing.
+        for c in bodies:
+            if c.client_type == "body_macos":
+                return c
+        for c in bodies:
+            if c.client_type != "body_godot" and c.capabilities.native_desktop:
+                return c
         for c in bodies:
             if c.client_type == "body_godot" or c.capabilities.audio_output:
                 return c
