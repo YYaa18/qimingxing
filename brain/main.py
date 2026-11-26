@@ -273,6 +273,10 @@ def create_app(
                 await router.aclose()
             except Exception:
                 logger.debug("Failed closing shared LLM HTTP client", exc_info=True)
+            try:
+                await emb_provider.aclose()
+            except Exception:
+                logger.debug("Failed closing embedding HTTP client", exc_info=True)
             await backend.close()
             artifacts.cleanup_all()
 

@@ -170,3 +170,38 @@ async def test_openai_compatible_embedding_provider_http(monkeypatch) -> None:
     )
     vecs = await provider.embed_texts(["测试文本"])
     assert vecs == [[0.1, 0.2, 0.3]]
+
+
+async def test_embedding_provider_reuses_one_http_client(monkeypatch) -> None:
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"index": 0, "embedding": [0.5]}]}
+
+    created: List["FakeClient"] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.closed = False
+            created.append(self)
+
+        async def post(self, url, **kwargs):
+            return FakeResp()
+
+        async def aclose(self):
+            self.closed = True
+
+    import brain.memory.embeddings as emb_mod
+
+    monkeypatch.setattr(emb_mod.httpx, "AsyncClient", FakeClient)
+    provider = OpenAICompatibleEmbeddingProvider(
+        base_url="http://127.0.0.1:11434/v1",
+        model="bge-m3",
+    )
+    await provider.embed_texts(["a"])
+    await provider.embed_texts(["b"])
+    assert len(created) == 1
+    await provider.aclose()
+    assert created[0].closed
