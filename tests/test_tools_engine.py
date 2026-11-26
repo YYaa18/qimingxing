@@ -569,3 +569,102 @@ def test_compact_dispatch_goal_keeps_business_paragraph() -> None:
 
     plain = "帮我查一下今天的汇率并给出结论。"
     assert compact_dispatch_goal(plain) == plain
+
+
+async def test_executor_recovers_dsml_leaked_only_in_stream_text() -> None:
+    """Some providers stream DSML as plain text after a tool round. The
+    executor must recover it and run the tool, never return markup."""
+    cfg = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="m")},
+    )
+    snap = DummyTool("browser_snapshot", risk="safe")
+    reg = ToolRegistry([snap])
+    leaked = (
+        '<｜｜DSML｜｜ calls>\n'
+        '<｜｜DSML｜｜ invoke name="browser_snapshot">\n'
+        '<｜｜DSML｜｜ parameter name="max_elements" string="false">100</｜｜DSML｜｜ parameter>\n'
+        '</｜｜DSML｜｜ invoke>\n'
+        '</｜｜DSML｜｜ calls>'
+    )
+    router = ScriptedToolRouter(
+        cfg,
+        [
+            LLMCompletionResult(content=leaked),
+            LLMCompletionResult(content="已读取 100 个元素。"),
+        ],
+    )
+    result = await ToolExecutor(router).run(
+        messages=[{"role": "user", "content": "看看网页"}],
+        registry=reg,
+        ctx=ToolExecutionContext(turn_id="dsml1", session_id="s", config=cfg),
+    )
+    assert result.stopped_reason == "completed"
+    assert snap.calls == [{"max_elements": 100}]
+    assert "DSML" not in result.final_text
+    assert result.final_text == "已读取 100 个元素。"
+
+
+async def test_bg_wrap_up_never_returns_raw_dsml() -> None:
+    cfg = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="m")},
+    )
+    snap = DummyTool("browser_snapshot", risk="safe")
+    reg = ToolRegistry([snap])
+    leaked = (
+        '<｜｜DSML｜｜ calls>\n'
+        '<｜｜DSML｜｜ invoke name="browser_snapshot">\n'
+        '<｜｜DSML｜｜ parameter name="max_elements" string="false">100</｜｜DSML｜｜ parameter>\n'
+        '</｜｜DSML｜｜ invoke>\n'
+        '</｜｜DSML｜｜ calls>'
+    )
+    router = ScriptedToolRouter(
+        cfg,
+        [
+            LLMCompletionResult(content=leaked),
+            LLMCompletionResult(content=leaked),
+            LLMCompletionResult(content="已收尾，这是最终清单。"),
+        ],
+    )
+    result = await ToolExecutor(router).run(
+        messages=[{"role": "user", "content": "看看网页"}],
+        registry=reg,
+        ctx=ToolExecutionContext(turn_id="dsml2", session_id="s", config=cfg),
+        max_steps=1,
+    )
+    assert result.stopped_reason == "max_steps"
+    assert "DSML" not in result.final_text
+    assert result.final_text == "已收尾，这是最终清单。"
+
+
+async def test_bg_wrap_up_persistent_dsml_returns_friendly_fallback() -> None:
+    cfg = AppConfig(
+        default_profile="mock_local",
+        profiles={"mock_local": ProfileConfig(name="mock_local", label="Mock", provider="mock", model="m")},
+    )
+    snap = DummyTool("browser_snapshot", risk="safe")
+    reg = ToolRegistry([snap])
+    leaked = (
+        '<｜｜DSML｜｜ calls>\n'
+        '<｜｜DSML｜｜ invoke name="browser_snapshot">\n'
+        '<｜｜DSML｜｜ parameter name="max_elements" string="false">100</｜｜DSML｜｜ parameter>\n'
+        '</｜｜DSML｜｜ invoke>\n'
+        '</｜｜DSML｜｜ calls>'
+    )
+    router = ScriptedToolRouter(
+        cfg,
+        [
+            LLMCompletionResult(content=leaked),
+            LLMCompletionResult(content=leaked),
+            LLMCompletionResult(content=leaked),
+        ],
+    )
+    result = await ToolExecutor(router).run(
+        messages=[{"role": "user", "content": "看看网页"}],
+        registry=reg,
+        ctx=ToolExecutionContext(turn_id="dsml3", session_id="s", config=cfg),
+        max_steps=1,
+    )
+    assert "DSML" not in result.final_text
+    assert "连续返回无法解析" in result.final_text

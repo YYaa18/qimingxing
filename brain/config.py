@@ -442,7 +442,7 @@ class UIConfig:
 class BackgroundTaskConfig:
     enabled: bool = True
     max_concurrency: int = 2
-    max_steps: int = 12
+    max_steps: int = 24
     timeout_sec: int = 300
     auto_resume_on_restart: bool = True
     # Two-level Semantic Watchdog. Rule screening costs zero tokens; only a
@@ -1124,7 +1124,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
     background_tasks = BackgroundTaskConfig(
         enabled=bool(bg_raw.get("enabled", True)),
         max_concurrency=max(1, int(bg_raw.get("max_concurrency", 2))),
-        max_steps=max(1, int(bg_raw.get("max_steps", 12))),
+        max_steps=max(1, int(bg_raw.get("max_steps", 24))),
         timeout_sec=max(10, int(bg_raw.get("timeout_sec", 300))),
         auto_resume_on_restart=bool(bg_raw.get("auto_resume_on_restart", True)),
         watchdog_enabled=bool(bg_raw.get("watchdog_enabled", True)),
