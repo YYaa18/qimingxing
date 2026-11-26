@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from brain.context_builder import estimate_tokens
-from brain.llm_router import LLMError, LLMRouter, LLMUsage
+from brain.llm_router import LLMError, LLMRouter, LLMUsage, parse_dsml_tool_calls
 from brain.tools.base import ToolExecutionContext, ToolResult, ToolTraceStep
 from brain.tools.registry import ToolRegistry
 from brain.utils import truncate_head_tail
@@ -100,6 +100,9 @@ class ToolExecutor:
             }
             if on_server_tool_event is not None and self._supports_server_events():
                 completion_kwargs["on_server_tool_event"] = on_server_tool_event
+            # Text deltas are per-round; a previous round's leaked DSML must
+            # never become this round's final answer.
+            spoken_parts.clear()
             res = await self.llm_router.complete_with_tools(
                 working_messages,
                 schema,
@@ -109,12 +112,24 @@ class ToolExecutor:
             ctx.usage_collector.append(res.usage)
 
             if not res.tool_calls:
-                if "<｜｜DSML" in (res.content or ""):
+                raw_text = str(res.content or "") or "".join(spoken_parts)
+                cleaned_text, dsml_calls = parse_dsml_tool_calls(raw_text)
+                if dsml_calls:
+                    # Router-side parsing can miss a leaked block (e.g. the
+                    # text only arrived through streaming deltas). Recover it
+                    # here instead of writing markup into the final answer.
+                    res.tool_calls = dsml_calls
+                    res.content = cleaned_text
+                    spoken_parts.clear()
+                    if cleaned_text:
+                        spoken_parts.append(cleaned_text)
+                elif "<｜｜DSML" in raw_text:
                     raise LLMError(
                         "UNPARSED_DSML_TOOL_CALL",
                         "模型返回了未解析的工具调用标记（DSML），请重试。",
                     )
-                return ToolLoopResult(
+                else:
+                    return ToolLoopResult(
                     final_text=(res.content or "".join(spoken_parts)),
                     trace_steps=trace_steps,
                     usages=usages,
@@ -457,6 +472,7 @@ class ToolExecutor:
                     wrap_messages,
                     max_tokens=max_context_tokens,
                 )
+            spoken_parts.clear()
             wrap_kwargs: Dict[str, Any] = {
                 "profile_name": profile_name,
                 "on_text_delta": _emit_delta,
@@ -471,9 +487,44 @@ class ToolExecutor:
             usages.append(final_res.usage)
             ctx.usage_collector.append(final_res.usage)
             final_sources = list(final_res.annotations)
+            wrap_text = str(final_res.content or "") or "".join(spoken_parts)
+            cleaned_wrap, stray_calls = parse_dsml_tool_calls(wrap_text)
+            if stray_calls and not cleaned_wrap.strip():
+                # The model still wants to call a tool at the step cap. Retry
+                # once with an explicit text-only instruction; otherwise the
+                # user would receive markup or a useless placeholder.
+                retry_messages = wrap_messages + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "不要再调用任何工具，也不要输出工具调用标记或 DSML。"
+                            "请直接基于已经拿到的工具结果，用中文输出最终交付内容；"
+                            "拿不到的信息如实说明缺失。"
+                        ),
+                    }
+                ]
+                spoken_parts.clear()
+                retry_res = await self.llm_router.complete_with_tools(
+                    retry_messages,
+                    [],
+                    **wrap_kwargs,
+                )
+                usages.append(retry_res.usage)
+                ctx.usage_collector.append(retry_res.usage)
+                retry_text = str(retry_res.content or "") or "".join(spoken_parts)
+                cleaned_retry, retry_stray = parse_dsml_tool_calls(retry_text)
+                if retry_stray:
+                    cleaned_retry = ""
+                if "<｜｜DSML" in cleaned_retry:
+                    cleaned_retry = ""
+                wrap_text = cleaned_retry.strip() or "任务已收尾，但上游连续返回无法解析的工具调用；请重试。"
+            elif stray_calls:
+                wrap_text = cleaned_wrap
+            elif "<｜｜DSML" in wrap_text:
+                wrap_text = "任务已收尾，但上游返回了无法解析的工具调用；请重试。"
 
         return ToolLoopResult(
-            final_text="".join(spoken_parts),
+            final_text=(wrap_text if not ctx.is_cancelled() else "".join(spoken_parts)),
             trace_steps=trace_steps,
             usages=usages,
             stopped_reason=stopped_reason,

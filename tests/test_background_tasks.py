@@ -488,6 +488,16 @@ def test_clean_result_narration_drops_process_preface() -> None:
     # A conclusion-only sentence must not be blanked out.
     assert clean_result_narration("现在给出结论：全部完成。") == "现在给出结论：全部完成。"
     assert clean_result_narration("** 共 2 张 PDF，全部匹配成功。") == "共 2 张 PDF，全部匹配成功。"
+    dsml = (
+        '<｜｜DSML｜｜ calls>\n'
+        '<｜｜DSML｜｜ invoke name="browser_snapshot">\n'
+        '<｜｜DSML｜｜ parameter name="max_elements" string="false">100</｜｜DSML｜｜ parameter>\n'
+        '</｜｜DSML｜｜ invoke>\n'
+        '</｜｜DSML｜｜ calls>'
+    )
+    assert "DSML" not in clean_result_narration(dsml)
+    assert "无法解析的工具调用" in clean_result_narration(dsml)
+    assert clean_result_narration("已完成。\n" + dsml) == "已完成。"
 
     from brain.task_runner import result_summary_preview
 
