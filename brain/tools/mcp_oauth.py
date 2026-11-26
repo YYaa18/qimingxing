@@ -7,12 +7,16 @@ import os
 import re
 import webbrowser
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from mcp.client.auth import AuthorizationCodeResult, OAuthClientProvider, TokenStorage
-from mcp.shared.auth import OAuthClientMetadata, OAuthToken, OAuthClientInformationFull
-from pydantic import AnyUrl
+# The MCP SDK is an optional capability: importing it costs ~300ms cold. Keep
+# module import cheap and load the SDK only when an MCP server actually needs
+# OAuth. Runtime code below imports the concrete types inside the few methods
+# that construct them; the annotations stay as strings via __future__.
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from mcp.client.auth import AuthorizationCodeResult, OAuthClientProvider
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 logger = logging.getLogger("qimingxing.tools.mcp_oauth")
 
@@ -24,7 +28,7 @@ def _safe_server_slug(server_name: str) -> str:
     return cleaned or "mcp_server"
 
 
-class FileTokenStorage(TokenStorage):
+class FileTokenStorage:
     """Per-server file storage (0600) for MCP OAuth 2.1 tokens and dynamic client registration."""
 
     def __init__(self, server_name: str, base_dir: Optional[Path] = None) -> None:
@@ -73,6 +77,8 @@ class FileTokenStorage(TokenStorage):
                 pass
 
     async def get_tokens(self) -> Optional[OAuthToken]:
+        from mcp.shared.auth import OAuthToken
+
         doc = self._read_doc()
         raw = doc.get("tokens")
         if not isinstance(raw, dict):
@@ -88,6 +94,8 @@ class FileTokenStorage(TokenStorage):
         self._write_doc(doc)
 
     async def get_client_info(self) -> Optional[OAuthClientInformationFull]:
+        from mcp.shared.auth import OAuthClientInformationFull
+
         doc = self._read_doc()
         raw = doc.get("client_info")
         if not isinstance(raw, dict):
@@ -149,6 +157,10 @@ class MCPOAuthCoordinator:
         interactive: bool = False,
         auth_timeout_sec: float = 180.0,
     ) -> OAuthClientProvider:
+        from mcp.client.auth import OAuthClientProvider
+        from mcp.shared.auth import OAuthClientMetadata
+        from pydantic import AnyUrl
+
         storage = self.get_storage(server_name)
         metadata = OAuthClientMetadata(
             redirect_uris=[AnyUrl(self.callback_url)],
@@ -233,6 +245,8 @@ class MCPOAuthCoordinator:
             msg = "OAuth 回调缺少 authorization code。"
             fut.set_exception(RuntimeError(msg))
             return False, msg
+
+        from mcp.client.auth import AuthorizationCodeResult
 
         fut.set_result(AuthorizationCodeResult(code=code, state=state, iss=iss))
         return True, "授权成功！启明星正在自动建立 MCP 连接，你可以关闭此标签页返回桌面。"
