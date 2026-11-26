@@ -850,7 +850,12 @@ class LLMRouter:
             user_msg = "\n".join(text_parts)
         else:
             user_msg = str(raw_user_msg)
-        lower_q = user_msg.lower()
+        # The L3 routing/capability sections are part of the user message.
+        # Mock intent keywords must only look at the actual question.
+        question = user_msg
+        if "【本轮用户提问】" in user_msg:
+            question = user_msg.rsplit("【本轮用户提问】", 1)[-1].strip()
+        lower_q = question.lower()
 
         if has_image:
             text = (
@@ -859,7 +864,7 @@ class LLMRouter:
             )
             step = 8
             delay = 0.015
-        elif any(k in user_msg for k in ("长文", "500字", "打断", "压测")) or "long" in lower_q:
+        elif any(k in question for k in ("长文", "500字", "打断", "压测")) or "long" in lower_q:
             text = (
                 "[EMOTION:thinking]\n"
                 "好的，下面是一段用于测试流式打断与并发控制的较长说明文字。"
@@ -867,7 +872,7 @@ class LLMRouter:
             )
             step = 6
             delay = 0.04
-        elif any(k in user_msg for k in ("提示", "攻略", "剧透", "卡片", "表格", "配装")) or any(
+        elif any(k in question for k in ("提示", "攻略", "剧透", "卡片", "表格", "配装")) or any(
             k in lower_q for k in ("hint", "spoiler", "card", "table")
         ):
             text = (
@@ -885,7 +890,7 @@ class LLMRouter:
             )
             step = 8
             delay = 0.015
-        elif any(k in user_msg for k in ("状态", "角色", "位置", "装备", "窗口", "感官")) or any(
+        elif any(k in question for k in ("状态", "角色", "位置", "装备", "窗口", "感官")) or any(
             k in lower_q for k in ("state", "status", "game", "window", "level")
         ):
             combined_ctx = f"{sys_msg}\n{user_msg}"
@@ -909,7 +914,7 @@ class LLMRouter:
             text = (
                 f"[EMOTION:happy]\n"
                 f"你好！我是启明星（当前使用 `{profile.name}` / `{profile.model}`）。"
-                f"我已经收到你的消息「{user_msg[:40]}」，三层星型协议链路工作正常！"
+                f"我已经收到你的消息「{question[:40]}」，三层星型协议链路工作正常！"
             )
             step = 6
             delay = 0.015
