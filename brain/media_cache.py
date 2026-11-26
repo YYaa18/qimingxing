@@ -201,7 +201,7 @@ class MediaCache(PooledHTTPClientMixin):
             headers={"User-Agent": "Qimingxing/1.0 image-search"},
         ) as client:
             for _ in range(_MAX_REDIRECTS + 1):
-                async with client.stream("GET", url) as resp:
+                async with client.stream("GET", url, timeout=timeout) as resp:
                     if resp.status_code in (301, 302, 303, 307, 308):
                         location = resp.headers.get("location", "")
                         next_url = urljoin(url, location)

@@ -67,7 +67,9 @@ class DeepSeekSearchProvider(PooledHTTPClientMixin, SearchProvider):
         url = f"{self.config.base_url}/tools/search"
         timeout = httpx.Timeout(self.config.timeout_seconds, connect=8.0)
         client = self._pooled_client(timeout)
-        resp = await client.post(url, headers=self._headers(), json={"query": query})
+        resp = await client.post(
+            url, headers=self._headers(), json={"query": query}, timeout=timeout
+        )
         resp.raise_for_status()
         data = resp.json()
         raw_results = data.get("results") or []
@@ -90,7 +92,9 @@ class DeepSeekSearchProvider(PooledHTTPClientMixin, SearchProvider):
         endpoint = f"{self.config.base_url}/tools/fetch"
         timeout = httpx.Timeout(self.config.timeout_seconds, connect=8.0)
         client = self._pooled_client(timeout)
-        resp = await client.post(endpoint, headers=self._headers(), json={"url": url})
+        resp = await client.post(
+            endpoint, headers=self._headers(), json={"url": url}, timeout=timeout
+        )
         resp.raise_for_status()
         data = resp.json()
         return FetchPageResult(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import AsyncIterator, Optional
 
@@ -61,14 +60,14 @@ class OpenAICompatibleASRProvider(_PooledHTTPClientMixin, ASRProvider):
         headers = {"Authorization": f"Bearer {api_key}"}
         model_id = (self.config.model or "").strip() or "FunAudioLLM/SenseVoiceSmall"
 
-        client = self._pooled_client(
-            httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
-        )
+        timeout = httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        client = self._pooled_client(timeout)
         resp = await client.post(
             url,
             headers=headers,
             files={"file": ("speech.wav", wav_bytes, "audio/wav")},
             data={"model": model_id},
+            timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -125,12 +124,13 @@ class OpenAICompatibleTTSProvider(_PooledHTTPClientMixin, TTSProvider):
             "response_format": "pcm",
         }
 
-        client = self._pooled_client(
-            httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
-        )
+        timeout = httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        client = self._pooled_client(timeout)
         carry = b""
         checked_wav_header = False
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
+        async with client.stream(
+            "POST", url, headers=headers, json=payload, timeout=timeout
+        ) as resp:
             resp.raise_for_status()
             async for raw_chunk in resp.aiter_bytes(chunk_size=4800):
                 if not raw_chunk:
@@ -161,6 +161,7 @@ class RoutedASRProvider(ASRProvider):
         self.config = config
         self._transport = transport
         self._delegate: Optional[ASRProvider] = None
+        self._retired: list[ASRProvider] = []
 
     def _get_delegate(self) -> ASRProvider:
         if self._delegate is None:
@@ -177,15 +178,15 @@ class RoutedASRProvider(ASRProvider):
     def update_config(self, config: AudioASRConfig) -> None:
         old, self._delegate, self.config = self._delegate, None, config
         if old is not None:
-            try:
-                asyncio.get_running_loop().create_task(old.aclose())
-            except RuntimeError:
-                pass
+            # Retire instead of closing: an in-flight transcription may still
+            # be using the old connection pool. Close at shutdown.
+            self._retired.append(old)
 
     async def aclose(self) -> None:
         delegate, self._delegate = self._delegate, None
-        if delegate is not None:
-            await delegate.aclose()
+        retired, self._retired = self._retired, []
+        for provider in ([delegate] if delegate is not None else []) + retired:
+            await provider.aclose()
 
     async def transcribe_pcm(
         self,
@@ -210,6 +211,7 @@ class RoutedTTSProvider(TTSProvider):
         self.config = config
         self._transport = transport
         self._delegate: Optional[TTSProvider] = None
+        self._retired: list[TTSProvider] = []
 
     def _get_delegate(self) -> TTSProvider:
         if self._delegate is None:
@@ -226,15 +228,14 @@ class RoutedTTSProvider(TTSProvider):
     def update_config(self, config: AudioTTSConfig) -> None:
         old, self._delegate, self.config = self._delegate, None, config
         if old is not None:
-            try:
-                asyncio.get_running_loop().create_task(old.aclose())
-            except RuntimeError:
-                pass
+            # A sentence may still be streaming through the old pool.
+            self._retired.append(old)
 
     async def aclose(self) -> None:
         delegate, self._delegate = self._delegate, None
-        if delegate is not None:
-            await delegate.aclose()
+        retired, self._retired = self._retired, []
+        for provider in ([delegate] if delegate is not None else []) + retired:
+            await provider.aclose()
 
     async def synthesize_pcm_stream(
         self,

@@ -56,6 +56,7 @@ class DeepSeekOCRProvider(PooledHTTPClientMixin, OCRProvider):
                 headers=headers,
                 files={"file": (f"screenshot.{ext}", image_bytes, content_type)},
                 data={"purpose": self._ocr_cfg.mode or "text_recognition"},
+                timeout=timeout,
             )
         except httpx.TimeoutException as exc:
             safe = self._app_cfg.redact_secrets(f"DeepSeek OCR 请求超时: {exc}")
@@ -91,6 +92,7 @@ class ScreenUnderstandingRouter(PooledHTTPClientMixin):
         self._app_config = config
         self._transport = transport
         self.last_ocr_usage: Optional[LLMUsage] = None
+        self._slot_ocr_provider: Optional[DeepSeekOCRProvider] = None
 
     def reload_config(self, config: AppConfig) -> None:
         self._app_config = config
@@ -103,9 +105,11 @@ class ScreenUnderstandingRouter(PooledHTTPClientMixin):
 
     async def aclose(self) -> None:
         await super().aclose()
-        close = getattr(self.ocr_provider, "aclose", None)
-        if close is not None:
-            await close()
+        for provider in (self.ocr_provider, self._slot_ocr_provider):
+            close = getattr(provider, "aclose", None)
+            if close is not None:
+                await close()
+        self._slot_ocr_provider = None
 
     async def _call_vision_slot(
         self,
@@ -121,11 +125,16 @@ class ScreenUnderstandingRouter(PooledHTTPClientMixin):
                 api_key=vision_prof.api_key,
             )
             assert self._app_config is not None
-            ocr_helper = DeepSeekOCRProvider(ocr_cfg, self._app_config)
-            try:
-                text = await ocr_helper.extract_text(image_bytes, content_type=content_type)
-            finally:
-                await ocr_helper.aclose()
+            if self._slot_ocr_provider is None:
+                self._slot_ocr_provider = DeepSeekOCRProvider(
+                    ocr_cfg, self._app_config, transport=self._transport
+                )
+            else:
+                self._slot_ocr_provider._ocr_cfg = ocr_cfg
+                self._slot_ocr_provider._app_cfg = self._app_config
+            text = await self._slot_ocr_provider.extract_text(
+                image_bytes, content_type=content_type
+            )
             self.last_ocr_usage = LLMUsage(
                 model=vision_prof.model,
                 profile=vision_prof.name,
@@ -166,7 +175,7 @@ class ScreenUnderstandingRouter(PooledHTTPClientMixin):
         }
         timeout = httpx.Timeout(25.0, connect=8.0)
         client = self._pooled_client(timeout)
-        resp = await client.post(url, headers=headers, json=payload)
+        resp = await client.post(url, headers=headers, json=payload, timeout=timeout)
         if resp.status_code >= 400:
             safe = (
                 self._app_config.redact_secrets(resp.text[:300])

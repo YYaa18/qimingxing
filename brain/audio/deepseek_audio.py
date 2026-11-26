@@ -46,13 +46,13 @@ class DeepSeekASRProvider(_PooledHTTPClientMixin, ASRProvider):
         url = f"{self.config.base_url.rstrip('/')}/tools/asr"
         headers = {"Authorization": f"Bearer {self.config.api_key}"}
 
-        client = self._pooled_client(
-            httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
-        )
+        timeout = httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        client = self._pooled_client(timeout)
         resp = await client.post(
             url,
             headers=headers,
             files={"file": ("speech.wav", wav_bytes, "audio/wav")},
+            timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -103,11 +103,12 @@ class DeepSeekTTSProvider(_PooledHTTPClientMixin, TTSProvider):
             "filter_markdown": bool(self.config.filter_markdown),
         }
 
-        client = self._pooled_client(
-            httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
-        )
+        timeout = httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        client = self._pooled_client(timeout)
         carry = b""
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
+        async with client.stream(
+            "POST", url, headers=headers, json=payload, timeout=timeout
+        ) as resp:
             resp.raise_for_status()
             async for raw_chunk in resp.aiter_bytes(chunk_size=4800):
                 if not raw_chunk:

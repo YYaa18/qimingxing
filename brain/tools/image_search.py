@@ -67,6 +67,7 @@ class TavilyImageSearchProvider(PooledHTTPClientMixin):
                 "Content-Type": "application/json",
             },
             json=payload,
+            timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -184,6 +185,7 @@ class ImageSearchTool(Tool):
             max_bytes=config.max_bytes,
             timeout_seconds=min(8.0, config.timeout_seconds),
         )
+        self._retired: List[Any] = []
 
     def update_config(self, config: ImageSearchToolConfig) -> None:
         old_provider, old_cache = self.provider, self.cache
@@ -194,17 +196,14 @@ class ImageSearchTool(Tool):
             max_bytes=config.max_bytes,
             timeout_seconds=min(8.0, config.timeout_seconds),
         )
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        for obj in (old_provider, old_cache):
-            close = getattr(obj, "aclose", None)
-            if close is not None:
-                loop.create_task(close())
+        # Do not close while a search/download may still be in flight; close on
+        # shutdown (or when the tool is unregistered, which now awaits aclose).
+        self._retired.extend([old_provider, old_cache])
 
     async def aclose(self) -> None:
-        for obj in (self.provider, self.cache):
+        current = [self.provider, self.cache]
+        retired, self._retired = self._retired, []
+        for obj in current + retired:
             close = getattr(obj, "aclose", None)
             if close is not None:
                 await close()
