@@ -454,6 +454,13 @@ class BackgroundTaskConfig:
 
 
 @dataclass
+class BrowserAutomationConfig:
+    cdp_endpoint: str = "http://127.0.0.1:9222"
+    headless: bool = True
+    channel: str = "chrome"
+
+
+@dataclass
 class ShortcutsConfig:
     ptt_hotkey: str = "right_option"
     chat_input_hotkey: str = "option+space"
@@ -512,6 +519,7 @@ class AppConfig:
     godot: GodotConfig = field(default_factory=GodotConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     background_tasks: BackgroundTaskConfig = field(default_factory=BackgroundTaskConfig)
+    browser: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
     shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
     deepseek: DeepSeekConfig = field(default_factory=DeepSeekConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
@@ -1125,6 +1133,15 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         watchdog_max_nudges=max(0, min(5, int(bg_raw.get("watchdog_max_nudges", 2)))),
     )
 
+    browser_raw = raw.get("browser") or {}
+    if not isinstance(browser_raw, dict):
+        browser_raw = {}
+    browser_cfg = BrowserAutomationConfig(
+        cdp_endpoint=str(browser_raw.get("cdp_endpoint") or "http://127.0.0.1:9222").strip(),
+        headless=bool(browser_raw.get("headless", True)),
+        channel=str(browser_raw.get("channel") or "chrome").strip(),
+    )
+
     shortcuts_raw = raw.get("shortcuts") or {}
     if not isinstance(shortcuts_raw, dict):
         shortcuts_raw = {}
@@ -1256,6 +1273,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         godot=godot,
         ui=ui,
         background_tasks=background_tasks,
+        browser=browser_cfg,
         shortcuts=shortcuts,
         deepseek=deepseek,
         gemini=gemini,
@@ -1797,6 +1815,21 @@ def save_settings_to_yaml(
                 bg_sec["watchdog_stall_sec"] = max(30, int(bg_up["watchdog_stall_sec"]))
             if "watchdog_max_nudges" in bg_up and bg_up["watchdog_max_nudges"] is not None:
                 bg_sec["watchdog_max_nudges"] = max(0, min(5, int(bg_up["watchdog_max_nudges"])))
+
+    browser_up = updates.get("browser")
+    if isinstance(browser_up, dict):
+        browser_sec = raw.setdefault("browser", {})
+        if isinstance(browser_sec, dict):
+            if "cdp_endpoint" in browser_up:
+                endpoint = str(browser_up.get("cdp_endpoint") or "").strip()
+                if endpoint:
+                    browser_sec["cdp_endpoint"] = endpoint
+            if "headless" in browser_up:
+                browser_sec["headless"] = bool(browser_up["headless"])
+            if "channel" in browser_up:
+                channel = str(browser_up.get("channel") or "").strip()
+                if channel:
+                    browser_sec["channel"] = channel
 
     shortcuts_up = updates.get("shortcuts")
     if isinstance(shortcuts_up, dict):

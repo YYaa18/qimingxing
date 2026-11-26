@@ -11,6 +11,13 @@ from brain.tools.bg_task_tools import (
     BgTaskListTool,
     BgTaskSubmitTool,
 )
+from brain.tools.browser_tools import (
+    BrowserActTool,
+    BrowserExtractTool,
+    BrowserHandoffTool,
+    BrowserOpenTool,
+    BrowserSnapshotTool,
+)
 from brain.tools.clipboard_tool import ClipboardTool
 from brain.tools.doc_tools import (
     DocGenerateTool,
@@ -99,6 +106,11 @@ def build_default_tool_registry(
     registry.register(DocGenerateTool())
     registry.register(DocRenameTool())
     registry.register(DocMatchRenameTool())
+    registry.register(BrowserOpenTool())
+    registry.register(BrowserSnapshotTool())
+    registry.register(BrowserActTool())
+    registry.register(BrowserExtractTool())
+    registry.register(BrowserHandoffTool())
     registry.register(AskUserTool())
     registry.register(OpenQimingxingUITool())
     registry.register(ScheduleTaskTool())
@@ -132,6 +144,11 @@ __all__ = [
     "BgTaskInspectTool",
     "BgTaskListTool",
     "BgTaskSubmitTool",
+    "BrowserActTool",
+    "BrowserExtractTool",
+    "BrowserHandoffTool",
+    "BrowserOpenTool",
+    "BrowserSnapshotTool",
     "CancelTaskTool",
     "ClipboardTool",
     "DeepSeekSearchProvider",

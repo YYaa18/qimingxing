@@ -56,6 +56,13 @@ WORKER_PACK_TOOLS: Dict[str, Set[str]] = {
         "doc_rename",
         "doc_match_rename",
     },
+    "browser_auto": {
+        "browser_open",
+        "browser_snapshot",
+        "browser_act",
+        "browser_extract",
+        "browser_handoff",
+    },
 }
 
 _WRITE_PATH_KEYS = ("path", "output_path", "dest", "destination", "artifact_path", "target_path")
@@ -144,6 +151,10 @@ class WorkerMandate:
     max_steps: int = 24
     max_prompt_tokens_total: int = 180_000
     max_wall_seconds: int = 600
+    browser_mode: str = "isolated"
+    allowed_domains: List[str] = field(default_factory=list)
+    allow_downloads: bool = False
+    max_page_actions: int = 40
     require_approval_risks: List[str] = field(default_factory=lambda: ["high", "destructive"])
 
     @classmethod
@@ -159,6 +170,14 @@ class WorkerMandate:
             max_steps=max(1, min(64, int(data.get("max_steps") or 24))),
             max_prompt_tokens_total=max(10_000, int(data.get("max_prompt_tokens_total") or 180_000)),
             max_wall_seconds=max(30, min(3600, int(data.get("max_wall_seconds") or 600))),
+            browser_mode=(
+                str(data.get("browser_mode") or "isolated").lower()
+                if str(data.get("browser_mode") or "isolated").lower() in ("isolated", "live")
+                else "isolated"
+            ),
+            allowed_domains=_strs("allowed_domains"),
+            allow_downloads=bool(data.get("allow_downloads", False)),
+            max_page_actions=max(1, min(200, int(data.get("max_page_actions") or 40))),
             require_approval_risks=_strs("require_approval_risks") or ["high", "destructive"],
         )
 
@@ -170,6 +189,10 @@ class WorkerMandate:
             "max_steps": self.max_steps,
             "max_prompt_tokens_total": self.max_prompt_tokens_total,
             "max_wall_seconds": self.max_wall_seconds,
+            "browser_mode": self.browser_mode,
+            "allowed_domains": list(self.allowed_domains),
+            "allow_downloads": self.allow_downloads,
+            "max_page_actions": self.max_page_actions,
             "require_approval_risks": list(self.require_approval_risks),
         }
 
@@ -177,6 +200,11 @@ class WorkerMandate:
         keys = [f"path:{_real(p)}" for p in self.writable_paths]
         if "macos_office" in self.allowed_packs:
             keys.extend(["app:notes", "app:calendar", "app:reminders", "app:mail"])
+        if "browser_auto" in self.allowed_packs:
+            if self.browser_mode == "live":
+                keys.append("browser:live_session")
+            else:
+                keys.append("browser:isolated_profile")
         return sorted(set(keys))
 
 

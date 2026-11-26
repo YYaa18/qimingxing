@@ -52,6 +52,8 @@ class TaskDispatchTool(Tool):
         "使用 doc_office 能力包；Worker 可使用 doc_match_rename 完成表格键值匹配重命名并生成 CSV 核对报告。"
         "用户通常只描述业务意图：请从上下文/附件推断输入目录，packs 填 doc_office，"
         "并把输入目录与期望输出目录一并放进 writable_paths（没有写入授权会被硬拒绝）。"
+        "浏览器自动化使用 browser_auto 能力包：默认 browser_mode=isolated；"
+        "只有确实需要用户已登录的主浏览器时才用 live，并必须提供 allowed_domains。"
     )
     default_risk: RiskLevel = "safe"
     parameters_schema = {
@@ -68,13 +70,25 @@ class TaskDispatchTool(Tool):
             "packs": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "能力包：web_research / dev_ops / macos_office / media_studio / doc_office / mcp:<server>",
+                "description": "能力包：web_research / dev_ops / macos_office / media_studio / doc_office / browser_auto / mcp:<server>",
             },
             "writable_paths": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "允许 Worker 写入的本地路径根目录；只读任务可留空",
             },
+            "browser_mode": {
+                "type": "string",
+                "enum": ["isolated", "live"],
+                "description": "浏览器模式；默认 isolated，live 需同时给出 allowed_domains",
+            },
+            "allowed_domains": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "live 模式下允许接管的域名（必填且非空）",
+            },
+            "allow_downloads": {"type": "boolean"},
+            "max_page_actions": {"type": "integer", "minimum": 1, "maximum": 200},
             "priority": {"type": "string", "enum": ["low", "normal", "high"]},
         },
         "required": ["goal"],
@@ -86,8 +100,10 @@ class TaskDispatchTool(Tool):
     def classify_risk(self, arguments: Dict[str, Any]) -> RiskLevel:
         packs = arguments.get("packs")
         writable = arguments.get("writable_paths")
-        if (isinstance(packs, list) and "dev_ops" in [str(p) for p in packs]) or (
-            isinstance(writable, list) and any(str(p).strip() for p in writable)
+        if (
+            (isinstance(packs, list) and "dev_ops" in [str(p) for p in packs])
+            or (isinstance(writable, list) and any(str(p).strip() for p in writable))
+            or str(arguments.get("browser_mode") or "") == "live"
         ):
             return "confirm"
         return "safe"
@@ -102,7 +118,9 @@ class TaskDispatchTool(Tool):
         return (
             f"派发后台 Worker：{str(arguments.get('goal') or '')[:60]}"
             f"（能力包 {', '.join(str(p) for p in packs) or 'web_research'}"
-            f"；写入根 {', '.join(str(p) for p in writable) or '无'}）"
+            f"；写入根 {', '.join(str(p) for p in writable) or '无'}"
+            f"；浏览器 {str(arguments.get('browser_mode') or 'isolated')}"
+            f"{' / ' + ', '.join(str(d) for d in (arguments.get('allowed_domains') or [])) if arguments.get('browser_mode') == 'live' else ''}）"
         )
 
     def format_approval_details(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -110,6 +128,8 @@ class TaskDispatchTool(Tool):
             "goal": str(arguments.get("goal") or "")[:500],
             "packs": arguments.get("packs") or ["web_research"],
             "writable_paths": arguments.get("writable_paths") or [],
+            "browser_mode": str(arguments.get("browser_mode") or "isolated"),
+            "allowed_domains": arguments.get("allowed_domains") or [],
             "origin": "explicit_user",
         }
 
@@ -125,7 +145,10 @@ class TaskDispatchTool(Tool):
         packs = arguments.get("packs")
         if not isinstance(packs, list) or not packs:
             packs = ["web_research"]
-        accepted = {"web_research", "dev_ops", "macos_office", "media_studio", "doc_office"}
+        accepted = {
+            "web_research", "dev_ops", "macos_office", "media_studio",
+            "doc_office", "browser_auto",
+        }
         clean_packs = [
             str(p).strip() for p in packs
             if str(p).strip() in accepted or str(p).strip().startswith("mcp:")
@@ -140,10 +163,28 @@ class TaskDispatchTool(Tool):
             # The recipe we dropped named the approved output folder; carry
             # just that fact into the compact business goal.
             goal = f"{goal}\n输出目录：{writable_paths[0]}"
+        browser_mode = str(arguments.get("browser_mode") or "isolated").strip().lower()
+        if browser_mode not in ("isolated", "live"):
+            browser_mode = "isolated"
+        allowed_domains = arguments.get("allowed_domains")
+        if not isinstance(allowed_domains, list):
+            allowed_domains = []
+        allowed_domains = [str(d).strip().lower() for d in allowed_domains if str(d).strip()]
+        if "browser_auto" in clean_packs and browser_mode == "live" and not allowed_domains:
+            return ToolResult(
+                ok=False,
+                output="live 模式必须提供非空 allowed_domains（绑定允许接管的域名）。",
+                summary="live 模式缺少域名白名单",
+                status="error",
+            )
         mandate = {
             "origin": "explicit_user",
             "allowed_packs": clean_packs,
             "writable_paths": writable_paths,
+            "browser_mode": browser_mode if "browser_auto" in clean_packs else "isolated",
+            "allowed_domains": allowed_domains if "browser_auto" in clean_packs else [],
+            "allow_downloads": bool(arguments.get("allow_downloads", False)),
+            "max_page_actions": int(arguments.get("max_page_actions") or 40),
         }
         record = await runner.submit(
             title=title,
