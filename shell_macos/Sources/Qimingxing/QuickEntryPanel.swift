@@ -852,6 +852,17 @@ struct QuickEntryRootView: View {
             turnID: turn.id,
             width: QuickEntryLayout.answerWidth,
             shouldAutoScroll: shouldAutoScroll,
+            tableMedia: turn.media.filter(\.isMarkdownTable),
+            onOpenTable: { index in
+                let items = turn.media.filter(\.isMarkdownTable)
+                guard items.indices.contains(index) else { return }
+                MediaViewerLauncher.open(
+                    items: items,
+                    selectedID: items[index].mediaId,
+                    title: items[index].title.isEmpty ? "表格" : items[index].title,
+                    contextLabel: "本轮回答"
+                )
+            },
             onFinish: {
                 caughtUpAnswerCount = latestTurn?.answer.count ?? -1
                 completeRevealIfReady()
@@ -1156,7 +1167,7 @@ struct QuickEntryRootView: View {
     private func copyAnswer(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        pasteboard.setString(QMXMarkdownTables.strippingTables(from: text), forType: .string)
         copiedAnswer = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
             copiedAnswer = false
@@ -1284,6 +1295,8 @@ private struct AnswerScrollView: View {
     let turnID: String
     let width: CGFloat
     let shouldAutoScroll: Bool
+    var tableMedia: [MediaItem] = []
+    var onOpenTable: (Int) -> Void = { _ in }
     var onFinish: () -> Void = {}
 
     var body: some View {
@@ -1294,6 +1307,8 @@ private struct AnswerScrollView: View {
                         text: text,
                         fontSize: fontSize,
                         turnID: turnID,
+                        tableMedia: tableMedia,
+                        onOpenTable: onOpenTable,
                         onTick: {
                             if shouldAutoScroll {
                                 proxy.scrollTo("answerBottom", anchor: .bottom)
@@ -1344,6 +1359,8 @@ private struct TypewriterText: View {
     let text: String
     let fontSize: CGFloat
     let turnID: String
+    var tableMedia: [MediaItem] = []
+    var onOpenTable: (Int) -> Void = { _ in }
     var onTick: () -> Void = {}
     var onFinish: () -> Void = {}
 
@@ -1356,12 +1373,16 @@ private struct TypewriterText: View {
         text: String,
         fontSize: CGFloat,
         turnID: String,
+        tableMedia: [MediaItem] = [],
+        onOpenTable: @escaping (Int) -> Void = { _ in },
         onTick: @escaping () -> Void = {},
         onFinish: @escaping () -> Void = {}
     ) {
         self.text = text
         self.fontSize = fontSize
         self.turnID = turnID
+        self.tableMedia = tableMedia
+        self.onOpenTable = onOpenTable
         self.onTick = onTick
         self.onFinish = onFinish
         let parsed = Self.parse(text)
@@ -1404,7 +1425,14 @@ private struct TypewriterText: View {
 
     @ViewBuilder
     private func blockView(_ block: StageBlock, _ visible: String) -> some View {
-        if block.isCode {
+        if let table = block.table {
+            let media = tableMedia.indices.contains(table.id) ? tableMedia[table.id] : nil
+            QMXTableNotice(
+                table: table,
+                media: media,
+                onOpen: media == nil ? nil : { onOpenTable(table.id) }
+            )
+        } else if block.isCode {
             Text(visible)
                 .font(.system(size: codeFontSize, design: .monospaced))
                 .lineSpacing(2)
@@ -1484,15 +1512,40 @@ private struct TypewriterText: View {
                     isCode: false,
                     language: "",
                     text: joined,
+                    table: nil,
                     start: 0
                 ))
             }
             proseLines.removeAll()
         }
 
-        for line in raw.components(separatedBy: .newlines) {
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        let tables = QMXMarkdownTables.scan(normalized)
+        var tableByStart: [Int: QMXMarkdownTable] = [:]
+        for table in tables {
+            tableByStart[table.startLine] = table
+        }
+
+        var index = 0
+        while index < lines.count {
+            if let table = tableByStart[index] {
+                flushProse()
+                parsed.append(StageBlock(
+                    id: parsed.count,
+                    isCode: false,
+                    language: "",
+                    text: "表格",
+                    table: table,
+                    start: 0
+                ))
+                index = table.endLine + 1
+                continue
+            }
+
+            let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
                 if inCode {
                     let code = codeLines.joined(separator: "\n")
                     if !code.isEmpty {
@@ -1501,6 +1554,7 @@ private struct TypewriterText: View {
                             isCode: true,
                             language: language,
                             text: code,
+                            table: nil,
                             start: 0
                         ))
                     }
@@ -1512,6 +1566,7 @@ private struct TypewriterText: View {
                     inCode = true
                     language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 }
+                index += 1
                 continue
             }
             if inCode {
@@ -1521,6 +1576,7 @@ private struct TypewriterText: View {
             } else {
                 proseLines.append(trimmed)
             }
+            index += 1
         }
 
         if inCode {
@@ -1531,6 +1587,7 @@ private struct TypewriterText: View {
                     isCode: true,
                     language: language,
                     text: code,
+                    table: nil,
                     start: 0
                 ))
             }
@@ -1539,7 +1596,14 @@ private struct TypewriterText: View {
         }
 
         if parsed.isEmpty, !raw.isEmpty {
-            parsed.append(StageBlock(id: 0, isCode: false, language: "", text: raw, start: 0))
+            parsed.append(StageBlock(
+                id: 0,
+                isCode: false,
+                language: "",
+                text: raw,
+                table: nil,
+                start: 0
+            ))
         }
 
         var offset = 0
@@ -1557,6 +1621,7 @@ private struct StageBlock: Identifiable {
     let isCode: Bool
     let language: String
     let text: String
+    let table: QMXMarkdownTable?
     var start: Int
 }
 

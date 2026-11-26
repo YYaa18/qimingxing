@@ -677,6 +677,8 @@ struct MarkdownMessageView: View {
                     CodeBlockCard(language: lang, code: code)
                 case .prose(let proseText):
                     ProseMarkdownText(proseText)
+                case .table(let table):
+                    QMXTableNotice(table: table)
                 }
             }
         }
@@ -685,11 +687,17 @@ struct MarkdownMessageView: View {
     private enum Block {
         case prose(String)
         case code(language: String, content: String)
+        case table(QMXMarkdownTable)
     }
 
     private static func parseBlocks(_ raw: String) -> [Block] {
         let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
         let lines = normalized.components(separatedBy: "\n")
+        let tables = QMXMarkdownTables.scan(normalized)
+        var tableByStart: [Int: QMXMarkdownTable] = [:]
+        for table in tables {
+            tableByStart[table.startLine] = table
+        }
         var result: [Block] = []
         var proseLines: [String] = []
         var codeLines: [String] = []
@@ -704,9 +712,17 @@ struct MarkdownMessageView: View {
             proseLines.removeAll()
         }
 
-        for line in lines {
+        var index = 0
+        while index < lines.count {
+            if let table = tableByStart[index] {
+                flushProse()
+                result.append(.table(table))
+                index = table.endLine + 1
+                continue
+            }
+            let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
                 if !inCode {
                     flushProse()
                     inCode = true
@@ -717,6 +733,7 @@ struct MarkdownMessageView: View {
                     codeLang = ""
                     inCode = false
                 }
+                index += 1
                 continue
             }
             if inCode {
@@ -724,6 +741,7 @@ struct MarkdownMessageView: View {
             } else {
                 proseLines.append(line)
             }
+            index += 1
         }
 
         if inCode {

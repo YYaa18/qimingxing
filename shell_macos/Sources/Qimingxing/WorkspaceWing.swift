@@ -348,7 +348,9 @@ struct WorkspaceWingView: View {
     // MARK: Helpers
 
     private func compactText(_ raw: String) -> String {
-        var text = qmxCleanAssistantText(raw)
+        var text = QMXMarkdownTables.replacingTables(in: qmxCleanAssistantText(raw)) { table in
+            "表格：\(table.title)（\(table.summary)）"
+        }
         for token in ["**", "`"] {
             text = text.replacingOccurrences(of: token, with: "")
         }

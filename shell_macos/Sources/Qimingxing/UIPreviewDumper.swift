@@ -45,7 +45,20 @@ enum UIPreviewDumper {
             SourceItem(title: "Google 官方博客", url: "https://blog.google/technology/ai/", domain: "blog.google"),
             SourceItem(title: "DeepSeek API Docs", url: "https://api-docs.deepseek.com/", domain: "api-docs.deepseek.com"),
         ]
+        let demoTable = MediaItem(
+            mediaId: "media_demo_table",
+            kind: "file",
+            title: "端口检查结果",
+            mimeType: "text/markdown",
+            sourceTitle: "本轮回答",
+            provider: "qimingxing",
+            fileExt: "md-table",
+            summaryBadge: "2 行 × 2 列",
+            previewColumns: ["检查项", "结果"],
+            previewRows: [["18790", "已监听"], ["返回值", "0"]]
+        )
         let demoMedia = [
+            demoTable,
             MediaItem(
                 mediaId: "media_demo_image",
                 kind: "image",
@@ -81,7 +94,7 @@ enum UIPreviewDumper {
                 kind: .answer,
                 title: "帮我写一个 Python 快速检查端口占用的脚本",
                 prompt: "帮我写一个 Python 快速检查端口占用的脚本",
-                body: "可以使用标准库 `socket` 在 10 行内完成：\n\n```python\nimport socket\nwith socket.socket() as s:\n    print(s.connect_ex(('127.0.0.1', 18790)) == 0)\n```\n\n如果返回 `True` 说明端口已被监听。",
+                body: "可以使用标准库 `socket` 在 10 行内完成：\n\n```python\nimport socket\nwith socket.socket() as s:\n    print(s.connect_ex(('127.0.0.1', 18790)) == 0)\n```\n\n如果返回 `True` 说明端口已被监听。\n\n**端口检查结果**\n\n| 检查项 | 结果 |\n| --- | --- |\n| 18790 | 已监听 |\n| 返回值 | 0 |",
                 status: "completed",
                 progress: 0,
                 path: "",
@@ -149,7 +162,7 @@ enum UIPreviewDumper {
                 turnId: "t1",
                 isUser: false,
                 meta: "启明星 · DeepSeek Flash",
-                text: "可以使用标准库 `socket` 在 10 行内完成：\n\n```python\nimport socket\nwith socket.socket() as s:\n    print(s.connect_ex(('127.0.0.1', 18790)) == 0)\n```\n\n如果返回 `True` 说明端口已被监听。",
+                text: "可以使用标准库 `socket` 在 10 行内完成：\n\n```python\nimport socket\nwith socket.socket() as s:\n    print(s.connect_ex(('127.0.0.1', 18790)) == 0)\n```\n\n如果返回 `True` 说明端口已被监听。\n\n**端口检查结果**\n\n| 检查项 | 结果 |\n| --- | --- |\n| 18790 | 已监听 |\n| 返回值 | 0 |",
                 sources: demoSources,
                 media: demoMedia
             )
@@ -186,6 +199,30 @@ enum UIPreviewDumper {
             onClose: {}
         )
         render(qeWing, size: CGSize(width: QuickEntryLayout.chatWidth + QuickEntryLayout.wingWidth, height: 430), to: outputDir.appendingPathComponent("quick_entry_wing.png"))
+
+        // 2d. Attached media wing with a virtual markdown table
+        MediaViewerModel.shared.load(
+            items: [demoTable],
+            selectedID: demoTable.mediaId,
+            title: demoTable.title,
+            contextLabel: "本轮回答"
+        )
+        let inputStateMediaWing = QuickEntryInputState()
+        inputStateMediaWing.isExpanded = true
+        inputStateMediaWing.isWorkspaceWingOpen = true
+        inputStateMediaWing.auxiliaryTab = .media
+        let qeMediaWing = QuickEntryRootView(
+            brainClient: client,
+            desktopActions: desktop,
+            workspaceStore: workspaceStore,
+            inputState: inputStateMediaWing,
+            onClose: {}
+        )
+        render(
+            qeMediaWing,
+            size: CGSize(width: QuickEntryLayout.chatWidth + QuickEntryLayout.wingWidth, height: 430),
+            to: outputDir.appendingPathComponent("quick_entry_wing_media.png")
+        )
 
         // 2b. Quick Entry (thinking: compact, no answer yet)
         client.messages = []
@@ -329,6 +366,10 @@ enum UIPreviewDumper {
         )
         let aprView = ApprovalModalView(item: aprItem) { _, _, _ in }
         render(aprView, size: CGSize(width: 440, height: 360), to: outputDir.appendingPathComponent("approval_modal.png"))
+
+        // 5b. Detached media viewer with a virtual markdown table
+        let tableView = MediaViewerContent(model: MediaViewerModel.shared, mode: .detached)
+        render(tableView, size: CGSize(width: 860, height: 620), to: outputDir.appendingPathComponent("media_viewer_table.png"))
 
         // 6. Workspace
         let workspaceView = WorkspaceRootView(store: workspaceStore, brainClient: client)
