@@ -732,6 +732,65 @@
       "title": "InputTextPayload",
       "type": "object"
     },
+    "MediaItem": {
+      "properties": {
+        "media_id": {
+          "title": "Media Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "image",
+            "audio",
+            "video",
+            "file"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "local_path": {
+          "default": "",
+          "title": "Local Path",
+          "type": "string"
+        },
+        "mime_type": {
+          "default": "",
+          "title": "Mime Type",
+          "type": "string"
+        },
+        "width": {
+          "default": 0,
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "default": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "duration_sec": {
+          "default": 0.0,
+          "title": "Duration Sec",
+          "type": "number"
+        },
+        "size_bytes": {
+          "default": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "media_id",
+        "kind"
+      ],
+      "title": "MediaItem",
+      "type": "object"
+    },
     "OutputArtifactCapsulePayload": {
       "properties": {
         "turn_id": {
@@ -956,6 +1015,20 @@
           ],
           "default": null,
           "title": "Elapsed Ms"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SourceItem"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "media": {
+          "items": {
+            "$ref": "#/$defs/MediaItem"
+          },
+          "title": "Media",
+          "type": "array"
         }
       },
       "title": "OutputTurnEndPayload",
@@ -1093,6 +1166,29 @@
         "turn_id"
       ],
       "title": "SensesCaptureRequestPayload",
+      "type": "object"
+    },
+    "SourceItem": {
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "domain": {
+          "default": "",
+          "title": "Domain",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "url"
+      ],
+      "title": "SourceItem",
       "type": "object"
     },
     "SystemCaptureDonePayload": {

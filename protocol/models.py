@@ -276,9 +276,29 @@ class OutputTurnStartPayload(ProtocolModel):
     user_text: str = ""
 
 
+class SourceItem(ProtocolModel):
+    title: str
+    url: str
+    domain: str = ""
+
+
+class MediaItem(ProtocolModel):
+    media_id: str
+    kind: Literal["image", "audio", "video", "file"]
+    title: str = ""
+    local_path: str = ""
+    mime_type: str = ""
+    width: int = 0
+    height: int = 0
+    duration_sec: float = 0.0
+    size_bytes: int = 0
+
+
 class OutputTurnEndPayload(ProtocolModel):
     finish_reason: Literal["completed", "cancelled", "error"] = "completed"
     elapsed_ms: Optional[int] = None
+    sources: List[SourceItem] = Field(default_factory=list)
+    media: List[MediaItem] = Field(default_factory=list)
 
 
 class OutputTextDeltaPayload(ProtocolModel):

@@ -237,6 +237,10 @@ final class BrainClient: ObservableObject {
         if isGenerating {
             cancelActiveTurn(reason: "clear_history")
         }
+        currentTurnId = nil
+        emotion = "neutral"
+        toolStatusText = ""
+        errorBannerText = ""
         messages.removeAll()
         artifactCapsules.removeAll()
         sendEnvelope(type: "input.action", payload: ["action": "clear_history"])
@@ -412,6 +416,12 @@ final class BrainClient: ObservableObject {
             toolStatusText = ""
             if let idx = messages.lastIndex(where: { !$0.isUser && $0.turnId == turnId }) {
                 messages[idx].isStreaming = false
+                if let rawSources = payload["sources"] as? [[String: Any]] {
+                    messages[idx].sources = rawSources.compactMap(SourceItem.init(dict:))
+                }
+                if let rawMedia = payload["media"] as? [[String: Any]] {
+                    messages[idx].media = rawMedia.compactMap(MediaItem.init(dict:))
+                }
                 if (payload["finish_reason"] as? String) == "cancelled" {
                     messages[idx].meta += " · [已中断]"
                 }

@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 FactStatus = Literal["active", "superseded", "deleted"]
 EpisodeKind = Literal["conversation", "desktop_footprint", "chitchat"]
@@ -159,6 +159,8 @@ class MessageRecord:
     content: str
     emotion: str = "neutral"
     desktop_context_summary: str = ""
+    sources: List[Dict[str, Any]] = field(default_factory=list)
+    media: List[Dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
 

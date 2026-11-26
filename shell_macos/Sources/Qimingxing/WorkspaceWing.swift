@@ -327,7 +327,7 @@ struct WorkspaceWingView: View {
             .help("拆分到独立窗口")
         }
         .padding(.horizontal, 18)
-        .frame(height: 38)
+        .frame(height: QuickEntryLayout.footerHeight)
     }
 
     // MARK: Helpers

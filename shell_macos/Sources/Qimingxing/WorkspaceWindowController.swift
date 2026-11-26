@@ -37,6 +37,8 @@ struct WorkspaceItem: Identifiable, Codable, Equatable {
     var path: String
     var createdAt: Date
     var updatedAt: Date
+    var sources: [SourceItem]? = nil
+    var media: [MediaItem]? = nil
 }
 
 // MARK: - Store
@@ -84,6 +86,8 @@ final class WorkspaceStore: ObservableObject {
         var prompt: String = ""
         var answer: String = ""
         var streaming: Bool = false
+        var sources: [SourceItem] = []
+        var media: [MediaItem] = []
     }
 
     private func ingestMessages(_ messages: [ChatEntry]) {
@@ -99,6 +103,8 @@ final class WorkspaceStore: ObservableObject {
             } else {
                 map[message.turnId]?.answer = qmxCleanAssistantText(message.text)
                 map[message.turnId]?.streaming = message.isStreaming
+                map[message.turnId]?.sources = message.sources
+                map[message.turnId]?.media = message.media
             }
         }
 
@@ -113,7 +119,9 @@ final class WorkspaceStore: ObservableObject {
             if let existing,
                existing.prompt == turn.prompt,
                existing.body == turn.answer,
-               existing.status == status {
+               existing.status == status,
+               existing.sources == turn.sources,
+               existing.media == turn.media {
                 continue
             }
             upsert(WorkspaceItem(
@@ -126,7 +134,9 @@ final class WorkspaceStore: ObservableObject {
                 progress: 0,
                 path: "",
                 createdAt: existing?.createdAt ?? Date(),
-                updatedAt: Date()
+                updatedAt: Date(),
+                sources: turn.sources.isEmpty ? nil : turn.sources,
+                media: turn.media.isEmpty ? nil : turn.media
             ))
         }
     }
@@ -727,6 +737,12 @@ struct WorkspaceRootView: View {
                     .foregroundStyle(QMXTheme.textTertiary)
             } else {
                 MarkdownMessageView(text: turn.body)
+                if let sources = turn.sources, !sources.isEmpty {
+                    SourceChipsView(sources: sources)
+                }
+                if let media = turn.media, !media.isEmpty {
+                    MediaStripView(media: media, mode: .expanded)
+                }
             }
         }
         .padding(.leading, 12)
@@ -771,6 +787,12 @@ struct WorkspaceRootView: View {
         switch item.kind {
         case .answer:
             MarkdownMessageView(text: item.body)
+            if let sources = item.sources, !sources.isEmpty {
+                SourceChipsView(sources: sources)
+            }
+            if let media = item.media, !media.isEmpty {
+                MediaStripView(media: media, mode: .expanded)
+            }
 
         case .task:
             HStack(spacing: 10) {

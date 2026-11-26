@@ -11,7 +11,6 @@ import httpx
 
 from brain.config import AppConfig, ProfileConfig, is_local_provider
 from brain.gemini_native import (
-    citation_footer as gemini_citation_footer,
     grounding_sources as gemini_grounding_sources,
     is_gemini_native_profile,
 )
@@ -223,6 +222,7 @@ class LLMRouter:
         self._config = config
         self._active_profile: str = config.default_profile
         self.last_usage: Optional[LLMUsage] = None
+        self.last_annotations: List[Dict[str, Any]] = []
         self._transport = transport
 
     @property
@@ -273,6 +273,7 @@ class LLMRouter:
         json_mode: bool = False,
     ) -> AsyncIterator[str]:
         profile = self.get_profile(profile_name)
+        self.last_annotations = []
         started = time.perf_counter()
         logger.info(
             "Starting LLM stream: profile=%s provider=%s model=%s",
@@ -500,9 +501,10 @@ class LLMRouter:
                             yield str(text)
         if not emitted:
             yield self._gemini_empty_note(finish_reason, block_reason)
-        footer = gemini_citation_footer(sources)
-        if footer:
-            yield footer
+        self.last_annotations = [
+            {"type": "url_citation", "url_citation": {"url": source["url"], "title": source["title"]}}
+            for source in sources
+        ]
 
     async def _complete_gemini_with_tools(
         self,
@@ -609,12 +611,6 @@ class LLMRouter:
                                 )
                             )
         full_content = "".join(content_parts)
-        footer = gemini_citation_footer(sources)
-        if footer and footer.strip() not in full_content:
-            full_content += footer
-            content_parts.append(footer)
-            if on_text_delta is not None:
-                await on_text_delta(footer)
         if not full_content.strip():
             note = self._gemini_empty_note(finish_reason, block_reason)
             if note:
@@ -1068,12 +1064,6 @@ class LLMRouter:
             if entry["name"]
         ]
         full_content = "".join(content_parts)
-        footer = _citation_footer(annotations)
-        if footer and footer.strip() not in full_content:
-            full_content += footer
-            content_parts.append(footer)
-            if on_text_delta is not None:
-                await on_text_delta(footer)
         if refusal and not full_content.strip():
             refusal_note = f"（内容安全策略拒绝了这次请求：{refusal}）"
             full_content = refusal_note

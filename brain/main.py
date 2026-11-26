@@ -300,7 +300,7 @@ def create_app(
                 "today_usage": {
                     "calls": today_usage.calls,
                     "prompt_tokens": today_usage.prompt_tokens,
-                    "prompt_cache_hit_tokens": today_usage.prompt_cache_hit_tokens,
+                    "cached_input_tokens": today_usage.cached_input_tokens,
                     "completion_tokens": today_usage.completion_tokens,
                     "total_cost_cny": round(today_usage.total_cost_cny, 6),
                     "cache_hit_rate": round(today_usage.cache_hit_rate, 4),

@@ -104,15 +104,18 @@ struct VisualEffectBlur: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blendingMode: NSVisualEffectView.BlendingMode
     let state: NSVisualEffectView.State
+    let cornerRadius: CGFloat
 
     init(
         material: NSVisualEffectView.Material = .popover,
         blendingMode: NSVisualEffectView.BlendingMode = .behindWindow,
-        state: NSVisualEffectView.State = .active
+        state: NSVisualEffectView.State = .active,
+        cornerRadius: CGFloat = 0
     ) {
         self.material = material
         self.blendingMode = blendingMode
         self.state = state
+        self.cornerRadius = cornerRadius
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -124,6 +127,7 @@ struct VisualEffectBlur: NSViewRepresentable {
                 ? NSColor(calibratedWhite: 0.96, alpha: 1.0)
                 : NSColor(red: 0.039, green: 0.047, blue: 0.063, alpha: 1.0)
             v.layer?.backgroundColor = color.cgColor
+            applyCornerRadius(to: v)
             return v
         }
         let view = NSVisualEffectView()
@@ -131,14 +135,24 @@ struct VisualEffectBlur: NSViewRepresentable {
         view.blendingMode = blendingMode
         view.state = state
         view.isEmphasized = true
+        applyCornerRadius(to: view)
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        applyCornerRadius(to: nsView)
         guard let ve = nsView as? NSVisualEffectView else { return }
         ve.material = material
         ve.blendingMode = blendingMode
         ve.state = state
+    }
+
+    private func applyCornerRadius(to view: NSView) {
+        guard cornerRadius > 0 else { return }
+        view.wantsLayer = true
+        view.layer?.cornerRadius = cornerRadius
+        view.layer?.cornerCurve = .continuous
+        view.layer?.masksToBounds = true
     }
 }
 
@@ -616,6 +630,41 @@ struct HairlineBorderOverlay: View {
 
 // MARK: - Markdown
 
+@discardableResult
+func qmxOpenSafeURL(_ url: URL) -> OpenURLAction.Result {
+    guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+        return .discarded
+    }
+    NSWorkspace.shared.open(url)
+    return .handled
+}
+
+struct InlineMarkdownText: View {
+    let text: String
+    var fontSize: CGFloat = 14
+    var lineSpacing: CGFloat = 5
+    var weight: Font.Weight = .regular
+
+    var body: some View {
+        Group {
+            if let attr = try? AttributedString(
+                markdown: text,
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            ) {
+                Text(attr)
+            } else {
+                Text(text)
+            }
+        }
+        .font(.system(size: fontSize, weight: weight))
+        .lineSpacing(lineSpacing)
+        .textSelection(.enabled)
+        .environment(\.openURL, OpenURLAction { qmxOpenSafeURL($0) })
+    }
+}
+
 struct MarkdownMessageView: View {
     let text: String
 
@@ -698,22 +747,7 @@ private struct ProseMarkdownText: View {
     }
 
     var body: some View {
-        if let attr = try? AttributedString(
-            markdown: text,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace
-            )
-        ) {
-            Text(attr)
-                .font(.system(size: 14))
-                .lineSpacing(5)
-                .textSelection(.enabled)
-        } else {
-            Text(text)
-                .font(.system(size: 14))
-                .lineSpacing(5)
-                .textSelection(.enabled)
-        }
+        InlineMarkdownText(text: text, fontSize: 14, lineSpacing: 5)
     }
 }
 

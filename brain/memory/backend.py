@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from brain.memory.models import (
     BackgroundTaskRecord,
@@ -84,6 +84,8 @@ class MemoryBackend(ABC):
         content: str,
         emotion: str = "neutral",
         desktop_context_summary: str = "",
+        sources: Optional[List[Dict[str, Any]]] = None,
+        media: Optional[List[Dict[str, Any]]] = None,
     ) -> MessageRecord:
         """Append a message to L1 session history."""
 

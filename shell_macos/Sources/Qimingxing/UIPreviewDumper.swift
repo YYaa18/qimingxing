@@ -38,7 +38,39 @@ enum UIPreviewDumper {
         ]
 
         // Workspace preview data shared with the wing and the full window.
+        let repoPath = FileManager.default.currentDirectoryPath
         let now = Date()
+        let demoSources = [
+            SourceItem(title: "中央气象台", url: "https://www.weather.com.cn/", domain: "weather.com.cn"),
+            SourceItem(title: "Google 官方博客", url: "https://blog.google/technology/ai/", domain: "blog.google"),
+            SourceItem(title: "DeepSeek API Docs", url: "https://api-docs.deepseek.com/", domain: "api-docs.deepseek.com"),
+        ]
+        let demoMedia = [
+            MediaItem(
+                mediaId: "media_demo_image",
+                kind: "image",
+                title: "live-line-preview.png",
+                localPath: repoPath + "/body_godot/assets/sprites/happy.png",
+                mimeType: "image/png",
+                width: 256, height: 256, sizeBytes: 49_207
+            ),
+            MediaItem(
+                mediaId: "media_demo_audio",
+                kind: "audio",
+                title: "周报摘要.m4a",
+                localPath: "/tmp/qmx_demo_weekly.m4a",
+                mimeType: "audio/mp4",
+                durationSec: 42, sizeBytes: 680_000
+            ),
+            MediaItem(
+                mediaId: "media_demo_video",
+                kind: "video",
+                title: "排障回放.mp4",
+                localPath: "/tmp/qmx_demo_debug.mp4",
+                mimeType: "video/mp4",
+                width: 1920, height: 1080, durationSec: 18, sizeBytes: 4_200_000
+            ),
+        ]
         let workspaceItems = [
             WorkspaceItem(
                 id: "turn_demo",
@@ -50,7 +82,9 @@ enum UIPreviewDumper {
                 progress: 0,
                 path: "",
                 createdAt: now.addingTimeInterval(-3600),
-                updatedAt: now.addingTimeInterval(-3500)
+                updatedAt: now.addingTimeInterval(-3500),
+                sources: demoSources,
+                media: demoMedia
             ),
             WorkspaceItem(
                 id: "turn_demo2",
@@ -101,7 +135,7 @@ enum UIPreviewDumper {
             inputState: inputState1,
             onClose: {}
         )
-        render(qeEmpty, size: CGSize(width: 760, height: 112), to: outputDir.appendingPathComponent("quick_entry_empty.png"))
+        render(qeEmpty, size: CGSize(width: QuickEntryLayout.chatWidth, height: QuickEntryLayout.idleHeight), to: outputDir.appendingPathComponent("quick_entry_empty.png"))
 
         // 2. Quick Entry (expanded two-column Spotlight)
         client.messages = [
@@ -111,7 +145,9 @@ enum UIPreviewDumper {
                 turnId: "t1",
                 isUser: false,
                 meta: "启明星 · DeepSeek Flash",
-                text: "可以使用标准库 `socket` 在 10 行内完成：\n\n```python\nimport socket\nwith socket.socket() as s:\n    print(s.connect_ex(('127.0.0.1', 18790)) == 0)\n```\n\n如果返回 `True` 说明端口已被监听。"
+                text: "可以使用标准库 `socket` 在 10 行内完成：\n\n```python\nimport socket\nwith socket.socket() as s:\n    print(s.connect_ex(('127.0.0.1', 18790)) == 0)\n```\n\n如果返回 `True` 说明端口已被监听。",
+                sources: demoSources,
+                media: demoMedia
             )
         ]
         let inputState2 = QuickEntryInputState()
@@ -130,9 +166,9 @@ enum UIPreviewDumper {
         }
         // First pass measures the natural content height; second pass renders
         // at exactly that height, matching the running panel.
-        render(makeChat(), size: CGSize(width: 760, height: 520), to: outputDir.appendingPathComponent("quick_entry_chat.png"))
+        render(makeChat(), size: CGSize(width: QuickEntryLayout.chatWidth, height: 520), to: outputDir.appendingPathComponent("quick_entry_chat.png"))
         let chatHeight = measuredChatHeight > 0 ? measuredChatHeight : 430
-        render(makeChat(), size: CGSize(width: 760, height: chatHeight), to: outputDir.appendingPathComponent("quick_entry_chat.png"))
+        render(makeChat(), size: CGSize(width: QuickEntryLayout.chatWidth, height: chatHeight), to: outputDir.appendingPathComponent("quick_entry_chat.png"))
 
         // 2c. Quick Entry with the attached workspace wing
         let inputStateWing = QuickEntryInputState()
@@ -145,7 +181,7 @@ enum UIPreviewDumper {
             inputState: inputStateWing,
             onClose: {}
         )
-        render(qeWing, size: CGSize(width: 1140, height: 430), to: outputDir.appendingPathComponent("quick_entry_wing.png"))
+        render(qeWing, size: CGSize(width: QuickEntryLayout.chatWidth + QuickEntryLayout.wingWidth, height: 430), to: outputDir.appendingPathComponent("quick_entry_wing.png"))
 
         // 2b. Quick Entry (thinking: compact, no answer yet)
         client.messages = []
@@ -159,7 +195,7 @@ enum UIPreviewDumper {
             inputState: inputStateThinking,
             onClose: {}
         )
-        render(qeThinking, size: CGSize(width: 760, height: 236), to: outputDir.appendingPathComponent("quick_entry_thinking.png"))
+        render(qeThinking, size: CGSize(width: QuickEntryLayout.chatWidth, height: QuickEntryLayout.thinkingHeight), to: outputDir.appendingPathComponent("quick_entry_thinking.png"))
 
         // 3. Menu Bar Popover
         let popover = MenuBarPopoverView(
@@ -293,6 +329,153 @@ enum UIPreviewDumper {
         // 6. Workspace
         let workspaceView = WorkspaceRootView(store: workspaceStore, brainClient: client)
         render(workspaceView, size: CGSize(width: 920, height: 620), to: outputDir.appendingPathComponent("workspace.png"))
+        render(workspaceView, size: CGSize(width: 920, height: 900), to: outputDir.appendingPathComponent("workspace_rich.png"))
+
+        // 7. Real NSPanel lifecycle verification (idle -> Q&A -> New Chat)
+        verifyRealPanelLifecycle(
+            outputDir: outputDir,
+            desktop: desktop,
+            audio: audio
+        )
+    }
+
+    private static func verifyRealPanelLifecycle(
+        outputDir: URL,
+        desktop: DesktopActions,
+        audio: AudioStreamPlayer
+    ) {
+        let panelClient = BrainClient(
+            httpBase: "http://127.0.0.1:18790",
+            wsURLString: "ws://127.0.0.1:18790/ws",
+            appVersion: "1.0.0",
+            desktopActions: desktop,
+            audioPlayer: audio
+        )
+        panelClient.phase = .connected
+        panelClient.activeProfile = "deepseek_flash"
+        panelClient.profiles = [
+            ProfileMeta(name: "deepseek_flash", label: "DeepSeek Flash", provider: "openai_compatible", model: "deepseek-flash", supportsVision: true),
+        ]
+        let panelWorkspaceStore = WorkspaceStore(brainClient: panelClient)
+        let controller = QuickEntryController(
+            brainClient: panelClient,
+            desktopActions: desktop,
+            workspaceStore: panelWorkspaceStore
+        )
+
+        func pump(_ seconds: TimeInterval) {
+            RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+        }
+
+        func capturePanel(_ window: NSWindow, to url: URL) {
+            guard let root = window.contentView?.superview ?? window.contentView else { return }
+            let appearance = NSApp.appearance ?? NSAppearance(named: .darkAqua)!
+            appearance.performAsCurrentDrawingAppearance {
+                root.layoutSubtreeIfNeeded()
+                let bounds = root.bounds
+                guard let rep = root.bitmapImageRepForCachingDisplay(in: bounds) else { return }
+                root.cacheDisplay(in: bounds, to: rep)
+                guard let png = rep.representation(using: .png, properties: [:]) else { return }
+                try? png.write(to: url)
+            }
+        }
+
+        func assertZeroSafeArea(_ panel: NSWindow, phase: String) {
+            let insets = panel.contentView?.safeAreaInsets ?? NSEdgeInsets()
+            if insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0 {
+                fatalError("PANEL_VERIFY FAIL (\(phase)): non-zero safeAreaInsets=\(insets)")
+            }
+        }
+
+        controller.show()
+        pump(0.25)
+        guard let panel = controller.debugPanel else {
+            fatalError("PANEL_VERIFY FAIL: panel was not created")
+        }
+        let idleFrame = panel.frame
+        assertZeroSafeArea(panel, phase: "initial_idle")
+        if abs(idleFrame.width - QuickEntryLayout.chatWidth) > 0.5 ||
+            abs(idleFrame.height - QuickEntryLayout.idleHeight) > 0.5 {
+            fatalError("PANEL_VERIFY FAIL (initial_idle): unexpected frame \(idleFrame)")
+        }
+        if !panel.canBecomeKey {
+            fatalError("PANEL_VERIFY FAIL (initial_idle): panel.canBecomeKey is false")
+        }
+        capturePanel(panel, to: outputDir.appendingPathComponent("panel_1_initial_idle.png"))
+
+        // Thinking phase
+        panelClient.isGenerating = true
+        panelClient.messages = [
+            ChatEntry(id: "pv_u1", turnId: "pv_t1", isUser: true, meta: "我", text: "帮我详细说明一下工作区与实时流式面板的作用")
+        ]
+        pump(0.25)
+        let thinkingFrame = panel.frame
+        assertZeroSafeArea(panel, phase: "thinking")
+        if abs(thinkingFrame.height - QuickEntryLayout.thinkingHeight) > 0.5 {
+            fatalError("PANEL_VERIFY FAIL (thinking): expected height \(QuickEntryLayout.thinkingHeight), got \(thinkingFrame.height)")
+        }
+
+        // Streaming mid phase (~5 lines)
+        let streamMidText = (1...5).map { "第 \($0) 条：工作区会自动归档每一轮问答的上下文与产物，方便你随时回看与检索。" }.joined(separator: "\n")
+        panelClient.messages.append(
+            ChatEntry(
+                id: "pv_a1",
+                turnId: "pv_t1",
+                isUser: false,
+                meta: "启明星 · DeepSeek Flash",
+                text: streamMidText,
+                isStreaming: true
+            )
+        )
+        pump(0.25)
+        let streamMidFrame = panel.frame
+        assertZeroSafeArea(panel, phase: "streaming_mid")
+        if streamMidFrame.height <= 260 {
+            fatalError("PANEL_VERIFY FAIL (streaming_mid): expected height > 260 during streaming, got \(streamMidFrame.height)")
+        }
+        capturePanel(panel, to: outputDir.appendingPathComponent("panel_2a_streaming_mid.png"))
+
+        // Streaming long phase (~12 lines)
+        let streamLongText = (1...12).map { "第 \($0) 条：流式输出过程中，窗口高度会随已渲染的内容行数平滑地自适应增高，而不会先静止再突然跳变。" }.joined(separator: "\n")
+        if let idx = panelClient.messages.lastIndex(where: { !$0.isUser && $0.turnId == "pv_t1" }) {
+            panelClient.messages[idx].text = streamLongText
+        }
+        pump(0.25)
+        let streamLongFrame = panel.frame
+        assertZeroSafeArea(panel, phase: "streaming_long")
+        if streamLongFrame.height <= streamMidFrame.height + 60 {
+            fatalError("PANEL_VERIFY FAIL (streaming_long): expected progressive growth > \(streamMidFrame.height + 60), got \(streamLongFrame.height)")
+        }
+
+        // Streaming finished -> should not abruptly jump
+        panelClient.isGenerating = false
+        if let idx = panelClient.messages.lastIndex(where: { !$0.isUser && $0.turnId == "pv_t1" }) {
+            panelClient.messages[idx].isStreaming = false
+        }
+        pump(0.25)
+        let finalFrame = panel.frame
+        assertZeroSafeArea(panel, phase: "after_qa")
+        if abs(finalFrame.height - streamLongFrame.height) >= 2.0 {
+            fatalError("PANEL_VERIFY FAIL (after_qa): unexpected jump from \(streamLongFrame.height) to \(finalFrame.height)")
+        }
+        capturePanel(panel, to: outputDir.appendingPathComponent("panel_2_after_qa.png"))
+
+        panelClient.clearHistory()
+        pump(0.25)
+        let collapsedFrame = panel.frame
+        assertZeroSafeArea(panel, phase: "after_new_chat")
+        if controller.debugInputState.isExpanded {
+            fatalError("PANEL_VERIFY FAIL (after_new_chat): isExpanded stayed true")
+        }
+        if abs(collapsedFrame.width - QuickEntryLayout.chatWidth) > 0.5 ||
+            abs(collapsedFrame.height - QuickEntryLayout.idleHeight) > 0.5 {
+            fatalError("PANEL_VERIFY FAIL (after_new_chat): unexpected frame \(collapsedFrame)")
+        }
+        capturePanel(panel, to: outputDir.appendingPathComponent("panel_3_after_new_chat.png"))
+
+        let safeArea = panel.contentView?.safeAreaInsets ?? NSEdgeInsets()
+        print("PANEL_VERIFY PASS idle=\(idleFrame.size) thinking=\(thinkingFrame.size) streamMid=\(streamMidFrame.size) streamLong=\(streamLongFrame.size) final=\(finalFrame.size) after_new_chat=\(collapsedFrame.size) safeArea=(\(safeArea.top),\(safeArea.left),\(safeArea.bottom),\(safeArea.right)) isExpanded=\(controller.debugInputState.isExpanded) canBecomeKey=\(panel.canBecomeKey)")
+        controller.hideAndRestoreFocus()
     }
 
     private static func render<V: View>(_ view: V, size: CGSize, to url: URL) {

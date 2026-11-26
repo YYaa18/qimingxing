@@ -24,6 +24,7 @@ class ToolLoopResult:
     usages: List[LLMUsage] = field(default_factory=list)
     stopped_reason: str = "completed"  # "completed" | "max_steps" | "circuit_breaker"
     called_tools: List[str] = field(default_factory=list)
+    sources: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ToolExecutor:
@@ -53,6 +54,7 @@ class ToolExecutor:
         trace_steps: List[ToolTraceStep] = []
         usages: List[LLMUsage] = []
         called_tools: List[str] = []
+        final_sources: List[Dict[str, Any]] = []
         consecutive_errors: Dict[str, int] = {}
 
         async def _emit_delta(tok: str) -> None:
@@ -95,6 +97,7 @@ class ToolExecutor:
                     usages=usages,
                     stopped_reason="completed",
                     called_tools=called_tools,
+                    sources=list(res.annotations),
                 )
 
             assistant_message: Dict[str, Any] = {
@@ -339,6 +342,7 @@ class ToolExecutor:
             )
             usages.append(final_res.usage)
             ctx.usage_collector.append(final_res.usage)
+            final_sources = list(final_res.annotations)
 
         return ToolLoopResult(
             final_text="".join(spoken_parts),
@@ -346,6 +350,7 @@ class ToolExecutor:
             usages=usages,
             stopped_reason=stopped_reason,
             called_tools=called_tools,
+            sources=final_sources,
         )
 
     def _supports_server_events(self) -> bool:

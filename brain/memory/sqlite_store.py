@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from brain.memory.backend import SNAPSHOT_SCHEMA_VERSION, MemoryBackend
 from brain.memory.models import (
@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     emotion TEXT NOT NULL DEFAULT 'neutral',
     desktop_context_summary TEXT NOT NULL DEFAULT '',
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    media_json TEXT NOT NULL DEFAULT '[]',
     created_at REAL NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
@@ -134,6 +136,8 @@ CREATE TABLE IF NOT EXISTS messages_archive (
     content TEXT NOT NULL,
     emotion TEXT NOT NULL DEFAULT 'neutral',
     desktop_context_summary TEXT NOT NULL DEFAULT '',
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    media_json TEXT NOT NULL DEFAULT '[]',
     created_at REAL NOT NULL,
     archived_at REAL NOT NULL
 );
@@ -270,11 +274,25 @@ class SQLiteMemoryStore(MemoryBackend):
                 conn.execute(
                     "ALTER TABLE usage_ledger ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0"
                 )
-                # Preserve historical cache evidence on old DBs.
-                conn.execute(
-                    """UPDATE usage_ledger SET cached_input_tokens = prompt_cache_hit_tokens
-                       WHERE cached_input_tokens = 0 AND prompt_cache_hit_tokens > 0"""
-                )
+            # Reconcile on every startup: older app versions may still write the
+            # legacy column after the one-time migration.
+            conn.execute(
+                """UPDATE usage_ledger SET cached_input_tokens = prompt_cache_hit_tokens
+                   WHERE cached_input_tokens = 0 AND prompt_cache_hit_tokens > 0"""
+            )
+            for table in ("messages", "messages_archive"):
+                msg_cols = {
+                    str(r["name"])
+                    for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if "sources_json" not in msg_cols:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN sources_json TEXT NOT NULL DEFAULT '[]'"
+                    )
+                if "media_json" not in msg_cols:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN media_json TEXT NOT NULL DEFAULT '[]'"
+                    )
             for cat in DEFAULT_MEMORY_CATEGORIES:
                 conn.execute(
                     """
@@ -403,16 +421,28 @@ class SQLiteMemoryStore(MemoryBackend):
         content: str,
         emotion: str = "neutral",
         desktop_context_summary: str = "",
+        sources: Optional[List[Dict[str, Any]]] = None,
+        media: Optional[List[Dict[str, Any]]] = None,
     ) -> MessageRecord:
         async with self._lock:
             conn = self._ensure_conn()
             now = time.time()
+            sources = sources or []
+            media = media or []
             cur = conn.execute(
                 """
-                INSERT INTO messages (session_id, turn_id, role, content, emotion, desktop_context_summary, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (
+                    session_id, turn_id, role, content, emotion,
+                    desktop_context_summary, sources_json, media_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, turn_id, role, content, emotion, desktop_context_summary, now),
+                (
+                    session_id, turn_id, role, content, emotion,
+                    desktop_context_summary,
+                    json.dumps(sources, ensure_ascii=False),
+                    json.dumps(media, ensure_ascii=False),
+                    now,
+                ),
             )
             conn.execute(
                 "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
@@ -430,6 +460,8 @@ class SQLiteMemoryStore(MemoryBackend):
                 content=content,
                 emotion=emotion,
                 desktop_context_summary=desktop_context_summary,
+                sources=sources,
+                media=media,
                 created_at=now,
             )
 
@@ -530,8 +562,9 @@ class SQLiteMemoryStore(MemoryBackend):
                 """
                 INSERT OR REPLACE INTO messages_archive (
                     msg_id, session_id, turn_id, role, content,
-                    emotion, desktop_context_summary, created_at, archived_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    emotion, desktop_context_summary, sources_json, media_json,
+                    created_at, archived_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -542,6 +575,8 @@ class SQLiteMemoryStore(MemoryBackend):
                         r["content"],
                         r["emotion"],
                         r["desktop_context_summary"],
+                        r["sources_json"] if "sources_json" in r.keys() else "[]",
+                        r["media_json"] if "media_json" in r.keys() else "[]",
                         r["created_at"],
                         now,
                     )
@@ -1152,6 +1187,7 @@ class SQLiteMemoryStore(MemoryBackend):
     async def add_usage_record(self, record: UsageLedgerRecord) -> UsageLedgerRecord:
         async with self._lock:
             conn = self._ensure_conn()
+            cached_tokens = int(record.cached_input_tokens or record.prompt_cache_hit_tokens or 0)
             cur = conn.execute(
                 """
                 INSERT INTO usage_ledger (
@@ -1168,8 +1204,8 @@ class SQLiteMemoryStore(MemoryBackend):
                     record.slot,
                     record.model,
                     record.prompt_tokens,
-                    record.prompt_cache_hit_tokens,
-                    record.cached_input_tokens or record.prompt_cache_hit_tokens,
+                    cached_tokens,
+                    cached_tokens,
                     record.completion_tokens,
                     record.estimated_cost_cny,
                     record.created_at,
@@ -1185,8 +1221,8 @@ class SQLiteMemoryStore(MemoryBackend):
                 slot=record.slot,
                 model=record.model,
                 prompt_tokens=record.prompt_tokens,
-                prompt_cache_hit_tokens=record.prompt_cache_hit_tokens,
-                cached_input_tokens=record.cached_input_tokens or record.prompt_cache_hit_tokens,
+                prompt_cache_hit_tokens=cached_tokens,
+                cached_input_tokens=cached_tokens,
                 completion_tokens=record.completion_tokens,
                 estimated_cost_cny=record.estimated_cost_cny,
                 created_at=record.created_at,
@@ -1209,8 +1245,8 @@ class SQLiteMemoryStore(MemoryBackend):
                     slot=str(r["slot"] or ""),
                     model=str(r["model"] or ""),
                     prompt_tokens=int(r["prompt_tokens"] or 0),
-                    prompt_cache_hit_tokens=int(r["prompt_cache_hit_tokens"] or 0),
-                    cached_input_tokens=int(r["cached_input_tokens"] or 0),
+                    prompt_cache_hit_tokens=int(r["cached_input_tokens"] or r["prompt_cache_hit_tokens"] or 0),
+                    cached_input_tokens=int(r["cached_input_tokens"] or r["prompt_cache_hit_tokens"] or 0),
                     completion_tokens=int(r["completion_tokens"] or 0),
                     estimated_cost_cny=float(r["estimated_cost_cny"] or 0.0),
                     created_at=float(r["created_at"] or 0.0),
@@ -1677,8 +1713,9 @@ class SQLiteMemoryStore(MemoryBackend):
                             """
                             INSERT OR REPLACE INTO messages (
                                 msg_id, session_id, turn_id, role, content,
-                                emotion, desktop_context_summary, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                emotion, desktop_context_summary, sources_json,
+                                media_json, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["msg_id"],
@@ -1688,6 +1725,8 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec["content"],
                                 rec.get("emotion", "neutral"),
                                 rec.get("desktop_context_summary", ""),
+                                json.dumps(_snapshot_rich(rec, "sources"), ensure_ascii=False),
+                                json.dumps(_snapshot_rich(rec, "media"), ensure_ascii=False),
                                 rec["created_at"],
                             ),
                         )
@@ -1701,8 +1740,9 @@ class SQLiteMemoryStore(MemoryBackend):
                             """
                             INSERT OR REPLACE INTO messages_archive (
                                 msg_id, session_id, turn_id, role, content,
-                                emotion, desktop_context_summary, created_at, archived_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                emotion, desktop_context_summary, sources_json,
+                                media_json, created_at, archived_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["msg_id"],
@@ -1712,6 +1752,8 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec["content"],
                                 rec.get("emotion", "neutral"),
                                 rec.get("desktop_context_summary", ""),
+                                json.dumps(_snapshot_rich(rec, "sources"), ensure_ascii=False),
+                                json.dumps(_snapshot_rich(rec, "media"), ensure_ascii=False),
                                 rec["created_at"],
                                 rec.get("archived_at", rec["created_at"]),
                             ),
@@ -1852,8 +1894,8 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec.get("slot", ""),
                                 rec.get("model", ""),
                                 rec.get("prompt_tokens", 0),
-                                rec.get("prompt_cache_hit_tokens", 0),
-                                rec.get("cached_input_tokens", 0),
+                                int(rec.get("cached_input_tokens") or rec.get("prompt_cache_hit_tokens") or 0),
+                                int(rec.get("cached_input_tokens") or rec.get("prompt_cache_hit_tokens") or 0),
                                 rec.get("completion_tokens", 0),
                                 rec.get("estimated_cost_cny", 0.0),
                                 rec["created_at"],
@@ -1924,6 +1966,24 @@ def _row_to_session(row: sqlite3.Row) -> SessionRecord:
     )
 
 
+def _snapshot_rich(record: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    value = record.get(key)
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    raw = record.get(f"{key}_json")
+    if isinstance(raw, str):
+        return _parse_json_list(raw)
+    return []
+
+
+def _parse_json_list(raw: Any) -> List[Dict[str, Any]]:
+    try:
+        parsed = json.loads(str(raw or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
 def _row_to_message(row: sqlite3.Row) -> MessageRecord:
     return MessageRecord(
         msg_id=int(row["msg_id"]),
@@ -1933,6 +1993,8 @@ def _row_to_message(row: sqlite3.Row) -> MessageRecord:
         content=str(row["content"]),
         emotion=str(row["emotion"] or "neutral"),
         desktop_context_summary=str(row["desktop_context_summary"] or ""),
+        sources=_parse_json_list(row["sources_json"] if "sources_json" in row.keys() else "[]"),
+        media=_parse_json_list(row["media_json"] if "media_json" in row.keys() else "[]"),
         created_at=float(row["created_at"]),
     )
 

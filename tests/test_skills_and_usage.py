@@ -247,7 +247,7 @@ def test_work_history_and_usage_soft_alert_non_blocking(tmp_path: Path) -> None:
         dbg = client.get("/api/memory/debug").json()
         assert dbg["work_history_count"] >= 1
         assert dbg["today_usage"]["calls"] == 2
-        assert dbg["today_usage"]["prompt_cache_hit_tokens"] == 1800
+        assert dbg["today_usage"]["cached_input_tokens"] == 1800
         assert dbg["today_usage"]["cache_hit_rate"] > 0.8
 
 

@@ -58,6 +58,89 @@ struct ArtifactCapsuleItem: Identifiable, Equatable, Sendable {
     let actions: [String]
 }
 
+struct SourceItem: Codable, Identifiable, Equatable, Sendable {
+    let title: String
+    let url: String
+    let domain: String
+
+    var id: String { url }
+
+    enum CodingKeys: String, CodingKey {
+        case title, url, domain
+    }
+
+    init(title: String, url: String, domain: String = "") {
+        self.title = title
+        self.url = url
+        self.domain = domain
+    }
+
+    init?(dict: [String: Any]) {
+        guard let title = dict["title"] as? String,
+              let url = dict["url"] as? String,
+              let parsed = URL(string: url),
+              parsed.scheme == "http" || parsed.scheme == "https" else { return nil }
+        self.title = title
+        self.url = url
+        self.domain = (dict["domain"] as? String) ?? parsed.host ?? ""
+    }
+}
+
+struct MediaItem: Codable, Identifiable, Equatable, Sendable {
+    let mediaId: String
+    let kind: String
+    let title: String
+    let localPath: String
+    let mimeType: String
+    let width: Int
+    let height: Int
+    let durationSec: Double
+    let sizeBytes: Int
+
+    var id: String { mediaId }
+    var fileURL: URL? {
+        localPath.isEmpty ? nil : URL(fileURLWithPath: localPath)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case mediaId = "media_id"
+        case kind, title
+        case localPath = "local_path"
+        case mimeType = "mime_type"
+        case width, height
+        case durationSec = "duration_sec"
+        case sizeBytes = "size_bytes"
+    }
+
+    init(mediaId: String, kind: String, title: String = "", localPath: String = "",
+         mimeType: String = "", width: Int = 0, height: Int = 0,
+         durationSec: Double = 0, sizeBytes: Int = 0) {
+        self.mediaId = mediaId
+        self.kind = kind
+        self.title = title
+        self.localPath = localPath
+        self.mimeType = mimeType
+        self.width = width
+        self.height = height
+        self.durationSec = durationSec
+        self.sizeBytes = sizeBytes
+    }
+
+    init?(dict: [String: Any]) {
+        guard let mediaId = dict["media_id"] as? String,
+              let kind = dict["kind"] as? String else { return nil }
+        self.mediaId = mediaId
+        self.kind = kind
+        self.title = (dict["title"] as? String) ?? ""
+        self.localPath = (dict["local_path"] as? String) ?? ""
+        self.mimeType = (dict["mime_type"] as? String) ?? ""
+        self.width = (dict["width"] as? Int) ?? 0
+        self.height = (dict["height"] as? Int) ?? 0
+        self.durationSec = (dict["duration_sec"] as? Double) ?? 0
+        self.sizeBytes = (dict["size_bytes"] as? Int) ?? 0
+    }
+}
+
 struct ChatEntry: Identifiable, Equatable, Sendable {
     let id: String
     let turnId: String
@@ -65,6 +148,8 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
     var meta: String
     var text: String
     var isStreaming: Bool = false
+    var sources: [SourceItem] = []
+    var media: [MediaItem] = []
 }
 
 struct StagedAttachment: Identifiable, Equatable, Sendable {

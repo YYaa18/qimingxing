@@ -175,8 +175,9 @@ async def test_native_stream_text_and_citations() -> None:
     out = "".join([tok async for tok in router.stream_chat(
         [{"role": "user", "content": "hi"}], profile_name="g"
     )])
-    assert "答案" in out
-    assert "参考来源" in out
+    assert out == "答案。"
+    assert "参考来源" not in out
+    assert router.last_annotations[0]["url_citation"]["url"] == "https://example.com/x"
     assert captured["contents"][0]["parts"][0]["text"] == "hi"
     assert router.last_usage is not None
     assert router.last_usage.reasoning_tokens == 3

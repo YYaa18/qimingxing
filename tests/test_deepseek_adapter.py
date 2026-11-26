@@ -179,7 +179,7 @@ async def test_deepseek_tool_round_captures_reasoning_and_citations() -> None:
     ]
     assert res.reasoning_content == "需要查一下"
     assert res.annotations[0]["url_citation"]["url"] == "https://example.com/a"
-    assert "参考来源" in res.content
+    assert "参考来源" not in res.content
     assert "".join(deltas) == res.content
     assert events and events[0]["type"] == "call_started"
     assert res.usage.reasoning_tokens == 5

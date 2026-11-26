@@ -42,6 +42,8 @@ from brain.memory.models import (
 from brain.memory.retrieval import MemoryRetriever
 from brain.memory.skills import SkillManager
 from brain.prompts import BASE_SYSTEM_PROMPT
+from brain.rich_content import clean_answer_and_sources, collect_media
+from protocol.models import MediaItem, SourceItem
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
 from brain.tools import (
@@ -2284,6 +2286,8 @@ class Hub:
 
             turn_usages: List[LLMUsage] = []
             trace_steps: List[ToolTraceStep] = []
+            loop_sources: List[Dict[str, Any]] = []
+            media_paths: List[str] = []
 
             tts_targets = (
                 self._get_tts_target_conns(conn)
@@ -2459,6 +2463,7 @@ class Hub:
                 )
                 trace_steps = loop_res.trace_steps
                 turn_usages = loop_res.usages
+                loop_sources = list(loop_res.sources)
                 if loop_res.usages:
                     self.context_builder.observe_prompt_usage(
                         built.stats.total_with_tools,
@@ -2497,11 +2502,13 @@ class Hub:
                 tts_queue.put_nowait(None)
 
             for s in trace_steps:
-                if s.status == "ok" and any(
-                    k in s.tool_name.lower() for k in ("write", "create", "save", "export", "generate")
-                ):
-                    raw_out_path = str(s.arguments.get("path") or "").strip()
-                    if raw_out_path and os.path.isfile(os.path.expanduser(raw_out_path)):
+                raw_out_path = str(s.arguments.get("path") or "").strip()
+                if raw_out_path and os.path.isfile(os.path.expanduser(raw_out_path)):
+                    media_paths.append(raw_out_path)
+                    if s.status == "ok" and any(
+                        k in s.tool_name.lower()
+                        for k in ("write", "create", "save", "export", "generate")
+                    ):
                         try:
                             await self.emit_artifact_capsule(
                                 conn, turn_id=turn_id, path=raw_out_path
@@ -2511,6 +2518,13 @@ class Hub:
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             assistant_reply = "".join(collected_spoken).strip()
+            raw_sources = loop_sources if use_tools else self.llm_router.last_annotations
+            assistant_reply, source_payloads = clean_answer_and_sources(
+                assistant_reply, raw_sources
+            )
+            media_payloads = collect_media(media_paths)
+            turn_sources = [SourceItem(**item) for item in source_payloads]
+            turn_media = [MediaItem(**item) for item in media_payloads]
             scene_summary = self.context_store.get_window_summary()
 
             if self.memory_backend is not None:
@@ -2591,6 +2605,8 @@ class Hub:
                         role="assistant",
                         content=assistant_reply,
                         desktop_context_summary=scene_summary,
+                        sources=source_payloads,
+                        media=media_payloads,
                     )
                 if self.memory_extractor is not None:
                     self.memory_extractor.schedule_post_turn(
@@ -2626,7 +2642,12 @@ class Hub:
                 make_envelope(
                     "brain",
                     "output.turn_end",
-                    OutputTurnEndPayload(finish_reason="completed", elapsed_ms=elapsed_ms),
+                    OutputTurnEndPayload(
+                        finish_reason="completed",
+                        elapsed_ms=elapsed_ms,
+                        sources=turn_sources,
+                        media=turn_media,
+                    ),
                     turn_id=turn_id,
                 ),
             )

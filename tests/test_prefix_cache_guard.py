@@ -165,7 +165,8 @@ async def test_pch03_old_ledger_upgrade_and_jsonl_roundtrip(tmp_path: Path) -> N
     assert imported[0].cached_input_tokens == 400
     await import_store.close()
 
-    # Old snapshot without the field must default to 0, not crash.
+    # Old snapshots only carried the legacy column; import must backfill the
+    # canonical cached_input_tokens instead of silently reporting 0.
     old_snap = tmp_path / "old_snap.jsonl"
     old_snap.write_text(json.dumps({
         "_type": "usage", "ledger_id": 77, "session_id": "s", "turn_id": "old",
@@ -177,5 +178,8 @@ async def test_pch03_old_ledger_upgrade_and_jsonl_roundtrip(tmp_path: Path) -> N
     await legacy_store.initialize()
     await legacy_store.import_snapshot(old_snap)
     legacy = await legacy_store.list_usage_records(limit=10)
-    assert legacy[0].cached_input_tokens == 0
+    assert legacy[0].cached_input_tokens == 30
+    assert legacy[0].prompt_cache_hit_tokens == 30
+    legacy_summary = await legacy_store.get_usage_summary()
+    assert legacy_summary.cached_input_tokens == 30
     await legacy_store.close()
