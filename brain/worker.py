@@ -59,35 +59,29 @@ _WRITE_TOOLS = {
 }
 
 
-_ROUTER_DENY = {
-    "shell_exec",
-    "web_fetch",
-    "inbox_scan",
-    "work_history_inspect",
-    "macos_browser_tabs",
-    "macos_mail_search",
-    "macos_mail_draft",
-    "bg_task_submit",
-    "bg_task_list",
-    "bg_task_cancel",
-    "bg_task_inspect",
-}
 
+def build_router_registry(
+    full: ToolRegistry,
+    *,
+    include_mcp: bool = False,
+    extra_tool_names: Optional[Iterable[str]] = None,
+) -> ToolRegistry:
+    """Fixed production surface: only the Router allow-list is visible.
 
-def build_router_registry(full: ToolRegistry, *, include_mcp: bool = False) -> ToolRegistry:
-    """Fixed production surface; unknown dev/test tools remain visible.
-
-    Heavy execution and MCP tools are excluded. The allow-list above is the
-    intended production surface; the deny-list keeps dynamically registered
-    test tools (and future safe single-step tools) usable without being able to
-    leak shells or MCP into the Router.
+    Unknown tools are excluded by default. `extra_tool_names` is an explicit
+    test/plugin hook; `include_mcp` is a deliberate opt-in for the MCP e2e
+    harness. Production Hub never sets either to include heavy tools.
     """
+    allowed = set(ROUTER_TOOL_NAMES)
+    if extra_tool_names:
+        allowed.update(str(name) for name in extra_tool_names if str(name).strip())
     registry = ToolRegistry()
     for tool in full.list_tools():
         name = tool.name
-        if name in _ROUTER_DENY or (name.startswith("mcp__") and not include_mcp):
-            continue
-        registry.register(tool)
+        if name in allowed:
+            registry.register(tool)
+        elif include_mcp and name.startswith("mcp__"):
+            registry.register(tool)
     return registry
 
 

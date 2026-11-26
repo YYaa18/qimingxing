@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import WebSocket
 from pydantic import ValidationError
@@ -294,7 +294,11 @@ class Hub:
             else build_default_tool_registry(self.config)
         )
         self.router_include_mcp = False
-        self.router_tool_registry = build_router_registry(self.tool_registry)
+        self.router_extra_tool_names: Set[str] = set()
+        self.router_tool_registry = build_router_registry(
+            self.tool_registry,
+            extra_tool_names=self.router_extra_tool_names,
+        )
         self.tool_executor = tool_executor or ToolExecutor(llm_router)
         if skill_manager is not None:
             self.skill_manager: Optional[SkillManager] = skill_manager
@@ -1161,7 +1165,10 @@ class Hub:
         elif image_tool is not None:
             self.tool_registry.unregister("web_image_search")
         self.router_include_mcp = False
-        self.router_tool_registry = build_router_registry(self.tool_registry)
+        self.router_tool_registry = build_router_registry(
+            self.tool_registry,
+            extra_tool_names=self.router_extra_tool_names,
+        )
         await self._broadcast_welcome_to_bodies()
         await self._broadcast_privacy_state()
         await self._broadcast_shortcuts_sync()
@@ -2311,7 +2318,9 @@ class Hub:
                 recent_messages = self.memory_store.get_messages(conn.client_id, limit=16)
 
             self.router_tool_registry = build_router_registry(
-                self.tool_registry, include_mcp=self.router_include_mcp
+                self.tool_registry,
+                include_mcp=self.router_include_mcp,
+                extra_tool_names=self.router_extra_tool_names,
             )
             use_tools = bool(
                 self.config.tools.enabled

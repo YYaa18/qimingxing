@@ -94,12 +94,13 @@ class SemanticWatchdog:
             else 0.0
         )
 
+        active_phase = str(state.get("active_phase") or "")
         reasons = []
         if repeat_count >= 3:
             reasons.append(f"连续 {repeat_count} 步重复同一工具与参数")
         if error_streak >= 3:
             reasons.append(f"连续 {error_streak} 步工具报错")
-        if stale_sec >= self.config.watchdog_stall_sec:
+        if stale_sec >= self.config.watchdog_stall_sec and not active_phase:
             reasons.append(f"近 {int(stale_sec)} 秒无有效推进")
         if token_ratio >= 0.85:
             reasons.append(f"已消耗预算 {token_ratio:.0%}")
@@ -120,6 +121,7 @@ class SemanticWatchdog:
             "token_ratio": round(token_ratio, 3),
             "remaining_steps": remaining_steps,
             "status": record.status,
+            "active_phase": active_phase,
             "triggered": bool(reasons),
             "reasons": reasons,
         }

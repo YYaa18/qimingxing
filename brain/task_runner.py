@@ -44,6 +44,12 @@ from protocol.models import (
 
 logger = logging.getLogger("qimingxing.task_runner")
 
+# Worker resource-lock lease window. A conflicting writer keeps the task
+# queued and retries at a human-scale cadence instead of failing instantly.
+_LOCK_WAIT_SECONDS = 120.0
+_LOCK_RETRY_SECONDS = 3.0
+_LOCK_LEASE_SECONDS = 120.0
+
 TaskStatusCallback = Callable[[TaskStatusPayload], Awaitable[None]]
 NoticeCallback = Callable[[OutputProactiveNoticePayload], Awaitable[None]]
 ArtifactCapsuleCallback = Callable[[OutputArtifactCapsulePayload], Awaitable[None]]
@@ -122,7 +128,10 @@ class BackgroundTaskRunner:
         auto = bool(self.config.background_tasks.auto_resume_on_restart)
         active = [
             t for t in await self.backend.list_background_tasks(limit=200)
-            if t.status in ("queued", "planning", "running", "waiting_input", "waiting_approval")
+            if t.status in (
+                "queued", "planning", "running", "waiting_input",
+                "waiting_approval", "verifying",
+            )
         ]
         if not active:
             return 0
@@ -586,21 +595,31 @@ class BackgroundTaskRunner:
                 lock_keys = mandate.resource_keys()
                 for key in lock_keys:
                     acquired = False
-                    for attempt in range(4):
+                    deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+                    waited = 0.0
+                    while not acquired:
                         acquired = await self.backend.acquire_resource_lock(
-                            key, task_id, mode="exclusive", lease_seconds=120.0
+                            key, task_id, mode="exclusive",
+                            lease_seconds=_LOCK_LEASE_SECONDS,
                         )
                         if acquired:
                             break
-                        if attempt < 3:
-                            await self.backend.update_background_task(
-                                task_id,
-                                status="queued",
-                                current_step=f"等待资源锁 {key}…",
-                            )
-                            await asyncio.sleep(0.5)
+                        if cancel_ev.is_set():
+                            raise asyncio.CancelledError("Task cancelled while waiting for lock")
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        waited += min(_LOCK_RETRY_SECONDS, remaining)
+                        await self.backend.update_background_task(
+                            task_id,
+                            status="queued",
+                            current_step=f"等待资源锁 {key}（已等待 {int(waited)} 秒）…",
+                        )
+                        await asyncio.sleep(min(_LOCK_RETRY_SECONDS, remaining))
                     if not acquired:
-                        raise RuntimeError(f"等待资源锁超时: {key}")
+                        raise RuntimeError(
+                            f"等待资源锁超时（{int(_LOCK_WAIT_SECONDS)} 秒）: {key}"
+                        )
                     held_locks.append(key)
 
                 started_rec = await self.backend.update_background_task(
@@ -720,18 +739,31 @@ class BackgroundTaskRunner:
                         await self.backend.renew_resource_lock(key, task_id, lease_seconds=120.0)
                     latest = await self.backend.get_background_task(task_id)
                     base_cp = latest.checkpoint if latest is not None else record.checkpoint
+                    now = time.time()
                     next_cp = {
                         **base_cp,
                         "step": step_idx,
                         "prompt_tokens_total": sum(u.prompt_tokens for u in usages),
-                        "last_heartbeat_at": time.time(),
+                        "last_heartbeat_at": now,
                     }
+                    state = dict(
+                        latest.watchdog_state
+                        if latest is not None and isinstance(latest.watchdog_state, dict)
+                        else record.watchdog_state or {}
+                    )
+                    # A live LLM/tool call is an intentional long activity. The
+                    # rule layer must not treat its quiet period as a stalled
+                    # Worker; extra step callbacks clear this marker.
+                    state["active_phase"] = "step"
+                    state["active_since"] = now
                     record.checkpoint = next_cp
+                    record.watchdog_state = state
                     await self.backend.update_background_task(
                         task_id,
                         status="running",
-                        last_heartbeat_at=time.time(),
+                        last_heartbeat_at=now,
                         checkpoint=next_cp,
+                        watchdog_state=state,
                     )
 
                 async def _on_step_complete(step_idx: int, step: Any) -> None:
@@ -767,6 +799,8 @@ class BackgroundTaskRunner:
                         state["error_streak"] = int(state.get("error_streak") or 0) + 1
                     state["last_tool"] = step.tool_name
                     state["last_status"] = step.status
+                    state.pop("active_phase", None)
+                    state.pop("active_since", None)
                     record.watchdog_state = state
 
                     cp = {

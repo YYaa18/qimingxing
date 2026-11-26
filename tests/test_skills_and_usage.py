@@ -200,6 +200,7 @@ def test_work_history_and_usage_soft_alert_non_blocking(tmp_path: Path) -> None:
 
     app = create_app(config=cfg, llm_router=router)
     app.state.hub.tool_registry = ToolRegistry([_SimpleSafeTool(), WorkHistoryInspectTool()])
+    app.state.hub.router_extra_tool_names = {"safe_echo"}
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as ws:

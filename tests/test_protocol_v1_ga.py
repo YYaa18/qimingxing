@@ -84,6 +84,7 @@ def test_ui_state_ui_command_and_approval_reconnect_sync(tmp_path: Path) -> None
     cfg.memory.extraction.enabled = False
     app = create_app(config=cfg, llm_router=_ToolCallingRouter(cfg))
     app.state.hub.tool_registry.register(_SharedApprovalTool())
+    app.state.hub.router_extra_tool_names = {"shared_approval_tool"}
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as shell_ws:
@@ -324,6 +325,7 @@ def test_foreground_approval_survives_same_instance_reconnect(tmp_path: Path) ->
     cfg.memory.extraction.enabled = False
     app = create_app(config=cfg, llm_router=_ReconnectRouter(cfg))
     app.state.hub.tool_registry.register(_SharedApprovalTool())
+    app.state.hub.router_extra_tool_names = {"shared_approval_tool"}
 
     def _hello(ws) -> None:
         ws.send_text(

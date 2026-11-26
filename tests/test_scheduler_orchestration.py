@@ -21,9 +21,11 @@ from brain.tools import build_default_tool_registry
 from brain.tools.base import Tool, ToolExecutionContext, ToolResult
 from brain.tools.executor import ToolExecutor
 from brain.tools.orchestration_tools import TaskDispatchTool
+from brain import task_runner as task_runner_module
 from brain import worker as worker_module
 from brain.watchdog import SemanticWatchdog
 from brain.worker import (
+    ROUTER_TOOL_NAMES,
     WorkerMandate,
     build_router_registry,
     build_worker_registry,
@@ -64,6 +66,7 @@ def test_sch01_router_physical_isolation_and_prefix_stability() -> None:
     full = build_default_tool_registry(cfg)
     router = build_router_registry(full)
     names = {tool.name for tool in router.list_tools()}
+    assert names == {tool.name for tool in full.list_tools()} & ROUTER_TOOL_NAMES
     assert "task_dispatch" in names
     assert "task_followup" in names
     assert "task_inspect" in names
@@ -357,6 +360,21 @@ async def test_sch05_watchdog_rule_nudge_and_abort(tmp_path: Path) -> None:
     fallback = await SemanticWatchdog(cfg.background_tasks).evaluate(record, now=time.time())
     assert fallback.action in ("escalate", "abort")
 
+    # A genuinely live LLM/tool phase must not be treated as stalled just
+    # because it has been quiet for longer than the stale threshold.
+    active = _watch_record()
+    active.watchdog_state = {
+        "active_phase": "step",
+        "active_since": time.time() - 200,
+        "last_progress_at": time.time() - 200,
+        "repeat_count": 0,
+        "error_streak": 0,
+    }
+    live = await SemanticWatchdog(cfg.background_tasks).evaluate(active, now=time.time())
+    assert live.action == "continue"
+    assert live.signals["active_phase"] == "step"
+    assert live.signals["triggered"] is False
+
     backend = create_memory_backend(cfg.memory)
     await backend.initialize()
     runner = BackgroundTaskRunner(backend, LLMRouter(cfg), cfg, build_default_tool_registry(cfg))
@@ -483,6 +501,10 @@ async def test_sch07_restart_recovery_respects_auto_resume_and_side_effects(tmp_
             worker_session_id="w_write", checkpoint={"step": 3, "has_side_effect": True},
         ))
         await backend.add_background_task(BackgroundTaskRecord(
+            task_id="verify", title="自检中", goal_prompt="核验", status="verifying",
+            worker_session_id="w_verify", checkpoint={"step": 4},
+        ))
+        await backend.add_background_task(BackgroundTaskRecord(
             task_id="legacy", title="旧任务", goal_prompt="旧", status="running",
         ))
         runner = BackgroundTaskRunner(backend, LLMRouter(cfg), cfg, build_default_tool_registry(cfg))
@@ -494,9 +516,10 @@ async def test_sch07_restart_recovery_respects_auto_resume_and_side_effects(tmp_
         runner._run_task = _fake_run  # type: ignore[method-assign]
         count = await runner.initialize()
         await asyncio.sleep(0)
-        assert count == 3
-        assert started == ["ro"]
+        assert count == 4
+        assert set(started) == {"ro", "verify"}
         assert (await backend.get_background_task("ro")).status == "queued"  # type: ignore[union-attr]
+        assert (await backend.get_background_task("verify")).status == "queued"  # type: ignore[union-attr]
         assert (await backend.get_background_task("write")).status == "waiting_approval"  # type: ignore[union-attr]
         assert (await backend.get_background_task("legacy")).status == "interrupted"  # type: ignore[union-attr]
         await runner.shutdown()
@@ -544,3 +567,51 @@ def test_worker_slot_follow_chat_clear_and_dispatch_risk_gate(tmp_path: Path) ->
     assert dispatch.classify_risk({"goal": "查资料", "packs": ["web_research"]}) == "safe"
     assert dispatch.classify_risk({"goal": "跑脚本", "packs": ["dev_ops"]}) == "confirm"
     assert dispatch.classify_risk({"goal": "写文件", "packs": ["web_research"], "writable_paths": ["/tmp"]}) == "confirm"
+
+
+@pytest.mark.asyncio
+async def test_worker_lock_waits_for_conflicting_writer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(task_runner_module, "_LOCK_RETRY_SECONDS", 0.1)
+    monkeypatch.setattr(task_runner_module, "_LOCK_WAIT_SECONDS", 3.0)
+    cfg = _cfg(tmp_path, "lock_wait.db")
+    cfg.background_tasks.max_concurrency = 2
+    backend = create_memory_backend(cfg.memory)
+    await backend.initialize()
+
+    class _DelayedFinalRouter(LLMRouter):
+        def __init__(self, config: AppConfig) -> None:
+            super().__init__(config)
+            self.calls = 0
+
+        async def complete_with_tools(self, messages, tools, *, profile_name=None, on_text_delta=None):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(0.4)
+            return LLMCompletionResult(content="完成", tool_calls=[], usage=_usage())
+
+    runner = BackgroundTaskRunner(
+        backend, _DelayedFinalRouter(cfg), cfg, build_default_tool_registry(cfg),
+        artifact_dir=tmp_path / "artifacts",
+    )
+    try:
+        box = tmp_path / "locked"
+        box.mkdir()
+        await runner.submit(
+            title="写者1", goal_prompt="g1", packs=["dev_ops"],
+            mandate={"allowed_packs": ["dev_ops"], "writable_paths": [str(box)]},
+        )
+        await runner.submit(
+            title="写者2", goal_prompt="g2", packs=["dev_ops"],
+            mandate={"allowed_packs": ["dev_ops"], "writable_paths": [str(box)]},
+        )
+        for _ in range(60):
+            tasks = await runner.list_tasks(limit=10)
+            if len(tasks) == 2 and all(t.status == "completed" for t in tasks):
+                break
+            await asyncio.sleep(0.1)
+        tasks = await runner.list_tasks(limit=10)
+        assert [t.status for t in tasks] == ["completed", "completed"]
+        assert not await backend.list_resource_locks()
+    finally:
+        await runner.shutdown()
+        await backend.close()

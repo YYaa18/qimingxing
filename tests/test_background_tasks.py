@@ -202,6 +202,7 @@ def test_bg_task_confirm_approval_and_foreground_chat_over_ws(tmp_path: Path) ->
     router = _MockBgRouter(cfg, trigger_confirm=True)
     app = create_app(config=cfg, llm_router=router)
     app.state.hub.tool_registry.register(_DummyConfirmTool())
+    app.state.hub.router_extra_tool_names = {"dummy_confirm_tool"}
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as ws:

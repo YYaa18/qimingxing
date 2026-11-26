@@ -261,6 +261,7 @@ def test_hub_approval_allow_deny_remember_and_turn_cancel() -> None:
     router = ScriptedToolRouter(cfg, script)
     app = create_app(config=cfg, llm_router=router)
     app.state.hub.tool_registry = reg
+    app.state.hub.router_extra_tool_names = {"confirm_op"}
 
     def _recv_until(ws, target_type: str) -> Dict[str, Any]:
         while True:
