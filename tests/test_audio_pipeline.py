@@ -102,6 +102,16 @@ async def test_deepseek_asr_and_tts_providers_mock_transport() -> None:
     assert seen_tts["json"]["voice_id"] == "stella"
     assert seen_tts["json"]["format"] == "pcm"
 
+    # Providers keep one HTTP client instead of a fresh TLS handshake per call.
+    asr_client = asr._client
+    await asr.transcribe_pcm(pcm_in, sample_rate=16000, channels=1)
+    assert asr._client is asr_client
+    tts_client = tts._client
+    _ = [c async for c in tts.synthesize_pcm_stream("第二句") ]
+    assert tts._client is tts_client
+    await asr.aclose()
+    await tts.aclose()
+
 
 class _FakeASR(ASRProvider):
     def __init__(self, reply_text: str = "今天北京天气怎么样？") -> None:

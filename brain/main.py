@@ -277,6 +277,14 @@ def create_app(
                 await emb_provider.aclose()
             except Exception:
                 logger.debug("Failed closing embedding HTTP client", exc_info=True)
+            for provider in (hub.asr_provider, hub.tts_provider):
+                close = getattr(provider, "aclose", None)
+                if close is None:
+                    continue
+                try:
+                    await close()
+                except Exception:
+                    logger.debug("Failed closing audio HTTP client", exc_info=True)
             await backend.close()
             artifacts.cleanup_all()
 

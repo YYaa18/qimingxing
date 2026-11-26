@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import AsyncIterator, Optional
 
@@ -9,6 +10,7 @@ from brain.audio.base import (
     ASRProvider,
     ASRResult,
     TTSProvider,
+    _PooledHTTPClientMixin,
     estimate_asr_cost_cny,
     pcm16_to_wav,
 )
@@ -27,7 +29,7 @@ def _use_deepseek_legacy_audio(base_url: str, model: str, kind: str) -> bool:
     return (not low_m) or low_m == expected
 
 
-class OpenAICompatibleASRProvider(ASRProvider):
+class OpenAICompatibleASRProvider(_PooledHTTPClientMixin, ASRProvider):
     """OpenAI-compatible Speech-to-Text (`POST /audio/transcriptions`) adapter."""
 
     def __init__(
@@ -59,19 +61,17 @@ class OpenAICompatibleASRProvider(ASRProvider):
         headers = {"Authorization": f"Bearer {api_key}"}
         model_id = (self.config.model or "").strip() or "FunAudioLLM/SenseVoiceSmall"
 
-        client_kwargs: dict = {"timeout": max(2.0, float(self.config.timeout_sec))}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
-
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.post(
-                url,
-                headers=headers,
-                files={"file": ("speech.wav", wav_bytes, "audio/wav")},
-                data={"model": model_id},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._pooled_client(
+            httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        )
+        resp = await client.post(
+            url,
+            headers=headers,
+            files={"file": ("speech.wav", wav_bytes, "audio/wav")},
+            data={"model": model_id},
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         text = str(data.get("text") or "").strip()
         duration_ms = int(
@@ -86,7 +86,7 @@ class OpenAICompatibleASRProvider(ASRProvider):
         )
 
 
-class OpenAICompatibleTTSProvider(TTSProvider):
+class OpenAICompatibleTTSProvider(_PooledHTTPClientMixin, TTSProvider):
     """OpenAI-compatible Text-to-Speech (`POST /audio/speech`) streaming PCM adapter."""
 
     def __init__(
@@ -125,30 +125,28 @@ class OpenAICompatibleTTSProvider(TTSProvider):
             "response_format": "pcm",
         }
 
-        client_kwargs: dict = {"timeout": max(2.0, float(self.config.timeout_sec))}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
-
+        client = self._pooled_client(
+            httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        )
         carry = b""
         checked_wav_header = False
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                resp.raise_for_status()
-                async for raw_chunk in resp.aiter_bytes(chunk_size=4800):
-                    if not raw_chunk:
+        async with client.stream("POST", url, headers=headers, json=payload) as resp:
+            resp.raise_for_status()
+            async for raw_chunk in resp.aiter_bytes(chunk_size=4800):
+                if not raw_chunk:
+                    continue
+                buf = carry + raw_chunk
+                if not checked_wav_header:
+                    if len(buf) < 44 and buf.startswith(b"RIFF"):
+                        carry = buf
                         continue
-                    buf = carry + raw_chunk
-                    if not checked_wav_header:
-                        if len(buf) < 44 and buf.startswith(b"RIFF"):
-                            carry = buf
-                            continue
-                        checked_wav_header = True
-                        if len(buf) >= 44 and buf[:4] == b"RIFF" and buf[8:12] == b"WAVE":
-                            buf = buf[44:]
-                    even_len = len(buf) & ~1
-                    if even_len > 0:
-                        yield buf[:even_len]
-                    carry = buf[even_len:]
+                    checked_wav_header = True
+                    if len(buf) >= 44 and buf[:4] == b"RIFF" and buf[8:12] == b"WAVE":
+                        buf = buf[44:]
+                even_len = len(buf) & ~1
+                if even_len > 0:
+                    yield buf[:even_len]
+                carry = buf[even_len:]
 
 
 class RoutedASRProvider(ASRProvider):
@@ -162,6 +160,32 @@ class RoutedASRProvider(ASRProvider):
     ) -> None:
         self.config = config
         self._transport = transport
+        self._delegate: Optional[ASRProvider] = None
+
+    def _get_delegate(self) -> ASRProvider:
+        if self._delegate is None:
+            if _use_deepseek_legacy_audio(self.config.base_url, self.config.model, "asr"):
+                self._delegate = DeepSeekASRProvider(
+                    self.config, transport=self._transport
+                )
+            else:
+                self._delegate = OpenAICompatibleASRProvider(
+                    self.config, transport=self._transport
+                )
+        return self._delegate
+
+    def update_config(self, config: AudioASRConfig) -> None:
+        old, self._delegate, self.config = self._delegate, None, config
+        if old is not None:
+            try:
+                asyncio.get_running_loop().create_task(old.aclose())
+            except RuntimeError:
+                pass
+
+    async def aclose(self) -> None:
+        delegate, self._delegate = self._delegate, None
+        if delegate is not None:
+            await delegate.aclose()
 
     async def transcribe_pcm(
         self,
@@ -170,10 +194,7 @@ class RoutedASRProvider(ASRProvider):
         sample_rate: int = 16000,
         channels: int = 1,
     ) -> ASRResult:
-        if _use_deepseek_legacy_audio(self.config.base_url, self.config.model, "asr"):
-            delegate: ASRProvider = DeepSeekASRProvider(self.config, transport=self._transport)
-        else:
-            delegate = OpenAICompatibleASRProvider(self.config, transport=self._transport)
+        delegate = self._get_delegate()
         return await delegate.transcribe_pcm(pcm_bytes, sample_rate=sample_rate, channels=channels)
 
 
@@ -188,6 +209,32 @@ class RoutedTTSProvider(TTSProvider):
     ) -> None:
         self.config = config
         self._transport = transport
+        self._delegate: Optional[TTSProvider] = None
+
+    def _get_delegate(self) -> TTSProvider:
+        if self._delegate is None:
+            if _use_deepseek_legacy_audio(self.config.base_url, self.config.model, "tts"):
+                self._delegate = DeepSeekTTSProvider(
+                    self.config, transport=self._transport
+                )
+            else:
+                self._delegate = OpenAICompatibleTTSProvider(
+                    self.config, transport=self._transport
+                )
+        return self._delegate
+
+    def update_config(self, config: AudioTTSConfig) -> None:
+        old, self._delegate, self.config = self._delegate, None, config
+        if old is not None:
+            try:
+                asyncio.get_running_loop().create_task(old.aclose())
+            except RuntimeError:
+                pass
+
+    async def aclose(self) -> None:
+        delegate, self._delegate = self._delegate, None
+        if delegate is not None:
+            await delegate.aclose()
 
     async def synthesize_pcm_stream(
         self,
@@ -195,9 +242,6 @@ class RoutedTTSProvider(TTSProvider):
         *,
         voice: Optional[str] = None,
     ) -> AsyncIterator[bytes]:
-        if _use_deepseek_legacy_audio(self.config.base_url, self.config.model, "tts"):
-            delegate: TTSProvider = DeepSeekTTSProvider(self.config, transport=self._transport)
-        else:
-            delegate = OpenAICompatibleTTSProvider(self.config, transport=self._transport)
+        delegate = self._get_delegate()
         async for chunk in delegate.synthesize_pcm_stream(text, voice=voice):
             yield chunk

@@ -1153,9 +1153,13 @@ class Hub:
         self.config = fresh_cfg
         self.llm_router.reload_config(fresh_cfg)
         self.privacy_mode = fresh_cfg.privacy.default_mode
-        if hasattr(self.asr_provider, "config"):
+        if hasattr(self.asr_provider, "update_config"):
+            self.asr_provider.update_config(fresh_cfg.audio.asr)  # type: ignore[attr-defined]
+        elif hasattr(self.asr_provider, "config"):
             self.asr_provider.config = fresh_cfg.audio.asr  # type: ignore[attr-defined]
-        if hasattr(self.tts_provider, "config"):
+        if hasattr(self.tts_provider, "update_config"):
+            self.tts_provider.update_config(fresh_cfg.audio.tts)  # type: ignore[attr-defined]
+        elif hasattr(self.tts_provider, "config"):
             self.tts_provider.config = fresh_cfg.audio.tts  # type: ignore[attr-defined]
         if hasattr(self.screen_router, "reload_config"):
             self.screen_router.reload_config(fresh_cfg)
