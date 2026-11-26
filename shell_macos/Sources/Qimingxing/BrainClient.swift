@@ -863,6 +863,44 @@ final class BrainClient: ObservableObject {
         }
     }
 
+    func fetchBrowserStatus() async -> [String: Any]? {
+        guard let url = URL(string: "\(httpBase)/api/browser/status") else { return nil }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            return JSONHelper.dict(from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    func testBrowserCDP(endpoint: String) async -> [String: Any]? {
+        guard let url = URL(string: "\(httpBase)/api/browser/test_cdp"),
+              let body = try? JSONSerialization.data(withJSONObject: ["endpoint": endpoint])
+        else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            return JSONHelper.dict(from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    func clearBrowserProfile() async -> [String: Any]? {
+        guard let url = URL(string: "\(httpBase)/api/browser/clear_profile") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            return JSONHelper.dict(from: data)
+        } catch {
+            return nil
+        }
+    }
+
     func saveSettings(_ updates: [String: Any]) async -> (Bool, String) {
         guard let url = URL(string: "\(httpBase)/api/config/settings"),
               let body = try? JSONSerialization.data(withJSONObject: updates)

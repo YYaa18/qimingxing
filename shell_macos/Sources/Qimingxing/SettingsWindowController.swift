@@ -7,6 +7,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case routing = "模型与路由"
     case voicePrivacy = "语音与隐私"
     case shortcuts = "快捷键"
+    case browser = "浏览器自动化"
     case mcp = "MCP 服务"
 
     var id: Self { self }
@@ -18,6 +19,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .routing: return "cpu"
         case .voicePrivacy: return "waveform.and.mic"
         case .shortcuts: return "command"
+        case .browser: return "safari"
         case .mcp: return "puzzlepiece.extension"
         }
     }
@@ -28,6 +30,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .routing: return "按能力分配模型与服务商"
         case .voicePrivacy: return "隐私模式与语音闭环"
         case .shortcuts: return "全局与壳内快捷键"
+        case .browser: return "隔离浏览器与 live 接管"
         case .mcp: return "第三方 MCP Server"
         }
     }
@@ -188,6 +191,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         case "routing", "models": return .routing
         case "voice", "privacy": return .voicePrivacy
         case "shortcuts": return .shortcuts
+        case "browser": return .browser
         case "mcp": return .mcp
         default: return nil
         }
@@ -554,7 +558,7 @@ struct SettingsRootView: View {
             VStack(alignment: .leading, spacing: 0) {
                 brand
                 navSection("核心设置", items: [.general, .routing, .voicePrivacy])
-                navSection("效率与扩展", items: [.shortcuts, .mcp])
+                navSection("效率与扩展", items: [.shortcuts, .browser, .mcp])
                 Spacer(minLength: 0)
             }
         }
@@ -572,6 +576,7 @@ struct SettingsRootView: View {
                     case .routing: routingPane
                     case .voicePrivacy: voicePrivacyPane
                     case .shortcuts: shortcutsPane
+                    case .browser: BrowserSettingsPane(brainClient: brainClient)
                     case .mcp: mcpPane
                     }
                 }
@@ -1621,5 +1626,158 @@ struct CustomProviderSheet: View {
         )
         onAdd(provider)
         dismiss()
+    }
+}
+
+private struct BrowserSettingsPane: View {
+    @ObservedObject var brainClient: BrainClient
+    @State private var chromeInstalled = false
+    @State private var playwrightInstalled = false
+    @State private var profileSizeBytes = 0
+    @State private var cdpEndpoint = "http://127.0.0.1:9222"
+    @State private var cdpReady = false
+    @State private var cdpMessage = ""
+    @State private var busy = false
+    @State private var message = ""
+    @State private var confirmClear = false
+
+    var body: some View {
+        Section("运行时检测") {
+            LabeledContent("Google Chrome") {
+                Text(chromeInstalled ? "已安装" : "未找到")
+                    .foregroundStyle(chromeInstalled ? QMXTheme.success : QMXTheme.warning)
+            }
+            LabeledContent("Playwright") {
+                Text(playwrightInstalled ? "已就绪" : "未安装")
+                    .foregroundStyle(playwrightInstalled ? QMXTheme.success : QMXTheme.warning)
+            }
+            LabeledContent("隔离缓存") {
+                Text(profileSizeText)
+                    .monospacedDigit()
+                    .foregroundStyle(QMXTheme.textSecondary)
+            }
+            Button("重新检测") {
+                Task { await reload() }
+            }
+            .disabled(busy)
+        }
+
+        Section("复用主浏览器（live）") {
+            TextField("CDP 地址", text: $cdpEndpoint)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 10) {
+                Button("保存地址") {
+                    Task { await saveEndpoint() }
+                }
+                .disabled(busy)
+                Button(cdpReady ? "已连接" : "测试连接") {
+                    Task { await testCDP() }
+                }
+                .disabled(busy)
+                if !cdpMessage.isEmpty {
+                    Text(cdpMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(cdpReady ? QMXTheme.success : QMXTheme.warning)
+                        .lineLimit(2)
+                }
+            }
+            Text("live 模式只连接本机 127.0.0.1 调试端口。Chrome 136+ 必须使用独立的 --user-data-dir 启动协作窗口；不要对个人默认 Chrome 目录开启调试端口。")
+                .font(.system(size: 11))
+                .foregroundStyle(QMXTheme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Section("安全边界") {
+            Text("默认使用隔离浏览器 browser_profile/，与个人浏览器物理隔离。live 模式必须在任务派发审批中绑定 allowed_domains；跨域跳转会由代码层阻断，任务结束只断开连接，不关闭你的浏览器窗口。")
+                .font(.system(size: 11.5))
+                .foregroundStyle(QMXTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Section("缓存") {
+            Button("清理隔离浏览器缓存…", role: .destructive) {
+                confirmClear = true
+            }
+            .disabled(busy)
+            if !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(QMXTheme.textTertiary)
+            }
+        }
+        .task { await reload() }
+        .alert("清理隔离浏览器缓存？", isPresented: $confirmClear) {
+            Button("清理", role: .destructive) {
+                Task { await clearProfile() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("会删除 browser_profile/ 中的登录态与缓存，不影响个人浏览器和 live 协作窗口。")
+        }
+    }
+
+    private var profileSizeText: String {
+        if profileSizeBytes <= 0 { return "空" }
+        let mb = Double(profileSizeBytes) / 1024.0 / 1024.0
+        if mb >= 1024 { return String(format: "%.1f GB", mb / 1024.0) }
+        return String(format: "%.1f MB", mb)
+    }
+
+    private func reload() async {
+        busy = true
+        defer { busy = false }
+        guard let status = await brainClient.fetchBrowserStatus() else {
+            message = "无法读取浏览器状态，Brain 可能未连接。"
+            return
+        }
+        chromeInstalled = (status["chrome_installed"] as? Bool) ?? false
+        playwrightInstalled = (status["playwright_installed"] as? Bool) ?? false
+        profileSizeBytes = (status["profile_size_bytes"] as? Int) ?? 0
+        if let endpoint = status["cdp_endpoint"] as? String, !endpoint.isEmpty {
+            cdpEndpoint = endpoint
+        }
+        cdpReady = (status["cdp_ok"] as? Bool) ?? false
+    }
+
+    private func saveEndpoint() async {
+        busy = true
+        defer { busy = false }
+        let (ok, messageText) = await brainClient.saveSettings([
+            "browser": ["cdp_endpoint": cdpEndpoint]
+        ])
+        message = ok ? "CDP 地址已保存" : messageText
+        if ok {
+            await reload()
+        }
+    }
+
+    private func testCDP() async {
+        busy = true
+        defer { busy = false }
+        guard let result = await brainClient.testBrowserCDP(endpoint: cdpEndpoint) else {
+            cdpReady = false
+            cdpMessage = "测试请求失败"
+            return
+        }
+        cdpReady = (result["ok"] as? Bool) ?? false
+        if cdpReady {
+            let browser = (result["browser"] as? String) ?? ""
+            let tabs = (result["tabs"] as? [[String: Any]])?.count ?? 0
+            cdpMessage = "\(browser) · \(tabs) 个标签页"
+        } else {
+            cdpMessage = (result["error"] as? String) ?? "连接失败"
+        }
+    }
+
+    private func clearProfile() async {
+        busy = true
+        defer { busy = false }
+        guard let result = await brainClient.clearBrowserProfile() else {
+            message = "清理失败"
+            return
+        }
+        let freed = (result["freed_bytes"] as? Int) ?? 0
+        message = "已清理 \(ByteCountFormatter.string(fromByteCount: Int64(freed), countStyle: .file))"
+        await reload()
     }
 }

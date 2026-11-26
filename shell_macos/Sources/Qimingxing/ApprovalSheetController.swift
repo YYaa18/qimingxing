@@ -125,13 +125,26 @@ struct ApprovalModalView: View {
     private var detailsCard: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 7) {
-                ForEach(item.details.keys.sorted(), id: \.self) { key in
+                if let rawPath = item.details["preview_image_path"],
+                   !rawPath.isEmpty,
+                   let image = NSImage(contentsOfFile: rawPath) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxHeight: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+                        )
+                }
+                ForEach(item.details.keys.sorted().filter { $0 != "preview_image_path" }, id: \.self) { key in
                     HStack(alignment: .top, spacing: 10) {
                         Text(humanKey(key))
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundStyle(QMXTheme.textTertiary)
                             .frame(width: 92, alignment: .leading)
-                        Text(item.details[key] ?? "")
+                        Text(displayValue(key, item.details[key] ?? ""))
                             .font(.system(size: 11.5, design: .monospaced))
                             .foregroundStyle(QMXTheme.textPrimary)
                             .textSelection(.enabled)
@@ -235,6 +248,8 @@ struct ApprovalModalView: View {
         case "macos_mail_search": return "允许读取邮件？"
         case "macos_mail_draft": return "允许创建邮件草稿？"
         case "macos_browser_tabs": return "允许读取浏览器标签页？"
+        case "browser_open": return "允许接入浏览器？"
+        case "browser_act": return "允许执行网页高危操作？"
         default: return "允许执行这项操作？"
         }
     }
@@ -244,6 +259,14 @@ struct ApprovalModalView: View {
         if item.toolName.hasPrefix("macos_") { return "来自 macOS 应用联动" }
         if item.toolName.hasPrefix("mcp") { return "来自 MCP 工具" }
         return "来自启明星"
+    }
+
+    private func displayValue(_ key: String, _ value: String) -> String {
+        if key == "browser_mode" {
+            if value == "live" { return "复用主浏览器（live）" }
+            if value == "isolated" { return "隔离浏览器（isolated）" }
+        }
+        return value
     }
 
     private func humanKey(_ key: String) -> String {
@@ -259,6 +282,14 @@ struct ApprovalModalView: View {
         case "end": return "结束"
         case "calendar_name": return "日历"
         case "list_name": return "列表"
+        case "browser_mode": return "浏览器模式"
+        case "allowed_domains": return "授权域名"
+        case "target_url": return "目标网址"
+        case "target": return "目标操作"
+        case "tab_hint": return "标签页"
+        case "preview_image_path": return "页面截图"
+        case "reason": return "原因"
+        case "instruction": return "需要你做什么"
         default: return key.replacingOccurrences(of: "_", with: " ")
         }
     }
