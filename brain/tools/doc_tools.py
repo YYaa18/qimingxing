@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -90,7 +91,8 @@ class DocInspectTool(Tool):
                 summary=f"已列出目录 {listing['name']}（{listing['count']} 项）",
             )
         try:
-            result = inspect_document(
+            result = await asyncio.to_thread(
+                inspect_document,
                 raw_path,
                 page_range=str(arguments.get("page_range") or ""),
                 sheet_name=str(arguments.get("sheet_name") or ""),
@@ -183,7 +185,8 @@ class SheetTransformTool(Tool):
             "sheet",
         )
         try:
-            result = sheet_transform(
+            result = await asyncio.to_thread(
+                sheet_transform,
                 operation=str(arguments.get("operation") or "convert"),
                 inputs=[str(p) for p in inputs],
                 output_path=out,
@@ -265,7 +268,8 @@ class DocRenameTool(Tool):
                         status="blocked",
                     )
         try:
-            result = rename_files(
+            result = await asyncio.to_thread(
+                rename_files,
                 renames,
                 copy=bool(arguments.get("copy", True)),
                 overwrite=bool(arguments.get("overwrite", False)),
@@ -357,7 +361,8 @@ class DocMatchRenameTool(Tool):
                         status="blocked",
                     )
         try:
-            result = match_rename_by_table(
+            result = await asyncio.to_thread(
+                match_rename_by_table,
                 table_path=table_path,
                 files=[str(p) for p in files] if isinstance(files, list) else [],
                 output_dir=output_dir,
@@ -442,7 +447,8 @@ class PDFOpsTool(Tool):
                 return ToolResult(ok=False, output=str(exc), summary="PDF 输入无效", status="error")
         out = _output_path(ctx, str(arguments.get("output_path") or ""), ".pdf", "pdf")
         try:
-            result = pdf_ops(
+            result = await asyncio.to_thread(
+                pdf_ops,
                 operation=str(arguments.get("operation") or "merge"),
                 inputs=[str(p) for p in inputs],
                 output_path=out,
@@ -529,7 +535,8 @@ class DocGenerateTool(Tool):
             return ToolResult(ok=False, output="format 仅支持 xlsx/docx/pdf/csv", summary="格式无效", status="error")
         out = _output_path(ctx, str(arguments.get("output_path") or ""), "." + fmt, "doc")
         try:
-            result = doc_generate(
+            result = await asyncio.to_thread(
+                doc_generate,
                 format=fmt,
                 output_path=out,
                 title=str(arguments.get("title") or ""),
