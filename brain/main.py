@@ -263,6 +263,10 @@ def create_app(
             extractor.cancel_idle_timers()
             await extractor.wait_for_idle()
             await skill_manager.wait_for_idle()
+            try:
+                await router.aclose()
+            except Exception:
+                logger.debug("Failed closing shared LLM HTTP client", exc_info=True)
             await backend.close()
             artifacts.cleanup_all()
 
