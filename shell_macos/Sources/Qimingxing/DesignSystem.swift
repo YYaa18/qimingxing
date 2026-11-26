@@ -639,20 +639,63 @@ func qmxOpenSafeURL(_ url: URL) -> OpenURLAction.Result {
     return .handled
 }
 
+/// Inline markdown parsing is pure and hot: the streaming answer re-renders
+/// several blocks per frame. Cache by text so completed blocks are free and
+/// only the currently growing block pays a parse.
+@MainActor
+private enum QMXInlineMarkdownCache {
+    final class Box: NSObject {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    static let cache: NSCache<NSString, Box> = {
+        let cache = NSCache<NSString, Box>()
+        cache.countLimit = 48
+        return cache
+    }()
+
+    static func attributed(for text: String) -> AttributedString? {
+        let key = text as NSString
+        if let hit = cache.object(forKey: key) {
+            return hit.value
+        }
+        guard let parsed = try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace
+            )
+        ) else {
+            return nil
+        }
+        cache.setObject(Box(parsed), forKey: key)
+        return parsed
+    }
+}
+
+struct QMXTextSelectable: ViewModifier {
+    let enabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.textSelection(.enabled)
+        } else {
+            content
+        }
+    }
+}
+
 struct InlineMarkdownText: View {
     let text: String
     var fontSize: CGFloat = 14
     var lineSpacing: CGFloat = 5
     var weight: Font.Weight = .regular
+    var selectable: Bool = true
 
     var body: some View {
         Group {
-            if let attr = try? AttributedString(
-                markdown: text,
-                options: AttributedString.MarkdownParsingOptions(
-                    interpretedSyntax: .inlineOnlyPreservingWhitespace
-                )
-            ) {
+            if let attr = QMXInlineMarkdownCache.attributed(for: text) {
                 Text(attr)
             } else {
                 Text(text)
@@ -660,7 +703,7 @@ struct InlineMarkdownText: View {
         }
         .font(.system(size: fontSize, weight: weight))
         .lineSpacing(lineSpacing)
-        .textSelection(.enabled)
+        .modifier(QMXTextSelectable(enabled: selectable))
         .environment(\.openURL, OpenURLAction { qmxOpenSafeURL($0) })
     }
 }
