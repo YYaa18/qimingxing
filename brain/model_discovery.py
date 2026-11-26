@@ -27,15 +27,21 @@ def _safe_positive_int(value: Any, default: int = 0) -> int:
 
 def _caps_item(provider_id: str, model_id: str, label: str, **overrides: Any) -> Dict[str, Any]:
     caps = resolve_model_capabilities(provider_id, model_id)
+    context_window = _safe_positive_int(
+        overrides.get("context_window"), caps.context_window
+    )
+    max_output = _safe_positive_int(
+        overrides.get("max_output_tokens"), caps.max_output_tokens
+    )
+    if context_window and max_output >= context_window:
+        # Gemini image/TTS models report outputTokenLimit equal to the context
+        # limit. Persist a usable value so settings saves are not blocked.
+        max_output = max(1, context_window // 2)
     return {
         "model_id": model_id,
         "label": label or model_id,
-        "context_window": _safe_positive_int(
-            overrides.get("context_window"), caps.context_window
-        ),
-        "max_output_tokens": _safe_positive_int(
-            overrides.get("max_output_tokens"), caps.max_output_tokens
-        ),
+        "context_window": context_window,
+        "max_output_tokens": max_output,
         "supports_tools": bool(overrides.get("supports_tools", caps.supports_tools)),
         "supports_vision": bool(overrides.get("supports_vision", caps.supports_vision)),
         "supports_cache": bool(overrides.get("supports_cache", caps.supports_cache)),

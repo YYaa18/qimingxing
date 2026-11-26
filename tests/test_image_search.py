@@ -82,7 +82,7 @@ def test_media_cache_downloads_and_persists_image(tmp_path, monkeypatch) -> None
         return None
 
     monkeypatch.setattr(media_cache_module, "_assert_public_url", allow)
-    png = _png_bytes()
+    png = _png_bytes(size=(96, 64))
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == httpx.URL("https://images.example.com/a.png")
@@ -100,7 +100,7 @@ def test_media_cache_downloads_and_persists_image(tmp_path, monkeypatch) -> None
         )
     )
     assert Path(media.local_path).is_file()
-    assert media.width == 64 and media.height == 48
+    assert media.width == 96 and media.height == 64
     assert media.mime_type == "image/png"
     assert media.source_url == "https://example.com/page"
     assert oct(os.stat(media.local_path).st_mode & 0o777) == "0o600"
@@ -289,12 +289,14 @@ def test_media_cache_prunes_only_old_unreferenced_files(tmp_path) -> None:
     assert not old_orphan.exists()
 
 
-def test_private_ipv4_mapped_ipv6_is_rejected() -> None:
-    from brain.media_cache import _is_public_ip
+def test_private_ipv4_mapped_ipv6_and_proxy_fake_ip() -> None:
+    from brain.media_cache import _is_proxy_fake_ip, _is_public_ip
 
     assert _is_public_ip("127.0.0.1") is False
     assert _is_public_ip("::ffff:127.0.0.1") is False
     assert _is_public_ip("169.254.169.254") is False
+    assert _is_proxy_fake_ip("198.18.1.86") is True
+    assert _is_public_ip("198.18.1.86") is False
 
 
 def test_image_search_without_key_returns_actionable_error() -> None:

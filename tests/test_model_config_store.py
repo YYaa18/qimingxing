@@ -201,3 +201,27 @@ def test_custom_provider_can_be_deleted_but_builtin_cannot(tmp_path: Path) -> No
     })
     assert store.provider("custom_abc123") is None
     assert store.provider("deepseek") is not None
+
+
+def test_provider_api_invalid_output_limits_are_clamped(tmp_path: Path) -> None:
+    cfg = _cfg()
+    store = ModelConfigStore(tmp_path / "models.db", tmp_path / "config.yaml")
+    store.initialize(cfg)
+    store.apply_provider_patch({
+        "custom_clamp": {
+            "label": "Clamp",
+            "protocol": "openai_compatible",
+            "base_url": "https://example.com/v1",
+            "models": ["image-model"],
+            "model_capabilities": {
+                "image-model": {
+                    "context_window": 1024,
+                    "max_output_tokens": 2048,
+                    "source": "provider_api",
+                }
+            },
+        }
+    })
+    models = store.provider_models("custom_clamp")
+    assert models[0]["context_window"] == 1024
+    assert models[0]["max_output_tokens"] == 512

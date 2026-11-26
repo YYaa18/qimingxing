@@ -691,10 +691,17 @@ class ModelConfigStore:
                                 raise ModelStoreValidationError(
                                     f"模型 {mid} 的最大输出必须在 1–10,000,000 之间"
                                 )
+                            source = str(cap_data.get("source") or "manual")
                             if context_window and max_output and max_output >= context_window:
-                                raise ModelStoreValidationError(
-                                    f"模型 {mid} 的最大输出必须小于上下文窗口"
-                                )
+                                if source == "manual":
+                                    raise ModelStoreValidationError(
+                                        f"模型 {mid} 的最大输出必须小于上下文窗口"
+                                    )
+                                # Provider discovery occasionally reports
+                                # outputTokenLimit == context limit (Gemini image
+                                # models). Clamp discovered values instead of
+                                # blocking every settings save.
+                                max_output = max(1, context_window // 2)
                             cap = ModelCapabilities(
                                 context_window,
                                 max_output,
@@ -702,7 +709,7 @@ class ModelConfigStore:
                                 bool(cap_data.get("supports_vision", False)),
                                 bool(cap_data.get("supports_cache", False)),
                                 bool(cap_data.get("supports_reasoning", False)),
-                                str(cap_data.get("source") or "manual"),
+                                source,
                             )
                             metadata = (
                                 {"is_preview": True}

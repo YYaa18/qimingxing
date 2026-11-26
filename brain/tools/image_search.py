@@ -103,16 +103,43 @@ class TavilyImageSearchProvider:
                 )
             )
 
-        # Prefer images attached to a result page: they preserve a source URL.
+        # Build a URL -> source-page map first so top-level query images can
+        # still carry attribution when the same image appears in a result.
+        source_map: Dict[str, tuple[str, str]] = {}
         for result in data.get("results") or []:
             if not isinstance(result, dict):
                 continue
             source_url = str(result.get("url") or "").strip()
             source_title = str(result.get("title") or "").strip()
             for image in result.get("images") or []:
-                add(image, source_url=source_url, source_title=source_title)
+                url = (
+                    str(image.get("url") or "").strip()
+                    if isinstance(image, dict)
+                    else str(image or "").strip()
+                )
+                if url:
+                    source_map.setdefault(url, (source_url, source_title))
+
+        # Query-level images are generally more relevant than all images
+        # scraped from one long travel page; put them first.
         for image in data.get("images") or []:
-            add(image)
+            url = (
+                str(image.get("url") or "").strip()
+                if isinstance(image, dict)
+                else str(image or "").strip()
+            )
+            source_url, source_title = source_map.get(url, ("", ""))
+            add(image, source_url=source_url, source_title=source_title)
+
+        # Then diversify per-result images instead of taking every image from
+        # the first result page (which often includes logos/hotels/maps).
+        for result in data.get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            source_url = str(result.get("url") or "").strip()
+            source_title = str(result.get("title") or "").strip()
+            for image in (result.get("images") or [])[:2]:
+                add(image, source_url=source_url, source_title=source_title)
         return hits[: max(1, max_results)]
 
 

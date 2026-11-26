@@ -32,6 +32,10 @@ _MAX_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = _MAX_PIXELS
 _MAX_DIMENSION = 12_000
 _MAX_REDIRECTS = 3
+# Clash/Surge-style fake-IP DNS maps public hosts into 198.18.0.0/15.
+# Allow that range only for hostnames (never for literal IP URLs), otherwise
+# every image download fails on machines behind such a proxy.
+_PROXY_FAKE_NETWORKS = (ipaddress.ip_network("198.18.0.0/15"),)
 
 
 class MediaDownloadError(RuntimeError):
@@ -72,16 +76,26 @@ class DownloadedMedia:
         }
 
 
-def _is_public_ip(value: str) -> bool:
+def _normalized_ip(value: str) -> Optional[ipaddress._BaseAddress]:
     try:
         addr = ipaddress.ip_address(value)
     except ValueError:
-        return False
+        return None
     # IPv4-mapped IPv6 addresses (::ffff:127.0.0.1) must be unwrapped before
     # the global check, otherwise some reserved ranges can slip through.
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
-    return bool(addr.is_global)
+    return addr
+
+
+def _is_public_ip(value: str) -> bool:
+    addr = _normalized_ip(value)
+    return bool(addr and addr.is_global)
+
+
+def _is_proxy_fake_ip(value: str) -> bool:
+    addr = _normalized_ip(value)
+    return bool(addr and any(addr in net for net in _PROXY_FAKE_NETWORKS))
 
 
 async def _assert_public_url(url: str) -> None:
@@ -102,7 +116,12 @@ async def _assert_public_url(url: str) -> None:
     except OSError as exc:
         raise MediaDownloadError(f"无法解析图片域名: {host}") from exc
     addresses = {str(info[4][0]) for info in infos if info[4]}
-    if not addresses or any(not _is_public_ip(addr) for addr in addresses):
+    if not addresses:
+        raise MediaDownloadError("无法解析图片域名")
+    host_is_literal_ip = _normalized_ip(host) is not None
+    if host_is_literal_ip and any(_is_proxy_fake_ip(addr) for addr in addresses):
+        raise MediaDownloadError("拒绝直接访问代理保留地址")
+    if not all(_is_public_ip(addr) or _is_proxy_fake_ip(addr) for addr in addresses):
         raise MediaDownloadError("拒绝访问内网或保留地址")
 
 
@@ -119,8 +138,10 @@ def _validate_image(data: bytes) -> tuple[str, str, int, int]:
             probe.verify()
         with Image.open(BytesIO(data)) as image:
             width, height = image.size
-            if width <= 0 or height <= 0:
-                raise MediaDownloadError("图片尺寸无效")
+            if width < 64 or height < 64:
+                # Tracking pixels, spacers and tiny logos are not useful in the
+                # media strip and are common in Tavily page image results.
+                raise MediaDownloadError("图片尺寸过小")
             if width > _MAX_DIMENSION or height > _MAX_DIMENSION:
                 raise MediaDownloadError("图片尺寸超出限制")
             if width * height > _MAX_PIXELS:

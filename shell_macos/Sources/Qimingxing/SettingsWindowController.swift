@@ -847,7 +847,7 @@ struct SettingsRootView: View {
                     SecureField(
                         "",
                         text: $store.imageSearchKey,
-                        prompt: Text(store.imageSearchHasKey ? "已配置 \(store.imageSearchMasked)" : "tvly-…")
+                        prompt: Text(store.imageSearchHasKey ? "已配置 \(store.imageSearchMasked)" : "粘贴 Tavily Key，例如 tvly-…")
                     )
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12))
