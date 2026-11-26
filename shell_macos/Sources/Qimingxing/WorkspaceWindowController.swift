@@ -662,6 +662,15 @@ struct WorkspaceRootView: View {
         }
     }
 
+    private func scrollThreadToBottom(_ proxy: ScrollViewProxy) {
+        // LazyVStack may not have realized the last turn on first appearance.
+        // Scroll a sentinel after the next layout pass instead of only to the
+        // last lazy row (which can silently no-op).
+        DispatchQueue.main.async {
+            proxy.scrollTo("workspace-thread-bottom", anchor: .bottom)
+        }
+    }
+
     private func threadDetail(_ thread: WorkspaceThread) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -693,25 +702,29 @@ struct WorkspaceRootView: View {
                         }
                     }
                     .padding(.top, 4)
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id("workspace-thread-bottom")
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollIndicators(.hidden)
             .onAppear {
-                if let last = thread.turns.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
+                scrollThreadToBottom(proxy)
+            }
+            .onChange(of: thread.id) { _ in
+                scrollThreadToBottom(proxy)
             }
             .onChange(of: thread.turns.last?.body) { _ in
-                if let last = thread.turns.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
+                scrollThreadToBottom(proxy)
+            }
+            .onChange(of: thread.turns.last?.media?.count) { _ in
+                scrollThreadToBottom(proxy)
             }
             .onChange(of: thread.updatedAt) { _ in
-                if let last = thread.turns.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
+                scrollThreadToBottom(proxy)
             }
         }
     }
