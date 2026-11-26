@@ -354,6 +354,26 @@ class LLMRouter:
     def list_public_profiles(self) -> List[ProfileInfo]:
         return self._config.list_public_profiles()
 
+    async def warm_connection(self) -> None:
+        """Open the keep-alive connection before the first user turn.
+
+        The request is allowed to fail (401/404/no network); we only want the
+        TCP+TLS handshake out of the first-token critical path.
+        """
+        try:
+            profile = self.get_profile()
+        except Exception:
+            return
+        base_url = (profile.base_url or "").strip()
+        if not base_url:
+            return
+        timeout = httpx.Timeout(5.0, connect=3.0)
+        try:
+            client = self._http_client(timeout)
+            await client.get(base_url, timeout=timeout)
+        except Exception:
+            return
+
     async def stream_chat(
         self,
         messages: List[Dict[str, Any]],

@@ -243,6 +243,11 @@ def create_app(
 
         await active_scheduler.start()
 
+        warm_task: Optional[asyncio.Task[None]] = None
+        if not _config_injected:
+            # Move the first-turn TCP+TLS handshake off the critical path.
+            warm_task = asyncio.create_task(router.warm_connection())
+
         async def _ttl_reaper() -> None:
             while True:
                 await asyncio.sleep(60)
@@ -258,6 +263,12 @@ def create_app(
                 mcp_start_task.cancel()
                 try:
                     await mcp_start_task
+                except asyncio.CancelledError:
+                    pass
+            if warm_task is not None and not warm_task.done():
+                warm_task.cancel()
+                try:
+                    await warm_task
                 except asyncio.CancelledError:
                     pass
             await active_mcp.stop_all(hub.tool_registry)
