@@ -194,6 +194,11 @@ struct WorkspaceWingView: View {
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            if let media = turn.media, !media.isEmpty {
+                MediaStripView(media: media, mode: .compact)
+                    .padding(.top, 2)
+            }
         }
     }
 
