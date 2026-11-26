@@ -122,6 +122,11 @@ final class ProcessSupervisor: ObservableObject {
             let healthy = await waitForBrainHealthy(timeoutSeconds: 15.0)
             if !healthy {
                 lastFatalError = "Brain 后端未能在 15 秒内启动就绪。"
+                // Senses was started optimistically in parallel; stop it so it
+                // does not retry forever behind a failed Brain.
+                stopProcess(sensesProcess)
+                sensesProcess = nil
+                sensesRunning = false
                 showCriticalFailureAlert(
                     title: "启明星启动失败",
                     message: "后端 Brain 未能就绪，请检查日志目录：\n\(logsDir.path)"

@@ -556,7 +556,7 @@ class SensesAgent:
                         self._audio_active = False
                         self._audio_turn_id = None
                     attempt += 1
-                    delay = min(1.0 * (2 ** (attempt - 1)), 5.0)
+                    delay = min(0.2 * (2 ** (attempt - 1)), 5.0)
                     logger.warning("Senses disconnected (%s). Reconnecting in %.1fs...", exc, delay)
                     await asyncio.sleep(delay)
         finally:

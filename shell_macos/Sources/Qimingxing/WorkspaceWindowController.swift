@@ -52,7 +52,7 @@ final class WorkspaceStore: ObservableObject {
     private let fileURL: URL?
     private var cancellables = Set<AnyCancellable>()
     private var persistTask: Task<Void, Never>?
-    private var hasIngestedMessages = false
+    private var messageSignatures: [String: MessageSignature] = [:]
     private let persistQueue = DispatchQueue(
         label: "com.qimingxing.workspace.persist",
         qos: .utility
@@ -96,29 +96,43 @@ final class WorkspaceStore: ObservableObject {
         var media: [MediaItem] = []
     }
 
+    private struct MessageSignature: Equatable {
+        let textCount: Int
+        let streaming: Bool
+        let sources: [SourceItem]
+        let media: [MediaItem]
+
+        init(_ message: ChatEntry) {
+            textCount = message.text.count
+            streaming = message.isStreaming
+            sources = message.sources
+            media = message.media
+        }
+    }
+
     private func ingestMessages(_ messages: [ChatEntry]) {
         guard !messages.isEmpty else {
-            hasIngestedMessages = false
+            messageSignatures = [:]
             return
         }
-        let slice: ArraySlice<ChatEntry>
-        if hasIngestedMessages {
-            // Streaming mutates only the last turn; rescanning the whole
-            // history on every delta is wasted work.
-            let lastTurnId = messages[messages.count - 1].turnId
-            var start = messages.count - 1
-            while start > 0 && messages[start - 1].turnId == lastTurnId {
-                start -= 1
+        // Turn 1 may finish while Turn 2 is already streaming, so "last turn"
+        // is not enough: detect every message whose text/status/media changed.
+        var dirtyTurnIds: Set<String> = []
+        var nextSignatures: [String: MessageSignature] = [:]
+        nextSignatures.reserveCapacity(messages.count)
+        for message in messages {
+            let signature = MessageSignature(message)
+            nextSignatures[message.id] = signature
+            if messageSignatures[message.id] != signature {
+                dirtyTurnIds.insert(message.turnId)
             }
-            slice = messages[start...]
-        } else {
-            slice = messages[...]
-            hasIngestedMessages = true
         }
+        messageSignatures = nextSignatures
+        guard !dirtyTurnIds.isEmpty else { return }
 
         var order: [String] = []
         var map: [String: TurnSnapshot] = [:]
-        for message in slice {
+        for message in messages where dirtyTurnIds.contains(message.turnId) {
             if map[message.turnId] == nil {
                 order.append(message.turnId)
                 map[message.turnId] = TurnSnapshot(id: message.turnId)
@@ -271,16 +285,31 @@ final class WorkspaceStore: ObservableObject {
         // visible hitch at the end of long turns; a serial queue keeps writes
         // ordered without blocking UI.
         persistQueue.async {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: fileURL, options: .atomic)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: fileURL.path
-            )
+            Self.write(snapshot, to: fileURL)
         }
+    }
+
+    /// Flush pending debounced/queued writes before the app terminates.
+    func flushOnTerminate() {
+        guard let fileURL else { return }
+        persistTask?.cancel()
+        persistTask = nil
+        let snapshot = items
+        persistQueue.sync {
+            Self.write(snapshot, to: fileURL)
+        }
+    }
+
+    nonisolated private static func write(_ snapshot: [WorkspaceItem], to fileURL: URL) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(snapshot) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
     }
 
     private func load() {
