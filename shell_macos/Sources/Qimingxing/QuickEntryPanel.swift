@@ -1333,6 +1333,15 @@ struct QuickEntryRootView: View {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else {
             return
         }
+        // The send button honors canSend, but Enter must too: without a
+        // connected Brain / configured model the turn would be rejected and
+        // leave the panel in a generating state.
+        guard brainClient.phase == .connected, !brainClient.profiles.isEmpty else {
+            brainClient.errorBannerText = brainClient.phase == .connected
+                ? "还没有配置可用模型，请先打开设置完成配置。"
+                : "Brain 尚未连接，请稍候或检查后端日志。"
+            return
+        }
         inputState.forceExpanded = true
         inputState.text = ""
         inputState.stagedAttachments = []

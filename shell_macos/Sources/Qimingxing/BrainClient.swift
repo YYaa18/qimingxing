@@ -47,6 +47,8 @@ final class BrainClient: ObservableObject {
     private var reconnectAttempt = 0
     private var reconnectTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
+    private var turnAckTask: Task<Void, Never>?
+    private var acknowledgedTurnId: String?
     private var shouldRun = false
     private let clientInstanceId: String
 
@@ -225,11 +227,31 @@ final class BrainClient: ObservableObject {
             }
             sendEnvelope(type: "input.text", payload: p, turnId: turnId)
         }
+        scheduleTurnAckWatchdog(turnId)
+    }
+
+    /// If Brain never acknowledges a turn (e.g. it crashed before sending
+    /// turn_start), clear the generating state instead of spinning forever.
+    private func scheduleTurnAckWatchdog(_ turnId: String) {
+        turnAckTask?.cancel()
+        turnAckTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            guard self.isGenerating,
+                  self.currentTurnId == turnId,
+                  self.acknowledgedTurnId != turnId
+            else { return }
+            self.isGenerating = false
+            self.toolStatusText = ""
+            self.errorBannerText = "后端没有确认这一轮请求，请检查 Brain 状态后重试。"
+        }
     }
 
     func cancelActiveTurn(reason: String = "user_cancelled") {
         audioStreamActive = false
         audioPlayer.stop()
+        turnAckTask?.cancel()
+        turnAckTask = nil
         let tid = currentTurnId ?? ""
         sendEnvelope(type: "input.cancel", payload: ["reason": reason], turnId: tid.isEmpty ? nil : tid)
         isGenerating = false
@@ -458,6 +480,9 @@ final class BrainClient: ObservableObject {
             }
 
         case "output.turn_start":
+            acknowledgedTurnId = turnId
+            turnAckTask?.cancel()
+            turnAckTask = nil
             if let originType = payload["origin_client_type"] as? String,
                originType != "body_macos" && currentTurnId != turnId {
                 // Mirrored turn from another client
@@ -492,6 +517,8 @@ final class BrainClient: ObservableObject {
         case "output.turn_end":
             isGenerating = false
             toolStatusText = ""
+            turnAckTask?.cancel()
+            turnAckTask = nil
             if let idx = messages.lastIndex(where: { !$0.isUser && $0.turnId == turnId }) {
                 messages[idx].isStreaming = false
                 if let rawSources = payload["sources"] as? [[String: Any]] {

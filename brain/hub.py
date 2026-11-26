@@ -1636,6 +1636,20 @@ class Hub:
                 attachments=attachments,
             )
         )
+
+        def _log_turn_crash(t: asyncio.Task[None]) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "Turn task crashed turn_id=%s: %s",
+                    turn_id,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_log_turn_crash)
         conn.active_task = task
 
     async def _request_screen_capture(
@@ -2070,7 +2084,6 @@ class Hub:
         attachments: Optional[List[str]] = None,
     ) -> None:
         started = time.perf_counter()
-        profile = self.llm_router.get_profile()
         parser = StreamParser()
         seq = 0
         collected_spoken: List[str] = []
@@ -2083,6 +2096,10 @@ class Hub:
         self._turn_cancel_events[turn_id] = cancel_event
 
         try:
+            # Resolve the profile inside the try: a missing/invalid model must
+            # still produce system.error + output.turn_end instead of escaping
+            # the coroutine and leaving the shell stuck in "generating".
+            profile = self.llm_router.get_profile()
             await self._send_with_mirrors(
                 conn,
                 make_envelope(
