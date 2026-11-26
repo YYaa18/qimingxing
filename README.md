@@ -13,12 +13,13 @@
   - `hub.py`、`artifact_store.py`、`context_store.py`、`intent_detector.py`、`screen_router.py`、`stream_parser.py`、`llm_router.py`。
   - `worker.py`、`watchdog.py`、`task_runner.py`：Router/Worker 物理隔离、Capability Packs、租约锁、运行中追问、两级 Watchdog 与断点恢复。
   - `doc_office.py`、`tools/doc_tools.py`：PDF/Excel/CSV/Word/Markdown 结构读取、确定性表格加工、PDF 拆分合并与 XLSX/DOCX/PDF 生成。
+  - `browser_runtime.py`、`tools/browser_tools.py`：双模式浏览器自动化（默认隔离 Chrome Profile；live 经审批复用主浏览器 CDP），ARIA/ref 快照、SSRF/域名门禁、高危动作审批与人工接管。
   - `rich_content.py`、`media_cache.py`、`tools/image_search.py`：结构化来源/媒体元数据、Tavily 图片搜索、受限 HTTPS 下载与持久媒体缓存。
 - `senses/`：跨平台真实桌面感官客户端（macOS / Windows 双平台 `WindowProvider` 极薄隔离 + `PrivacyGuard` 三档隐私模式与敏感黑名单 + `ScreenCapture` 跨平台截屏压缩上传）。
 - `mock_senses/`：离线模拟感官客户端（供无桌面环境或单测使用）。
 - `body_web/`：零构建三文件前端（`index.html`、`app.js`、`styles.css`），阶段三零前端改动。
 - `shell_macos/`：原生 Swift 6 壳，包含 Quick Entry、Live Line、工作区/媒体预览双宿主、设置中心、审批与菜单栏。
-- `tests/`：全量自动化测试集（225 项用例，覆盖上下文、记忆、联网、图片搜索、富媒体、Router–Worker 调度、文档/表格/PDF 处理与壳侧模型/缓存约束）。
+- `tests/`：全量自动化测试集（236 项用例，覆盖上下文、记忆、联网、图片搜索、富媒体、Router–Worker 调度、文档/表格/PDF 处理、双模式浏览器自动化与壳侧模型/缓存约束）。
 
 ## 快速开始
 
