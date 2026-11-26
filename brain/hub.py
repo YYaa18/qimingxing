@@ -2799,9 +2799,6 @@ class Hub:
                         conn.client_id, "assistant", assistant_reply, scene_summary=scene_summary
                     )
 
-            if tts_task is not None:
-                await tts_task
-
             await self._send_with_mirrors(
                 conn,
                 make_envelope(
@@ -2834,6 +2831,11 @@ class Hub:
                     turn_id=turn_id,
                 ),
             )
+            # TTS synthesis may run for seconds after the text is complete.
+            # turn_end must not wait for it or the shell keeps showing a
+            # generating state (and blocks the next question) until audio ends.
+            if tts_task is not None:
+                await tts_task
         except asyncio.CancelledError:
             logger.info("Turn task cancelled cleanly turn_id=%s", turn_id)
             raise
