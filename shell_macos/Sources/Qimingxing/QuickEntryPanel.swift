@@ -1769,7 +1769,9 @@ private struct ChineseIMETextView: NSViewRepresentable {
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
-        tv.textContainerInset = NSSize(width: 0, height: 10)
+        // Keep one stable optical inset. Recomputing it from the live height
+        // made the whole text block move on every keystroke and panel resize.
+        tv.textContainerInset = NSSize(width: 0, height: 20)
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.containerSize = NSSize(
@@ -1809,7 +1811,6 @@ private struct ChineseIMETextView: NSViewRepresentable {
         if !tv.hasMarkedText() && tv.string != text {
             tv.string = text
             tv.needsDisplay = true
-            tv.updateVerticalInsetIfNeeded()
         }
         tv.placeholder = placeholder
         tv.onSubmit = onSubmit
@@ -1923,32 +1924,12 @@ private final class QMXTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
-        updateVerticalInsetIfNeeded()
         startCaretBlink()
     }
 
     override func layout() {
         super.layout()
-        updateVerticalInsetIfNeeded()
         invalidateCaret()
-    }
-
-    /// Single-line content sits at the optical center of the composer. Once
-    /// the text wraps or gains a newline, it switches to a compact top inset
-    /// so the auto-grown editor can show several lines without clipping.
-    func updateVerticalInsetIfNeeded() {
-        guard let font else { return }
-        let text = string
-        let containerWidth = textContainer?.containerSize.width ?? bounds.width
-        let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
-        let isSingleLine = !text.contains("\n") && textWidth <= max(0, containerWidth)
-        let lineHeight = ceil(font.boundingRectForFont.height)
-        let desired = isSingleLine
-            ? max(8, (bounds.height - lineHeight) / 2)
-            : 10
-        if abs(textContainerInset.height - desired) > 0.5 {
-            textContainerInset = NSSize(width: 0, height: desired)
-        }
     }
 
     private var caretTimer: Timer?
@@ -2112,6 +2093,5 @@ private final class QMXTextView: NSTextView {
         }
         super.paste(sender)
         scrollRangeToVisible(selectedRange())
-        updateVerticalInsetIfNeeded()
     }
 }
