@@ -73,10 +73,13 @@ struct MediaStripView: View {
         VStack(alignment: .leading, spacing: 10) {
             let images = media.filter { $0.kind == "image" }
             if !images.isEmpty {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 112, maximum: 180), spacing: 8)],
+                    spacing: 8
+                ) {
                     ForEach(images) { item in
                         VStack(alignment: .leading, spacing: 4) {
-                            thumbnailTile(item, width: nil, height: 150)
+                            thumbnailTile(item, width: nil, height: 118)
                             if let caption = attributionCaption(item) {
                                 Text(caption)
                                     .font(.system(size: 9))

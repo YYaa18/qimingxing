@@ -15,6 +15,8 @@ final class MediaViewerModel: ObservableObject {
     @Published private(set) var selectedID: String?
     @Published private(set) var title: String = ""
     @Published private(set) var contextLabel: String = ""
+    @Published private(set) var pendingItems: [MediaItem] = []
+    @Published private(set) var pendingTitle: String = ""
 
     var selectedItem: MediaItem? {
         guard let selectedID else { return nil }
@@ -25,6 +27,8 @@ final class MediaViewerModel: ObservableObject {
         self.items = items
         self.title = title
         self.contextLabel = contextLabel
+        pendingItems = []
+        pendingTitle = ""
         if let selectedID, items.contains(where: { $0.mediaId == selectedID }) {
             self.selectedID = selectedID
         } else {
@@ -42,6 +46,36 @@ final class MediaViewerModel: ObservableObject {
         let current = items.firstIndex { $0.mediaId == selectedID } ?? 0
         let next = min(items.count - 1, max(0, current + offset))
         selectedID = items[next].mediaId
+    }
+
+    func offerPending(items: [MediaItem], title: String) {
+        guard !items.isEmpty else { return }
+        guard items.map(\.mediaId) != self.items.map(\.mediaId) else {
+            pendingItems = []
+            pendingTitle = ""
+            return
+        }
+        pendingItems = items
+        pendingTitle = title
+    }
+
+    func acceptPending() {
+        guard !pendingItems.isEmpty else { return }
+        let next = pendingItems
+        let nextTitle = pendingTitle.isEmpty ? title : pendingTitle
+        pendingItems = []
+        pendingTitle = ""
+        load(
+            items: next,
+            selectedID: next.first?.mediaId,
+            title: nextTitle,
+            contextLabel: "本轮回答"
+        )
+    }
+
+    func dismissPending() {
+        pendingItems = []
+        pendingTitle = ""
     }
 }
 
@@ -84,6 +118,8 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
     private var keyMonitor: Any?
+
+    var isVisible: Bool { window?.isVisible ?? false }
 
     func show() {
         if let window {
@@ -174,6 +210,10 @@ struct MediaViewerContent: View {
                 Divider().opacity(0.45)
             }
 
+            if mode == .attached, !model.pendingItems.isEmpty {
+                pendingBanner
+            }
+
             stage
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -190,6 +230,33 @@ struct MediaViewerContent: View {
         .background(QMXTheme.surface.opacity(0.24))
     }
 
+    private var pendingBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(QMXTheme.accent)
+            Text("新回答包含 \(model.pendingItems.count) 张图片")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(QMXTheme.textSecondary)
+            Spacer(minLength: 0)
+            Button("切换") { model.acceptPending() }
+                .buttonStyle(.plain)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(QMXTheme.accent)
+            Button {
+                model.dismissPending()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(QMXTheme.textTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 28)
+        .background(QMXTheme.accent.opacity(0.06))
+    }
+
     private var detachedHeader: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
@@ -197,10 +264,18 @@ struct MediaViewerContent: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(QMXTheme.textPrimary)
                     .lineLimit(1)
-                Text("\(model.items.count) 项 · \(model.contextLabel)")
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(QMXTheme.textTertiary)
-                    .monospacedDigit()
+                HStack(spacing: 6) {
+                    Text("\(model.items.count) 项 · \(model.contextLabel)")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .monospacedDigit()
+                    Text("已锁定")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(QMXTheme.surfaceMuted))
+                }
             }
 
             Spacer(minLength: 0)
@@ -226,10 +301,10 @@ struct MediaViewerContent: View {
                 case "image":
                     MediaViewerImageStage(item: item)
                 case "video":
-                    MediaViewerVideoStage(item: item)
+                    MediaViewerVideoStage(item: item, stopOnQuickEntryHide: mode == .attached)
                         .id(item.mediaId)
                 case "audio":
-                    MediaViewerAudioStage(item: item)
+                    MediaViewerAudioStage(item: item, stopOnQuickEntryHide: mode == .attached)
                         .id(item.mediaId)
                 default:
                     MediaViewerFileStage(item: item)
@@ -455,6 +530,7 @@ private struct MediaViewerImageStage: View {
 
 private struct MediaViewerVideoStage: View {
     let item: MediaItem
+    let stopOnQuickEntryHide: Bool
     @State private var player: AVPlayer?
 
     var body: some View {
@@ -468,7 +544,9 @@ private struct MediaViewerVideoStage: View {
         }
         .onAppear(perform: setup)
         .onDisappear(perform: teardown)
-        .onReceive(NotificationCenter.default.publisher(for: .qmxStopMediaPlayback)) { _ in teardown() }
+        .onReceive(NotificationCenter.default.publisher(for: .qmxStopMediaPlayback)) { _ in
+            if stopOnQuickEntryHide { teardown() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .qmxToggleMediaPlayback)) { _ in
             guard let player else { return }
             if player.rate == 0 { player.play() } else { player.pause() }
@@ -490,6 +568,7 @@ private struct MediaViewerVideoStage: View {
 
 private struct MediaViewerAudioStage: View {
     let item: MediaItem
+    let stopOnQuickEntryHide: Bool
     @StateObject private var audio = MediaAudioPlayer()
     @State private var rate: Float = 1
 
@@ -541,7 +620,9 @@ private struct MediaViewerAudioStage: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { audio.load(item) }
         .onDisappear { audio.stop() }
-        .onReceive(NotificationCenter.default.publisher(for: .qmxStopMediaPlayback)) { _ in audio.stop() }
+        .onReceive(NotificationCenter.default.publisher(for: .qmxStopMediaPlayback)) { _ in
+            if stopOnQuickEntryHide { audio.stop() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .qmxToggleMediaPlayback)) { _ in
             audio.toggle(item)
         }
@@ -753,15 +834,22 @@ struct AuxiliaryWingView: View {
         return Button {
             inputState.auxiliaryTab = tab
         } label: {
-            Text(tab.label)
-                .font(.system(size: 11.5, weight: selected ? .medium : .regular))
-                .foregroundStyle(selected ? QMXTheme.textPrimary : QMXTheme.textSecondary)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(
-                    Capsule().fill(selected ? QMXTheme.surfaceRaised : Color.clear)
-                )
-                .contentShape(Capsule())
+            HStack(spacing: 4) {
+                Text(tab.label)
+                if tab == .media, !viewer.pendingItems.isEmpty {
+                    Circle()
+                        .fill(QMXTheme.accent)
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .font(.system(size: 11.5, weight: selected ? .medium : .regular))
+            .foregroundStyle(selected ? QMXTheme.textPrimary : QMXTheme.textSecondary)
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(
+                Capsule().fill(selected ? QMXTheme.surfaceRaised : Color.clear)
+            )
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
     }

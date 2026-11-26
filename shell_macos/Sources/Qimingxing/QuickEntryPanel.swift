@@ -602,6 +602,14 @@ struct QuickEntryRootView: View {
             answerContentHeight = 0
             turnPeakHeight = 0
         }
+        .onChange(of: latestTurn?.media.map(\.mediaId)) { _ in
+            guard !MediaViewerWindowController.shared.isVisible else { return }
+            guard inputState.isWorkspaceWingOpen else { return }
+            guard let turn = latestTurn, !turn.media.isEmpty else { return }
+            let viewer = MediaViewerModel.shared
+            guard viewer.contextLabel == "本轮回答", !viewer.items.isEmpty else { return }
+            viewer.offerPending(items: turn.media, title: turn.prompt)
+        }
     }
 
     private var chatColumn: some View {
