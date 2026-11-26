@@ -1,6 +1,6 @@
-# 启明星（Qimingxing）— v1.0.2
+# 启明星（Qimingxing）— v1.0.3
 
-通用 AI 桌面数字人助手 — v1.0.2（原生 macOS SwiftUI 壳 + Python Brain + Router–Worker 调度 + 长期记忆/上下文工程 + 联网搜索与富媒体）。
+通用 AI 桌面数字人助手 — v1.0.3（原生 macOS SwiftUI 壳 + Python Brain + Router–Worker 调度 + 长期记忆/上下文工程 + 联网搜索与富媒体）。
 
 ## 架构概览
 
@@ -14,6 +14,7 @@
   - `worker.py`、`watchdog.py`、`task_runner.py`：Router/Worker 物理隔离、Capability Packs、租约锁、运行中追问、两级 Watchdog 与断点恢复。
   - `doc_office.py`、`tools/doc_tools.py`：PDF/Excel/CSV/Word/Markdown 结构读取、确定性表格加工、PDF 拆分合并与 XLSX/DOCX/PDF 生成。
   - `browser_runtime.py`、`tools/browser_tools.py`：双模式浏览器自动化（默认隔离 Chrome Profile；live 经审批复用主浏览器 CDP），ARIA/ref 快照、SSRF/域名门禁、高危动作审批与人工接管。
+  - 回答内 Markdown 表格：`rich_content.extract_table_media()` 转为 `md-table` 虚拟媒体，正文单行入口，媒体区/工作区原生 Grid。
   - `rich_content.py`、`media_cache.py`、`tools/image_search.py`：结构化来源/媒体元数据、Tavily 图片搜索、受限 HTTPS 下载与持久媒体缓存。
 - `senses/`：跨平台真实桌面感官客户端（macOS / Windows 双平台 `WindowProvider` 极薄隔离 + `PrivacyGuard` 三档隐私模式与敏感黑名单 + `ScreenCapture` 跨平台截屏压缩上传）。
 - `mock_senses/`：离线模拟感官客户端（供无桌面环境或单测使用）。
