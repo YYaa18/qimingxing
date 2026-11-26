@@ -57,3 +57,37 @@ def test_optional_heavy_dependencies_stay_lazy_at_import() -> None:
         "playwright.async_api": False,
         "pypdf": False,
     }
+
+
+def test_slow_mcp_server_does_not_block_health(tmp_path) -> None:
+    """A hanging optional MCP server must not delay readiness in production mode."""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from brain.config import AppConfig, MCPServerConfig
+    from brain.main import create_app
+
+    cfg = AppConfig()
+    cfg.audio.enabled = False
+    cfg.memory.sqlite_path = str(tmp_path / "memory.db")
+    cfg.mcp_servers = [
+        MCPServerConfig(
+            name="slow",
+            enabled=True,
+            transport="stdio",
+            command="sleep",
+            args=["5"],
+            startup_timeout_sec=15,
+        )
+    ]
+    # config=... disables the model store (test harness path) but leaves the
+    # MCP manager un-injected, which is exactly the production startup path.
+    app = create_app(config=cfg)
+    started = time.perf_counter()
+    with TestClient(app) as client:
+        elapsed = time.perf_counter() - started
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert "mcp_starting" in health.json()
+    assert elapsed < 3.0, f"lifespan blocked on MCP for {elapsed:.2f}s"

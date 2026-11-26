@@ -179,6 +179,9 @@ def create_app(
             active_mcp.oauth_coordinator = active_oauth
     else:
         active_mcp = MCPClientManager(cfg, oauth_coordinator=active_oauth)
+    # Injected managers are test/harness objects: their startup must stay
+    # synchronous so existing tests can assert connection state immediately.
+    mcp_injected = mcp_manager is not None
     active_scheduler = scheduler or TaskScheduler(
         backend,
         router,
@@ -203,12 +206,35 @@ def create_app(
     )
     hub.task_runner = task_runner
 
+    mcp_state = {"starting": False}
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await backend.initialize()
         await task_runner.initialize()
         await task_runner.start_watchdog()
-        await active_mcp.start_all(hub.tool_registry)
+
+        mcp_start_task: Optional[asyncio.Task[None]] = None
+
+        async def _start_mcp_background() -> None:
+            try:
+                await active_mcp.start_all(hub.tool_registry)
+            except Exception as exc:  # never let optional MCP kill readiness
+                logger.warning(
+                    "MCP background startup failed (tools stay unavailable): %s",
+                    cfg.redact_secrets(f"{type(exc).__name__}: {exc}"),
+                )
+
+        if mcp_injected:
+            # Preserve synchronous semantics for injected test/harness managers.
+            await active_mcp.start_all(hub.tool_registry)
+        else:
+            # Optional capability: a slow/hanging MCP server must never delay
+            # /health, the WS handshake or the first turn.
+            mcp_state["starting"] = True
+            mcp_start_task = asyncio.create_task(_start_mcp_background())
+            mcp_start_task.add_done_callback(lambda _t: mcp_state.__setitem__("starting", False))
+
         await active_scheduler.start()
 
         async def _ttl_reaper() -> None:
@@ -222,6 +248,12 @@ def create_app(
         finally:
             await task_runner.shutdown()
             await active_scheduler.stop()
+            if mcp_start_task is not None and not mcp_start_task.done():
+                mcp_start_task.cancel()
+                try:
+                    await mcp_start_task
+                except asyncio.CancelledError:
+                    pass
             await active_mcp.stop_all(hub.tool_registry)
             reaper_task.cancel()
             try:
@@ -260,6 +292,7 @@ def create_app(
                 "memory_backend": cfg.memory.backend,
                 "embedding_enabled": emb_provider.enabled,
                 "model_store_mode": model_store_mode,
+                "mcp_starting": mcp_state["starting"],
             }
         )
 
