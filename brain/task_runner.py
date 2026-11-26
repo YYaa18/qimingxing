@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from brain.config import AppConfig
-from brain.llm_router import LLMRouter, LLMUsage
+from brain.llm_router import LLMRouter, LLMUsage, parse_dsml_tool_calls
 from brain.memory.backend import MemoryBackend
 from brain.rich_content import collect_media
 from brain.memory.models import (
@@ -105,6 +105,14 @@ def clean_result_narration(text: str) -> str:
     cleaned = str(text or "").strip()
     if not cleaned:
         return cleaned
+    cleaned, dsml_calls = parse_dsml_tool_calls(cleaned)
+    if dsml_calls and not cleaned:
+        cleaned = "任务已完成，但上游返回了无法解析的工具调用；建议重试。"
+    elif "<｜｜DSML" in cleaned:
+        cleaned = re.sub(r"<[^>]*DSML[^>]*>.*?</[^>]*DSML[^>]*>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"<[^>]*DSML[^>]*>", "", cleaned).strip()
+        if not cleaned:
+            cleaned = "任务已完成，但上游返回了无法解析的工具调用；建议重试。"
     cleaned = re.sub(r"^\*{1,3}\s+", "", cleaned)
     match = _RESULT_HEADING_RE.search(cleaned, 0, min(len(cleaned), 400))
     if match and match.start() > 0:
