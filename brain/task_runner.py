@@ -812,7 +812,7 @@ class BackgroundTaskRunner:
                         return None
                     wait_rec = await self.backend.update_background_task(
                         task_id,
-                        status="waiting_approval",
+                        status="waiting_input",
                         current_step=f"等待澄清：{question[:60]}",
                     )
                     if wait_rec is not None:
@@ -821,7 +821,7 @@ class BackgroundTaskRunner:
                         return await self.on_ask_user(task_id, question, options, wait_sec)
                     finally:
                         cur = await self.backend.get_background_task(task_id)
-                        if cur is not None and cur.status == "waiting_approval":
+                        if cur is not None and cur.status == "waiting_input":
                             resumed = await self.backend.update_background_task(
                                 task_id,
                                 status="running",
@@ -936,6 +936,11 @@ class BackgroundTaskRunner:
                                 "sheet_transform",
                                 "pdf_ops",
                                 "doc_generate",
+                            )
+                            or (
+                                step.tool_name == "browser_act"
+                                and str((step.arguments or {}).get("action") or "")
+                                in ("click", "fill", "select", "press")
                             )
                         ),
                         "prompt_tokens_total": sum(u.prompt_tokens for u in usages),
@@ -1146,6 +1151,12 @@ class BackgroundTaskRunner:
             if fail_rec is not None:
                 await self._emit_status(fail_rec)
         finally:
+            try:
+                from brain.browser_runtime import shutdown_runtime
+
+                await shutdown_runtime(task_id)
+            except Exception:
+                logger.debug("Failed closing browser runtime for %s", task_id, exc_info=True)
             for key in held_locks:
                 await self.backend.release_resource_lock(key, task_id)
             self._tasks.pop(task_id, None)
