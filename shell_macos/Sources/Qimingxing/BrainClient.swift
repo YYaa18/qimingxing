@@ -724,6 +724,13 @@ final class BrainClient: ObservableObject {
                 ChatEntry(id: UUID().uuidString, turnId: turnId, isUser: false, meta: "启明星", text: delta, isStreaming: true)
             )
         }
+        // The live panel only needs the recent tail; workspaces keep the full
+        // history. Bounding this array prevents per-update cost from growing
+        // without limit across multi-day sessions.
+        let maxInMemoryMessages = 400
+        if messages.count > maxInMemoryMessages {
+            messages.removeFirst(messages.count - maxInMemoryMessages)
+        }
     }
 
     private func upsertBackgroundTask(_ item: BackgroundTaskItem) {

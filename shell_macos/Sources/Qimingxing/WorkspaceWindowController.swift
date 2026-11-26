@@ -52,6 +52,7 @@ final class WorkspaceStore: ObservableObject {
     private let fileURL: URL?
     private var cancellables = Set<AnyCancellable>()
     private var persistTask: Task<Void, Never>?
+    private var hasIngestedMessages = false
 
     init(brainClient: BrainClient) {
         self.brainClient = brainClient
@@ -92,9 +93,28 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func ingestMessages(_ messages: [ChatEntry]) {
+        guard !messages.isEmpty else {
+            hasIngestedMessages = false
+            return
+        }
+        let slice: ArraySlice<ChatEntry>
+        if hasIngestedMessages {
+            // Streaming mutates only the last turn; rescanning the whole
+            // history on every delta is wasted work.
+            let lastTurnId = messages[messages.count - 1].turnId
+            var start = messages.count - 1
+            while start > 0 && messages[start - 1].turnId == lastTurnId {
+                start -= 1
+            }
+            slice = messages[start...]
+        } else {
+            slice = messages[...]
+            hasIngestedMessages = true
+        }
+
         var order: [String] = []
         var map: [String: TurnSnapshot] = [:]
-        for message in messages {
+        for message in slice {
             if map[message.turnId] == nil {
                 order.append(message.turnId)
                 map[message.turnId] = TurnSnapshot(id: message.turnId)

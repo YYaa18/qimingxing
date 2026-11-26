@@ -581,6 +581,7 @@ struct QuickEntryRootView: View {
     @State private var copiedAnswer = false
     @State private var answerRating: String?
     @State private var isDropTargeted = false
+    @State private var cachedLatestTurn: LiveTurn?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -664,6 +665,7 @@ struct QuickEntryRootView: View {
         .scaleEffect(appeared ? 1.0 : 0.96)
         .opacity(appeared ? 1.0 : 0.0)
         .onAppear {
+            cachedLatestTurn = Self.makeLatestTurn(from: brainClient.messages)
             if reduceMotion {
                 appeared = true
             } else {
@@ -675,6 +677,9 @@ struct QuickEntryRootView: View {
                 answerRevealFinished = true
             }
             onDesiredHeightChange(chatHeight)
+        }
+        .onReceive(brainClient.$messages) { messages in
+            cachedLatestTurn = Self.makeLatestTurn(from: messages)
         }
         .onChange(of: chatHeight) { height in
             onDesiredHeightChange(height)
@@ -1230,24 +1235,33 @@ struct QuickEntryRootView: View {
         onDesiredHeightChange(chatHeight)
     }
 
+    /// Cached derived state: recomputed once per messages publish (and only for
+    /// the last turn) instead of on every body evaluation. The live panel is
+    /// 60Hz; recomputing this from the whole history per frame was the main
+    /// streaming jank source in long sessions.
     private var latestTurn: LiveTurn? {
-        var order: [String] = []
-        var map: [String: LiveTurn] = [:]
-        for message in brainClient.messages {
-            if map[message.turnId] == nil {
-                order.append(message.turnId)
-                map[message.turnId] = LiveTurn(id: message.turnId)
-            }
+        cachedLatestTurn
+    }
+
+    private static func makeLatestTurn(from messages: [ChatEntry]) -> LiveTurn? {
+        guard let last = messages.last else { return nil }
+        let turnId = last.turnId
+        var start = messages.count - 1
+        while start > 0 && messages[start - 1].turnId == turnId {
+            start -= 1
+        }
+        var turn = LiveTurn(id: turnId)
+        for message in messages[start...] where message.turnId == turnId {
             if message.isUser {
-                map[message.turnId]?.prompt = message.text
+                turn.prompt = message.text
             } else {
-                map[message.turnId]?.answer = qmxCleanAssistantText(message.text)
-                map[message.turnId]?.isStreaming = message.isStreaming
-                map[message.turnId]?.sources = message.sources
-                map[message.turnId]?.media = message.media
+                turn.answer = qmxCleanAssistantText(message.text)
+                turn.isStreaming = message.isStreaming
+                turn.sources = message.sources
+                turn.media = message.media
             }
         }
-        return order.last.flatMap { map[$0] }
+        return turn
     }
 
     private var hasAnswer: Bool {
