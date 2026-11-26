@@ -42,7 +42,10 @@ class ThreadedMemoryBackend:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 self._loop = loop
-                ready.set()
+                # Signal only once the loop is actually running, otherwise a
+                # waiter could observe is_running()==False and start a second
+                # thread against the same SQLite connection.
+                loop.call_soon(ready.set)
                 try:
                     loop.run_forever()
                 finally:
@@ -68,19 +71,25 @@ class ThreadedMemoryBackend:
             return self._loop
 
     async def close(self) -> None:
-        loop = self._loop
-        thread = self._thread
+        # Detach under the start lock so a concurrent _ensure_loop() cannot
+        # reuse the loop/thread that is being shut down.
+        with self._start_lock:
+            loop = self._loop
+            thread = self._thread
+            self._loop = None
+            self._thread = None
         if loop is None:
             return
         try:
             future = asyncio.run_coroutine_threadsafe(self._inner.close(), loop)
             await asyncio.wrap_future(future)
         finally:
-            loop.call_soon_threadsafe(loop.stop)
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass
             if thread is not None:
                 await asyncio.to_thread(thread.join, 5.0)
-            self._loop = None
-            self._thread = None
 
     # --------------------------------------------------------------- proxying
     async def _call(self, name: str, *args: Any, **kwargs: Any) -> Any:

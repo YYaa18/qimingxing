@@ -49,3 +49,15 @@ async def test_threaded_backend_restarts_after_close_and_propagates_errors() -> 
     with pytest.raises(ValueError, match="backend failure"):
         await backend.boom()
     await backend.close()
+
+
+async def test_concurrent_first_calls_share_one_worker_thread() -> None:
+    inner = _SlowBackend()
+    backend = ThreadedMemoryBackend(inner)
+    results = await asyncio.gather(*(backend.work() for _ in range(12)))
+    assert results == [42] * 12
+    # The lazy start must not spawn competing loops for the same store.
+    thread = backend._thread
+    assert thread is not None and thread.is_alive()
+    assert thread.name == "qmx-memory-backend"
+    await backend.close()
