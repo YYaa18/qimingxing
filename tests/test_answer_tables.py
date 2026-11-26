@@ -103,17 +103,17 @@ def test_requires_a_separator_row_and_body() -> None:
 
 
 def test_caps_columns_rows_and_cell_length() -> None:
-    header = "| " + " | ".join(f"c{i}" for i in range(12)) + " |"
-    separator = "| " + " | ".join("---" for _ in range(12)) + " |"
+    header = "| " + " | ".join(f"c{i}" for i in range(20)) + " |"
+    separator = "| " + " | ".join("---" for _ in range(20)) + " |"
     rows = [
-        "| " + " | ".join([f"r{row}c{col}" for col in range(12)]) + " |"
-        for row in range(25)
+        "| " + " | ".join([f"r{row}c{col}" for col in range(20)]) + " |"
+        for row in range(120)
     ]
     items = extract_table_media("\n".join([header, separator, *rows]))
     item = items[0]
-    assert len(item["preview_columns"]) == 10
-    assert len(item["preview_rows"]) == 20
-    assert item["summary_badge"] == "20+ 行 × 10+ 列"
+    assert len(item["preview_columns"]) == 15
+    assert len(item["preview_rows"]) == 100
+    assert item["summary_badge"] == "100+ 行 × 15+ 列"
     assert all(len(cell) <= 160 for row in item["preview_rows"] for cell in row)
 
 

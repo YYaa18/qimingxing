@@ -47,6 +47,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private var heightVelocity: CGFloat = 0
     private var heightDriverTask: Task<Void, Never>?
     private var focusObservers: [NSObjectProtocol] = []
+    private var hiddenForMediaViewer = false
 
     var debugPanel: FloatingQuickEntryPanel? { panel }
     var debugInputState: QuickEntryInputState { inputState }
@@ -93,6 +94,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
                     guard NSApp.keyWindow == nil || NSApp.keyWindow === panel else { return }
                     panel.makeKeyAndOrderFront(nil)
                     self.inputState.focusRequestToken = UUID()
+                    NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
                 }
             }
         )
@@ -110,6 +112,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
                     else { return }
                     panel.makeKey()
                     self.inputState.focusRequestToken = UUID()
+                    NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
                 }
             }
         )
@@ -129,6 +132,25 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         if !isVisible { show() }
         inputState.auxiliaryTab = .media
         inputState.isWorkspaceWingOpen = true
+    }
+
+    /// A large table viewer needs the whole screen. Hide the floating chat
+    /// instead of letting it sit on top of the table.
+    func hideForMediaViewer() {
+        guard isVisible else { return }
+        hiddenForMediaViewer = true
+        stopHeightDriver()
+        inputState.isWorkspaceWingOpen = false
+        panel?.orderOut(nil)
+    }
+
+    func restoreAfterMediaViewer() {
+        guard hiddenForMediaViewer else { return }
+        hiddenForMediaViewer = false
+        show()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
+        }
     }
 
     func hideWorkspaceWing() {
@@ -278,7 +300,10 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             panel?.makeKey()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak panel] in
-            guard let panel, panel.isVisible, !panel.isKeyWindow else { return }
+            guard let panel, panel.isVisible else { return }
+            // A panel can be the key window while the app is inactive; that
+            // still swallows keystrokes. Activate in that case too.
+            guard !NSApp.isActive || !panel.isKeyWindow else { return }
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKey()
         }
@@ -770,11 +795,6 @@ struct QuickEntryRootView: View {
             )
 
             HStack(spacing: 10) {
-                Image(systemName: "mic")
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(QMXTheme.textSecondary)
-                    .help("按住右 Option 说话")
-
                 Button(action: onClose) {
                     Text("esc")
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -927,7 +947,8 @@ struct QuickEntryRootView: View {
                     items: items,
                     selectedID: items[index].mediaId,
                     title: items[index].title.isEmpty ? "表格" : items[index].title,
-                    contextLabel: "本轮回答"
+                    contextLabel: "本轮回答",
+                    prefersLargeWindow: true
                 )
             },
             onFinish: {
@@ -1024,6 +1045,27 @@ struct QuickEntryRootView: View {
             }
 
             Spacer()
+
+            Button {
+                // Voice input is not wired to a microphone pipeline yet.
+                // Keep the microphone target in place for the upcoming PTT work.
+            } label: {
+                Image(systemName: "mic")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(.qmxIcon)
+            .help("语音输入（即将支持）")
+            .accessibilityLabel("语音输入")
+
+            Button {
+                brainClient.setTTSEnabled(!brainClient.ttsEnabled)
+            } label: {
+                Image(systemName: brainClient.ttsEnabled ? "speaker.wave.2.fill" : "speaker.slash")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .buttonStyle(QMXButtonStyle(variant: .icon, isActive: brainClient.ttsEnabled))
+            .help(brainClient.ttsEnabled ? "关闭朗读回答" : "朗读回答")
+            .accessibilityLabel(brainClient.ttsEnabled ? "关闭朗读回答" : "朗读回答")
 
             Button {
                 pickAttachmentFile()
@@ -1720,14 +1762,16 @@ private struct ChineseIMETextView: NSViewRepresentable {
         tv.allowsUndo = true
         tv.font = NSFont.systemFont(ofSize: fontSize)
         tv.textColor = .labelColor
-        tv.insertionPointColor = .labelColor
+        tv.insertionPointColor = .clear
         tv.drawsBackground = false
         tv.isEditable = true
         tv.isSelectable = true
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
-        tv.textContainerInset = NSSize(width: 0, height: 10)
+        // Keep one stable optical inset. Recomputing it from the live height
+        // made the whole text block move on every keystroke and panel resize.
+        tv.textContainerInset = NSSize(width: 0, height: 20)
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.containerSize = NSSize(
@@ -1744,6 +1788,16 @@ private struct ChineseIMETextView: NSViewRepresentable {
 
         scroll.documentView = tv
         context.coordinator.textView = tv
+        context.coordinator.focusObserver = NotificationCenter.default.addObserver(
+            forName: .qmxFocusComposer,
+            object: nil,
+            queue: .main
+        ) { [weak tv] _ in
+            guard let tv, let window = tv.window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKey()
+            window.makeFirstResponder(tv)
+        }
         return scroll
     }
 
@@ -1757,7 +1811,6 @@ private struct ChineseIMETextView: NSViewRepresentable {
         if !tv.hasMarkedText() && tv.string != text {
             tv.string = text
             tv.needsDisplay = true
-            tv.updateVerticalInsetIfNeeded()
         }
         tv.placeholder = placeholder
         tv.onSubmit = onSubmit
@@ -1784,11 +1837,18 @@ private struct ChineseIMETextView: NSViewRepresentable {
         }
     }
 
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        if let observer = coordinator.focusObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ChineseIMETextView
         weak var textView: QMXTextView?
         var lastFocusToken: UUID = UUID()
+        var focusObserver: NSObjectProtocol?
 
         init(_ parent: ChineseIMETextView) {
             self.parent = parent
@@ -1864,42 +1924,162 @@ private final class QMXTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
-        updateVerticalInsetIfNeeded()
+        startCaretBlink()
     }
 
     override func layout() {
         super.layout()
-        updateVerticalInsetIfNeeded()
+        invalidateCaret()
     }
 
-    /// Single-line content sits at the optical center of the composer. Once
-    /// the text wraps or gains a newline, it switches to a compact top inset
-    /// so the auto-grown editor can show several lines without clipping.
-    func updateVerticalInsetIfNeeded() {
-        guard let font else { return }
-        let text = string
-        let containerWidth = textContainer?.containerSize.width ?? bounds.width
-        let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
-        let isSingleLine = !text.contains("\n") && textWidth <= max(0, containerWidth)
-        let lineHeight = ceil(font.boundingRectForFont.height)
-        let desired = isSingleLine
-            ? max(8, (bounds.height - lineHeight) / 2)
-            : 10
-        if abs(textContainerInset.height - desired) > 0.5 {
-            textContainerInset = NSSize(width: 0, height: desired)
+    private var caretTimer: Timer?
+    private var caretVisible = false
+
+    private var caretLineHeight: CGFloat {
+        ceil((font ?? NSFont.systemFont(ofSize: 22)).boundingRectForFont.height)
+    }
+
+    /// AppKit's insertion rect for a multi-line composer can point at the
+    /// first line (or above it). Locate the glyph at the caret and derive the
+    /// line rect from the layout manager instead.
+    private func caretRectInView() -> NSRect? {
+        let origin = textContainerOrigin
+        let lineHeight = caretLineHeight
+        let length = textStorage?.length ?? 0
+        let location = selectedRange().location
+        var x = origin.x
+        var y = origin.y
+        var height = lineHeight
+
+        if length > 0, location >= 0,
+           let manager = layoutManager, let container = textContainer {
+            if location < length {
+                let glyph = manager.glyphIndexForCharacter(at: location)
+                let rect = manager.boundingRect(
+                    forGlyphRange: NSRange(location: glyph, length: 1),
+                    in: container
+                )
+                x = origin.x + rect.minX
+                y = origin.y + rect.minY
+                height = max(rect.height, lineHeight)
+            } else {
+                let text = string as NSString
+                if location > 0, text.character(at: location - 1) == 10 {
+                    let extra = manager.extraLineFragmentRect
+                    if extra.height > 0 {
+                        y = origin.y + extra.minY
+                        height = max(extra.height, lineHeight)
+                    } else {
+                        y = origin.y + manager.usedRect(for: container).maxY
+                    }
+                } else if location > 0 {
+                    let glyph = manager.glyphIndexForCharacter(at: location - 1)
+                    let rect = manager.boundingRect(
+                        forGlyphRange: NSRange(location: glyph, length: 1),
+                        in: container
+                    )
+                    x = origin.x + rect.maxX
+                    y = origin.y + rect.minY
+                    height = max(rect.height, lineHeight)
+                }
+            }
+        }
+
+        return NSRect(x: x - 1, y: y, width: 3, height: height)
+    }
+
+    private func invalidateCaret() {
+        guard let rect = caretRectInView() else { return }
+        setNeedsDisplay(rect.insetBy(dx: -4, dy: -1))
+    }
+
+    private func startCaretBlink() {
+        caretTimer?.invalidate()
+        caretVisible = true
+        invalidateCaret()
+        let timer = Timer(
+            timeInterval: 0.5,
+            target: self,
+            selector: #selector(blinkCaret),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        caretTimer = timer
+    }
+
+    private func stopCaretBlink() {
+        caretTimer?.invalidate()
+        caretTimer = nil
+        caretVisible = false
+        invalidateCaret()
+    }
+
+    @objc private func blinkCaret() {
+        caretVisible.toggle()
+        invalidateCaret()
+    }
+
+    private var shouldDrawCaret: Bool {
+        caretVisible
+            && window?.isKeyWindow == true
+            && selectedRange().length == 0
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        // Custom caret is drawn in draw(_:) so it can be widened, snapped to
+        // the text baseline and blinked independently of AppKit's 1pt bar.
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { startCaretBlink() }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        stopCaretBlink()
+        return super.resignFirstResponder()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        startCaretBlink()
+    }
+
+    override func setSelectedRange(
+        _ charRange: NSRange,
+        affinity: NSSelectionAffinity,
+        stillSelecting stillSelectingFlag: Bool
+    ) {
+        super.setSelectedRange(charRange, affinity: affinity, stillSelecting: stillSelectingFlag)
+        startCaretBlink()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            stopCaretBlink()
+        } else {
+            invalidateCaret()
         }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard string.isEmpty, !placeholder.isEmpty else { return }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font ?? NSFont.systemFont(ofSize: 22),
-            .foregroundColor: NSColor.tertiaryLabelColor
-        ]
-        // The text container inset is what centers an empty single-line
-        // composer, so the placeholder shares the caret's baseline.
-        (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: attrs)
+        if string.isEmpty, !placeholder.isEmpty {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font ?? NSFont.systemFont(ofSize: 22),
+                .foregroundColor: NSColor.tertiaryLabelColor
+            ]
+            // The text container inset is what centers an empty single-line
+            // composer, so the placeholder shares the caret's baseline.
+            (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: attrs)
+        }
+        if shouldDrawCaret, let caret = caretRectInView() {
+            NSColor.labelColor.setFill()
+            NSBezierPath(roundedRect: caret, xRadius: 1, yRadius: 1).fill()
+        }
     }
 
     override func paste(_ sender: Any?) {
@@ -1913,6 +2093,5 @@ private final class QMXTextView: NSTextView {
         }
         super.paste(sender)
         scrollRangeToVisible(selectedRange())
-        updateVerticalInsetIfNeeded()
     }
 }

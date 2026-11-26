@@ -306,8 +306,8 @@ def extract_table_media(
     *,
     turn_id: str = "",
     max_tables: int = 8,
-    max_columns: int = 10,
-    max_rows: int = 20,
+    max_columns: int = 15,
+    max_rows: int = 100,
     max_cell_chars: int = 160,
 ) -> List[Dict[str, Any]]:
     """Extract top-level GFM tables from an answer as virtual file media items.

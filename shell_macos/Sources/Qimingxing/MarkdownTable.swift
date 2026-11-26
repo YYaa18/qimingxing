@@ -90,8 +90,8 @@ enum QMXMarkdownTables {
             }
 
             let end = cursor - 1
-            let columns = Array(header.prefix(10)).map { String($0.prefix(160)) }
-            let previewRows = rows.prefix(20).map { row in
+            let columns = Array(header.prefix(15)).map { String($0.prefix(160)) }
+            let previewRows = rows.prefix(100).map { row in
                 (0..<columns.count).map { column in
                     column < row.count ? String(row[column].prefix(160)) : ""
                 }

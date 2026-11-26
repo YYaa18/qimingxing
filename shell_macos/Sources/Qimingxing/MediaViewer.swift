@@ -84,14 +84,15 @@ final class MediaViewerModel: ObservableObject {
 enum MediaViewerLauncher {
     /// Installed by AppDelegate. It decides between the attached wing and the
     /// detached window based on whether Quick Entry is currently visible.
-    static var openHandler: (() -> Void)?
+    static var openHandler: ((Bool) -> Void)?
     static var attachHandler: (() -> Void)?
 
     static func open(
         items: [MediaItem],
         selectedID: String?,
         title: String,
-        contextLabel: String
+        contextLabel: String,
+        prefersLargeWindow: Bool = false
     ) {
         guard !items.isEmpty else { return }
         MediaViewerModel.shared.load(
@@ -101,9 +102,9 @@ enum MediaViewerLauncher {
             contextLabel: contextLabel
         )
         if let openHandler {
-            openHandler()
+            openHandler(prefersLargeWindow)
         } else {
-            MediaViewerWindowController.shared.show()
+            MediaViewerWindowController.shared.show(large: prefersLargeWindow)
         }
     }
 
@@ -133,8 +134,12 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
 
     var isVisible: Bool { window?.isVisible ?? false }
 
-    func show() {
+    func show(large: Bool = false) {
+        let wantsLarge = large || (MediaViewerModel.shared.selectedItem?.isMarkdownTable ?? false)
         if let window {
+            if wantsLarge {
+                expandForTable(window)
+            }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -157,16 +162,32 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
         window.contentViewController = host
         window.delegate = self
         window.setContentSize(NSSize(width: 860, height: 620))
-        if !window.setFrameUsingName("QMXMediaViewerWindow") {
+        window.setFrameAutosaveName("QMXMediaViewerWindow")
+        if wantsLarge {
+            expandForTable(window)
+        } else if !window.setFrameUsingName("QMXMediaViewerWindow") {
             window.center()
         }
-        window.setFrameAutosaveName("QMXMediaViewerWindow")
         window.onKeyDown = { [weak self] event in
             self?.handleKey(event) ?? false
         }
         self.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func expandForTable(_ window: NSWindow) {
+        let screen = window.screen ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let targetWidth = min(1180, max(960, visible.width - 120))
+        let targetHeight = min(820, max(680, visible.height - 140))
+        let target = NSRect(
+            x: visible.midX - targetWidth / 2,
+            y: visible.midY - targetHeight / 2,
+            width: targetWidth,
+            height: targetHeight
+        )
+        window.setFrame(target, display: true)
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
@@ -195,6 +216,7 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         NotificationCenter.default.post(name: .qmxStopMediaPlayback, object: nil)
+        NotificationCenter.default.post(name: .qmxMediaViewerClosed, object: nil)
         window = nil
     }
 }
@@ -860,59 +882,13 @@ private struct SpreadsheetFileStage: View {
     }
 
     private var table: some View {
-        TableGrid(columns: columns, rows: rows, monospaced: true)
-    }
-}
-
-private struct TableGrid: View {
-    let columns: [String]
-    let rows: [[String]]
-    var monospaced: Bool = false
-    var maxWidth: CGFloat = 220
-    var lineLimit: Int = 2
-    var headerLineLimit: Int = 1
-
-    var body: some View {
-        GeometryReader { geo in
-            ScrollView([.horizontal, .vertical]) {
-                Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow {
-                    ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
-                        Text(column)
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(QMXTheme.textPrimary)
-                            .lineLimit(headerLineLimit)
-                            .frame(minWidth: 92, maxWidth: maxWidth, alignment: .leading)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 7)
-                    }
-                }
-                .background(QMXTheme.surfaceRaised)
-                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
-                    GridRow {
-                        ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, _ in
-                            Text(columnIndex < row.count ? row[columnIndex] : "")
-                                .font(.system(size: 10.5, design: monospaced ? .monospaced : .default))
-                                .foregroundStyle(QMXTheme.textSecondary)
-                                .lineLimit(lineLimit)
-                                .frame(minWidth: 92, maxWidth: maxWidth, alignment: .leading)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                        }
-                    }
-                    .background(rowIndex.isMultiple(of: 2) ? Color.clear : QMXTheme.surfaceMuted.opacity(0.25))
-                }
-            }
-                .padding(10)
-                .frame(minWidth: geo.size.width, alignment: .leading)
-            }
-            .scrollIndicators(.visible)
-        }
+        NativeTableGrid(columns: columns, rows: rows, monospaced: true)
     }
 }
 
 private struct TableMediaStage: View {
     let item: MediaItem
+    @StateObject private var scrollProxy = TableScrollProxy()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -930,6 +906,27 @@ private struct TableMediaStage: View {
                         .foregroundStyle(QMXTheme.textTertiary)
                 }
                 Spacer(minLength: 0)
+                Button {
+                    scrollProxy.scroll(by: -300)
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.qmxIcon)
+                .help("向左滚动")
+                .accessibilityLabel("向左滚动")
+                Button {
+                    scrollProxy.scroll(by: 300)
+                } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .buttonStyle(.qmxIcon)
+                .help("向右滚动")
+                .accessibilityLabel("向右滚动")
+                Button("大窗口") {
+                    MediaViewerWindowController.shared.show(large: true)
+                }
+                .buttonStyle(.qmxSecondary)
+                .help("在可调整大小的独立窗口中查看完整表格")
                 Button("复制表格") {
                     _ = qmxCopyTableToPasteboard(
                         columns: item.previewColumns,
@@ -953,14 +950,26 @@ private struct TableMediaStage: View {
                 .foregroundStyle(QMXTheme.textTertiary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TableGrid(
-                    columns: item.previewColumns,
-                    rows: item.previewRows,
-                    maxWidth: 260,
-                    lineLimit: 3,
-                    headerLineLimit: 2
-                )
-                .id(item.mediaId)
+                VStack(spacing: 0) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.left.and.right")
+                            .font(.system(size: 9.5, weight: .medium))
+                        Text(item.previewColumns.count > 6
+                             ? "双指左右滑动或点上方 ‹ › 查看全部 \(item.previewColumns.count) 列，可拖动列宽"
+                             : "可拖动列宽")
+                            .font(.system(size: 10))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(QMXTheme.textTertiary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    NativeTableGrid(
+                        columns: item.previewColumns,
+                        rows: item.previewRows,
+                        scrollProxy: scrollProxy
+                    )
+                    .id(item.mediaId)
+                }
             }
         }
     }

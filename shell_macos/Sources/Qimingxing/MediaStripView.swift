@@ -241,7 +241,8 @@ struct MediaStripView: View {
             items: media,
             selectedID: item.mediaId,
             title: item.title.isEmpty ? "媒体预览" : item.title,
-            contextLabel: contextTitle
+            contextLabel: contextTitle,
+            prefersLargeWindow: item.isMarkdownTable
         )
     }
 
