@@ -408,7 +408,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             : chatHeight
     }
 
-    private func applyPanelHeight(_ height: CGFloat, to panel: FloatingQuickEntryPanel) {
+    private func applyPanelHeight(_ height: CGFloat, to panel: FloatingQuickEntryPanel, display: Bool = true) {
         let scale = max(1.0, panel.backingScaleFactor)
         let snapped = (height * scale).rounded() / scale
         var frame = panel.frame
@@ -428,7 +428,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         }
         frame.size = nextSize
         frame.origin.y = nextOriginY
-        panel.setFrame(frame, display: true)
+        panel.setFrame(frame, display: display)
     }
 
     private func startHeightDriverIfNeeded() {
@@ -438,11 +438,13 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             let omega: CGFloat = 20.0
             var lastTime = ProcessInfo.processInfo.systemUptime
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 16_000_000)
+                // 30Hz is plenty for a smoothed height follow; 60Hz setFrame
+                // forced a full NSHostingView layout twice as often.
+                try? await Task.sleep(nanoseconds: 33_000_000)
                 guard !Task.isCancelled, let self, let panel = self.panel, panel.isVisible else { break }
 
                 let now = ProcessInfo.processInfo.systemUptime
-                let dt = CGFloat(min(max(now - lastTime, 0.004), 0.033))
+                let dt = CGFloat(min(max(now - lastTime, 0.004), 0.05))
                 lastTime = now
 
                 let target = self.resolvedPanelHeight(forChatHeight: self.targetChatHeight)
@@ -461,7 +463,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
                 self.currentAnimatedHeight = nextHeight
                 self.heightVelocity = nextVelocity
-                self.applyPanelHeight(nextHeight, to: panel)
+                self.applyPanelHeight(nextHeight, to: panel, display: false)
             }
             self?.heightVelocity = 0
             self?.heightDriverTask = nil

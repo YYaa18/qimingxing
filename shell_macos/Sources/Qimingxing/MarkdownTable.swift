@@ -334,6 +334,7 @@ struct QMXTableNotice: View {
 /// answer has no inline table block (e.g. the table came from a card event),
 /// keep the media card as the only entry point.
 func qmxMediaWithoutInlineTables(_ media: [MediaItem], answer: String) -> [MediaItem] {
+    guard !media.isEmpty else { return media }
     guard !QMXMarkdownTables.scan(answer).isEmpty else { return media }
     return media.filter { !$0.isMarkdownTable }
 }
