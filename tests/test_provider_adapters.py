@@ -120,7 +120,7 @@ async def test_router_warm_connection_opens_keepalive_client() -> None:
     router = LLMRouter(cfg, transport=httpx.MockTransport(handler))
     await router.warm_connection()
     assert len(seen) == 1
-    assert seen[0].method == "GET"
+    assert seen[0].method == "HEAD"
     assert str(seen[0].url).startswith("https://api.deepseek.com/v1")
     await router.aclose()
 

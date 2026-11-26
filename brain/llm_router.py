@@ -293,8 +293,11 @@ class LLMRouter:
         on every turn, tool step and retry."""
         client = self._client
         if client is None or client.is_closed:
+            # Requests always pass their own timeout; keep a conservative
+            # client default so a future caller without one cannot inherit the
+            # short warm-up timeout.
             client = httpx.AsyncClient(
-                timeout=timeout,
+                timeout=httpx.Timeout(120.0, connect=10.0),
                 transport=self._transport,
                 limits=httpx.Limits(
                     max_keepalive_connections=8,
@@ -370,7 +373,7 @@ class LLMRouter:
         timeout = httpx.Timeout(5.0, connect=3.0)
         try:
             client = self._http_client(timeout)
-            await client.get(base_url, timeout=timeout)
+            await client.head(base_url, timeout=timeout)
         except Exception:
             return
 
