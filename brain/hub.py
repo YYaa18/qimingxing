@@ -42,7 +42,7 @@ from brain.memory.models import (
 from brain.memory.retrieval import MemoryRetriever
 from brain.memory.skills import SkillManager
 from brain.prompts import BASE_SYSTEM_PROMPT
-from brain.rich_content import clean_answer_and_sources, collect_media
+from brain.rich_content import clean_answer_and_sources, collect_media, extract_table_media
 from protocol.models import MediaItem, SourceItem
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
@@ -2631,11 +2631,14 @@ class Hub:
                             pass
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
-            assistant_reply = "".join(collected_spoken).strip()
+            raw_assistant_reply = "".join(collected_spoken).strip()
+            table_media_payloads = extract_table_media(
+                raw_assistant_reply, turn_id=turn_id
+            )
             base_sources = loop_sources if use_tools else self.llm_router.last_annotations
             raw_sources = list(base_sources) + tool_sources
             assistant_reply, source_payloads = clean_answer_and_sources(
-                assistant_reply, raw_sources
+                raw_assistant_reply, raw_sources
             )
             media_payloads = collect_media(media_paths)
             if tool_media_items:
@@ -2648,7 +2651,14 @@ class Hub:
                     path = str(item.get("local_path") or "")
                     if path:
                         by_path[path] = item
-                media_payloads = list(by_path.values())[:20]
+                media_payloads = list(by_path.values())
+            if table_media_payloads:
+                table_ids = {item["media_id"] for item in table_media_payloads}
+                media_payloads = table_media_payloads + [
+                    item for item in media_payloads
+                    if item.get("media_id") not in table_ids
+                ]
+            media_payloads = media_payloads[:20]
             turn_sources = [SourceItem(**item) for item in source_payloads]
             turn_media = [MediaItem(**item) for item in media_payloads]
             scene_summary = self.context_store.get_window_summary()
