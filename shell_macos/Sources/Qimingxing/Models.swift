@@ -336,6 +336,8 @@ extension Notification.Name {
     static let qmxHideQuickEntry = Notification.Name("com.qimingxing.desktop.hideQuickEntry")
     static let qmxStopMediaPlayback = Notification.Name("com.qimingxing.desktop.stopMediaPlayback")
     static let qmxToggleMediaPlayback = Notification.Name("com.qimingxing.desktop.toggleMediaPlayback")
+    static let qmxMediaViewerClosed = Notification.Name("com.qimingxing.desktop.mediaViewerClosed")
+    static let qmxFocusComposer = Notification.Name("com.qimingxing.desktop.focusComposer")
 }
 
 enum JSONHelper {

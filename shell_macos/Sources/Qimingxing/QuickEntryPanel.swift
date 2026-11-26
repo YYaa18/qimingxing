@@ -47,6 +47,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private var heightVelocity: CGFloat = 0
     private var heightDriverTask: Task<Void, Never>?
     private var focusObservers: [NSObjectProtocol] = []
+    private var hiddenForMediaViewer = false
 
     var debugPanel: FloatingQuickEntryPanel? { panel }
     var debugInputState: QuickEntryInputState { inputState }
@@ -93,6 +94,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
                     guard NSApp.keyWindow == nil || NSApp.keyWindow === panel else { return }
                     panel.makeKeyAndOrderFront(nil)
                     self.inputState.focusRequestToken = UUID()
+                    NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
                 }
             }
         )
@@ -110,6 +112,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
                     else { return }
                     panel.makeKey()
                     self.inputState.focusRequestToken = UUID()
+                    NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
                 }
             }
         )
@@ -129,6 +132,25 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         if !isVisible { show() }
         inputState.auxiliaryTab = .media
         inputState.isWorkspaceWingOpen = true
+    }
+
+    /// A large table viewer needs the whole screen. Hide the floating chat
+    /// instead of letting it sit on top of the table.
+    func hideForMediaViewer() {
+        guard isVisible else { return }
+        hiddenForMediaViewer = true
+        stopHeightDriver()
+        inputState.isWorkspaceWingOpen = false
+        panel?.orderOut(nil)
+    }
+
+    func restoreAfterMediaViewer() {
+        guard hiddenForMediaViewer else { return }
+        hiddenForMediaViewer = false
+        show()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
+        }
     }
 
     func hideWorkspaceWing() {
@@ -278,7 +300,10 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             panel?.makeKey()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak panel] in
-            guard let panel, panel.isVisible, !panel.isKeyWindow else { return }
+            guard let panel, panel.isVisible else { return }
+            // A panel can be the key window while the app is inactive; that
+            // still swallows keystrokes. Activate in that case too.
+            guard !NSApp.isActive || !panel.isKeyWindow else { return }
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKey()
         }
@@ -927,7 +952,8 @@ struct QuickEntryRootView: View {
                     items: items,
                     selectedID: items[index].mediaId,
                     title: items[index].title.isEmpty ? "表格" : items[index].title,
-                    contextLabel: "本轮回答"
+                    contextLabel: "本轮回答",
+                    prefersLargeWindow: true
                 )
             },
             onFinish: {
@@ -1744,6 +1770,16 @@ private struct ChineseIMETextView: NSViewRepresentable {
 
         scroll.documentView = tv
         context.coordinator.textView = tv
+        context.coordinator.focusObserver = NotificationCenter.default.addObserver(
+            forName: .qmxFocusComposer,
+            object: nil,
+            queue: .main
+        ) { [weak tv] _ in
+            guard let tv, let window = tv.window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKey()
+            window.makeFirstResponder(tv)
+        }
         return scroll
     }
 
@@ -1784,11 +1820,18 @@ private struct ChineseIMETextView: NSViewRepresentable {
         }
     }
 
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        if let observer = coordinator.focusObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ChineseIMETextView
         weak var textView: QMXTextView?
         var lastFocusToken: UUID = UUID()
+        var focusObserver: NSObjectProtocol?
 
         init(_ parent: ChineseIMETextView) {
             self.parent = parent

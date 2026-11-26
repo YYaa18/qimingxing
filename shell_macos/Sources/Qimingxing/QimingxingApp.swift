@@ -69,10 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         approvalController = ApprovalSheetController(brainClient: brainClient)
         workspaceController = WorkspaceWindowController(store: workspaceStore, brainClient: brainClient)
 
-        MediaViewerLauncher.openHandler = { [weak self] in
+        MediaViewerLauncher.openHandler = { [weak self] prefersLargeWindow in
             guard let self else { return }
-            if self.workspaceController.isVisible {
-                MediaViewerWindowController.shared.show()
+            if prefersLargeWindow || self.workspaceController.isVisible {
+                if prefersLargeWindow, self.quickEntryController.isVisible {
+                    self.quickEntryController.hideForMediaViewer()
+                }
+                MediaViewerWindowController.shared.show(large: prefersLargeWindow)
             } else if self.quickEntryController.isVisible {
                 self.quickEntryController.showMediaViewer()
             } else {
@@ -238,6 +241,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     } else {
                         self.workspaceController.show()
                     }
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .qmxMediaViewerClosed)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    self?.quickEntryController.restoreAfterMediaViewer()
                 }
             }
             .store(in: &cancellables)
