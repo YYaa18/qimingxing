@@ -265,6 +265,8 @@ extension Notification.Name {
     static let qmxDetachWorkspace = Notification.Name("com.qimingxing.desktop.detachWorkspace")
     static let qmxCloseWorkspaceWing = Notification.Name("com.qimingxing.desktop.closeWorkspaceWing")
     static let qmxHideQuickEntry = Notification.Name("com.qimingxing.desktop.hideQuickEntry")
+    static let qmxStopMediaPlayback = Notification.Name("com.qimingxing.desktop.stopMediaPlayback")
+    static let qmxToggleMediaPlayback = Notification.Name("com.qimingxing.desktop.toggleMediaPlayback")
 }
 
 enum JSONHelper {

@@ -12,6 +12,7 @@ final class MediaThumbnailCache {
 
     private init() {
         cache.countLimit = 120
+        cache.totalCostLimit = 64 * 1024 * 1024
     }
 
     func thumbnail(for media: MediaItem, maxPixel: CGFloat = 320) async -> NSImage? {
@@ -33,7 +34,7 @@ final class MediaThumbnailCache {
         }
         guard let cgImage else { return nil }
         let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        cache.setObject(image, forKey: key)
+        cache.setObject(image, forKey: key, cost: cgImage.width * cgImage.height * 4)
         return image
     }
 
@@ -51,7 +52,7 @@ final class MediaThumbnailCache {
         }
         guard let cgImage else { return nil }
         let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        cache.setObject(image, forKey: key)
+        cache.setObject(image, forKey: key, cost: cgImage.width * cgImage.height * 4)
         return image
     }
 

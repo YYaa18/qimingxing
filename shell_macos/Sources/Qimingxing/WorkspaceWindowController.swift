@@ -321,6 +321,8 @@ enum WorkspaceEntry: Identifiable {
 @MainActor
 final class WorkspaceWindowController {
     private var window: NSWindow?
+
+    var isVisible: Bool { window?.isVisible ?? false }
     private let store: WorkspaceStore
     private let brainClient: BrainClient
 
@@ -754,7 +756,7 @@ struct WorkspaceRootView: View {
                     SourceChipsView(sources: sources)
                 }
                 if let media = turn.media, !media.isEmpty {
-                    MediaStripView(media: media, mode: .expanded)
+                    MediaStripView(media: media, mode: .expanded, contextTitle: "工作区")
                 }
             }
         }

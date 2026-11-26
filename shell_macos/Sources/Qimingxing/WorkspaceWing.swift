@@ -11,6 +11,7 @@ struct WorkspaceWingView: View {
     let desktopActions: DesktopActions
     let onSplit: () -> Void
     let onClose: () -> Void
+    var showsHeader: Bool = true
 
     @State private var tab: WingTab = .conversation
 
@@ -34,8 +35,10 @@ struct WorkspaceWingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().opacity(0.45)
+            if showsHeader {
+                header
+                Divider().opacity(0.45)
+            }
             tabRow
             Divider().opacity(0.45)
 
@@ -196,7 +199,7 @@ struct WorkspaceWingView: View {
             }
 
             if let media = turn.media, !media.isEmpty {
-                MediaStripView(media: media, mode: .compact)
+                MediaStripView(media: media, mode: .compact, contextTitle: "工作区")
                     .padding(.top, 2)
             }
         }
@@ -320,16 +323,18 @@ struct WorkspaceWingView: View {
 
             Spacer(minLength: 0)
 
-            Button(action: onSplit) {
-                HStack(spacing: 3) {
-                    Text("独立窗口")
-                    Image(systemName: "arrow.up.forward")
+            if showsHeader {
+                Button(action: onSplit) {
+                    HStack(spacing: 3) {
+                        Text("独立窗口")
+                        Image(systemName: "arrow.up.forward")
+                    }
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(QMXTheme.textSecondary)
                 }
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(QMXTheme.textSecondary)
+                .buttonStyle(.plain)
+                .help("拆分到独立窗口")
             }
-            .buttonStyle(.plain)
-            .help("拆分到独立窗口")
         }
         .padding(.horizontal, 18)
         .frame(height: QuickEntryLayout.footerHeight)

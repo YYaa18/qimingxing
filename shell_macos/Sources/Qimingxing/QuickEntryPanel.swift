@@ -72,16 +72,30 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
     func showWorkspaceWing() {
         if !isVisible { show() }
+        inputState.auxiliaryTab = .workspace
+        inputState.isWorkspaceWingOpen = true
+    }
+
+    func showMediaViewer() {
+        if !isVisible { show() }
+        inputState.auxiliaryTab = .media
         inputState.isWorkspaceWingOpen = true
     }
 
     func hideWorkspaceWing() {
         inputState.isWorkspaceWingOpen = false
+        NotificationCenter.default.post(name: .qmxStopMediaPlayback, object: nil)
     }
 
     func detachWorkspace() {
         inputState.isWorkspaceWingOpen = false
         NotificationCenter.default.post(name: .qmxDetachWorkspace, object: nil)
+    }
+
+    func detachMediaViewer() {
+        inputState.isWorkspaceWingOpen = false
+        NotificationCenter.default.post(name: .qmxStopMediaPlayback, object: nil)
+        MediaViewerWindowController.shared.show()
     }
 
 
@@ -264,6 +278,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             onClose: { [weak self] in self?.hideAndRestoreFocus() },
             onCloseWing: { [weak self] in self?.hideWorkspaceWing() },
             onSplitWing: { [weak self] in self?.detachWorkspace() },
+            onSplitMedia: { [weak self] in self?.detachMediaViewer() },
             onDesiredHeightChange: { [weak self] height in
                 self?.resize(toContentHeight: height)
             }
@@ -449,6 +464,14 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     }
 }
 
+enum AuxiliaryWingTab: String, CaseIterable, Identifiable {
+    case workspace
+    case media
+
+    var id: String { rawValue }
+    var label: String { self == .workspace ? "工作区" : "媒体" }
+}
+
 @MainActor
 final class QuickEntryInputState: ObservableObject {
     @Published var text: String = ""
@@ -458,6 +481,7 @@ final class QuickEntryInputState: ObservableObject {
     @Published var isExpanded: Bool = false
     @Published var forceExpanded: Bool = false
     @Published var isWorkspaceWingOpen: Bool = false
+    @Published var auxiliaryTab: AuxiliaryWingTab = .workspace
     @Published var layoutToken: UUID = UUID()
 }
 
@@ -469,6 +493,7 @@ struct QuickEntryRootView: View {
     let onClose: () -> Void
     var onCloseWing: () -> Void = {}
     var onSplitWing: () -> Void = {}
+    var onSplitMedia: () -> Void = {}
     var onDesiredHeightChange: (CGFloat) -> Void = { _ in }
 
     @AppStorage("qmx.answerFontSize") private var answerFontSize: Double = 16
@@ -495,10 +520,12 @@ struct QuickEntryRootView: View {
 
                 if inputState.isWorkspaceWingOpen {
                     Divider().opacity(0.5)
-                    WorkspaceWingView(
+                    AuxiliaryWingView(
                         store: workspaceStore,
                         desktopActions: desktopActions,
-                        onSplit: onSplitWing,
+                        inputState: inputState,
+                        onSplitWorkspace: onSplitWing,
+                        onSplitMedia: onSplitMedia,
                         onClose: onCloseWing
                     )
                     .frame(width: QuickEntryLayout.wingWidth)
@@ -667,7 +694,7 @@ struct QuickEntryRootView: View {
                     SourceChipsView(sources: turn.sources)
                 }
                 if !turn.media.isEmpty {
-                    MediaStripView(media: turn.media)
+                    MediaStripView(media: turn.media, contextTitle: "本轮回答")
                 }
                 workspaceLink
             } else {

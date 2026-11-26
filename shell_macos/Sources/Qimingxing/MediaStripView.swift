@@ -10,6 +10,7 @@ struct MediaStripView: View {
 
     let media: [MediaItem]
     var mode: Mode = .compact
+    var contextTitle: String = "媒体"
 
     @StateObject private var audio = MediaAudioPlayer()
 
@@ -46,14 +47,21 @@ struct MediaStripView: View {
                     }
                 }
                 if overflow > 0 {
-                    Text("+\(overflow)")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(QMXTheme.textSecondary)
-                        .frame(width: 44, height: 76)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(QMXTheme.surfaceMuted.opacity(0.7))
-                        )
+                    Button {
+                        let index = min(visible.count, max(0, media.count - 1))
+                        openViewer(media[index])
+                    } label: {
+                        Text("+\(overflow)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(QMXTheme.textSecondary)
+                            .frame(width: 44, height: 76)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(QMXTheme.surfaceMuted.opacity(0.7))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help("在媒体预览中查看全部")
                 }
             }
             .padding(.vertical, 4)
@@ -92,48 +100,49 @@ struct MediaStripView: View {
         }
     }
 
-    @ViewBuilder
     private func thumbnailTile(_ item: MediaItem, width: CGFloat? = 112, height: CGFloat = 76) -> some View {
-        Button {
-            if let path = item.fileURL?.path { _ = DesktopActions().quickLook(path) }
-        } label: {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(QMXTheme.surfaceMuted)
-                MediaThumbnailView(media: item)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                if item.kind == "video" {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(11)
-                        .background(Circle().fill(Color.black.opacity(0.45)))
-                    VStack {
+        let doubleTap = TapGesture(count: 2).onEnded { quickLook(item) }
+        let singleTap = TapGesture(count: 1).onEnded {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            openViewer(item)
+        }
+        return ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(QMXTheme.surfaceMuted)
+            MediaThumbnailView(media: item)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            if item.kind == "video" {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(11)
+                    .background(Circle().fill(Color.black.opacity(0.45)))
+                VStack {
+                    Spacer()
+                    HStack {
                         Spacer()
-                        HStack {
-                            Spacer()
-                            if item.durationSec > 0 {
-                                Text(durationLabel(item.durationSec))
-                                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(Color.black.opacity(0.55)))
-                            }
+                        if item.durationSec > 0 {
+                            Text(durationLabel(item.durationSec))
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.black.opacity(0.55)))
                         }
                     }
-                    .padding(6)
                 }
+                .padding(6)
             }
-            .frame(width: width, height: height)
-            .frame(maxWidth: width == nil ? .infinity : nil)
-            .clipped()
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .buttonStyle(TactileButtonStyle(haptic: .alignment))
+        .frame(width: width, height: height)
+        .frame(maxWidth: width == nil ? .infinity : nil)
+        .clipped()
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .gesture(ExclusiveGesture(doubleTap, singleTap))
         .help(attributionCaption(item) ?? item.title)
         .contextMenu {
             if let path = item.fileURL?.path {
+                Button("在媒体预览中查看") { openViewer(item) }
                 Button("快速预览") { _ = DesktopActions().quickLook(path) }
                 Button("复制文件") { _ = DesktopActions().copyFile(path) }
                 Button("在访达中显示") { _ = DesktopActions().revealPath(path) }
@@ -143,6 +152,20 @@ struct MediaStripView: View {
                 Button("打开来源页面") { NSWorkspace.shared.open(url) }
             }
         }
+    }
+
+    private func quickLook(_ item: MediaItem) {
+        guard let path = item.fileURL?.path else { return }
+        _ = DesktopActions().quickLook(path)
+    }
+
+    private func openViewer(_ item: MediaItem) {
+        MediaViewerLauncher.open(
+            items: media,
+            selectedID: item.mediaId,
+            title: item.title.isEmpty ? "媒体预览" : item.title,
+            contextLabel: contextTitle
+        )
     }
 
     private func audioPill(_ item: MediaItem, expanded: Bool) -> some View {
@@ -188,6 +211,8 @@ struct MediaStripView: View {
                     .frame(height: 2)
                 }
             }
+            .contentShape(Rectangle())
+            .onTapGesture { openViewer(item) }
             Text(timeLabel(item, expanded: expanded))
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(QMXTheme.textTertiary)

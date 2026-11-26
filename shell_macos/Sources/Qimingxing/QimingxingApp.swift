@@ -68,6 +68,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         approvalController = ApprovalSheetController(brainClient: brainClient)
         workspaceController = WorkspaceWindowController(store: workspaceStore, brainClient: brainClient)
 
+        MediaViewerLauncher.openHandler = { [weak self] in
+            guard let self else { return }
+            if self.workspaceController.isVisible {
+                MediaViewerWindowController.shared.show()
+            } else if self.quickEntryController.isVisible {
+                self.quickEntryController.showMediaViewer()
+            } else {
+                MediaViewerWindowController.shared.show()
+            }
+        }
+        MediaViewerLauncher.attachHandler = { [weak self] in
+            self?.quickEntryController.showMediaViewer()
+        }
+
         menuBarController = MenuBarController(
             brainClient: brainClient,
             supervisor: supervisor,
