@@ -1,11 +1,14 @@
 """Turn failure paths must always terminate the turn (no stuck 'generating' UI)."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi.testclient import TestClient
 
 from brain.config import AppConfig
+from brain.hub import Hub
+from brain.llm_router import LLMRouter
 from brain.main import create_app
 
 
@@ -68,3 +71,40 @@ def test_invalid_profile_still_sends_error_and_turn_end(tmp_path) -> None:
 
             assert saw_error, "missing system.error for invalid profile"
             assert saw_turn_end, "missing output.turn_end; shell would stay in generating state"
+
+
+class _FakeConn:
+    def __init__(self, turn_id: str) -> None:
+        self.active_turn_id = turn_id
+        self.active_task: asyncio.Task | None = None
+        self.sent: list[str] = []
+
+    async def send_envelope(self, envelope) -> None:
+        self.sent.append(envelope.type)
+
+
+async def _sleep_forever() -> None:
+    await asyncio.Event().wait()
+
+
+async def test_cancel_after_turn_end_does_not_emit_duplicate_turn_end() -> None:
+    hub = Hub(llm_router=LLMRouter(AppConfig()), config=AppConfig())
+    conn = _FakeConn("turn_done")
+    conn.active_task = asyncio.create_task(_sleep_forever())
+    hub._turn_end_sent.add("turn_done")
+
+    await hub._cancel_active_turn(conn, notify=True)  # type: ignore[arg-type]
+
+    assert "output.turn_end" not in conn.sent
+    assert conn.active_task is None
+
+
+async def test_cancel_before_turn_end_still_notifies() -> None:
+    hub = Hub(llm_router=LLMRouter(AppConfig()), config=AppConfig())
+    conn = _FakeConn("turn_live")
+    conn.active_task = asyncio.create_task(_sleep_forever())
+
+    await hub._cancel_active_turn(conn, notify=True)  # type: ignore[arg-type]
+
+    assert "output.turn_end" in conn.sent
+    assert "avatar.state" in conn.sent
