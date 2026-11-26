@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
-
 import httpx
 
 from brain.config import ImageSearchToolConfig
@@ -25,6 +24,7 @@ class ImageHit:
     license: str = ""
     attribution: str = ""
     provider: str = ""
+    thumbnail_url: str = ""
 
 
 class TavilyImageSearchProvider:
@@ -80,9 +80,13 @@ class TavilyImageSearchProvider:
             if isinstance(raw, str):
                 url = raw.strip()
                 description = ""
+                thumbnail = ""
             elif isinstance(raw, dict):
                 url = str(raw.get("url") or raw.get("image_url") or "").strip()
                 description = str(raw.get("description") or raw.get("title") or "").strip()
+                thumbnail = str(
+                    raw.get("thumbnail_url") or raw.get("thumbnailUrl") or ""
+                ).strip()
             else:
                 return
             if not url.startswith("https://") or url in seen:
@@ -95,6 +99,7 @@ class TavilyImageSearchProvider:
                     source_url=source_url,
                     source_title=source_title,
                     provider="tavily",
+                    thumbnail_url=thumbnail,
                 )
             )
 
@@ -123,6 +128,10 @@ class ImageSearchTool(Tool):
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "图片搜索关键词，尽量具体"},
+            "en_query": {
+                "type": "string",
+                "description": "可选：简短英文关键词。中文搜图时建议同时提供，例如 query=呼伦贝尔草原, en_query=Hulunbuir grassland",
+            },
             "count": {
                 "type": "integer",
                 "description": "返回并下载的图片数量（默认 4，最大 8）",
@@ -145,7 +154,7 @@ class ImageSearchTool(Tool):
         self.cache = cache or MediaCache(
             config.cache_dir,
             max_bytes=config.max_bytes,
-            timeout_seconds=config.timeout_seconds,
+            timeout_seconds=min(8.0, config.timeout_seconds),
         )
 
     def update_config(self, config: ImageSearchToolConfig) -> None:
@@ -154,7 +163,7 @@ class ImageSearchTool(Tool):
         self.cache = MediaCache(
             config.cache_dir,
             max_bytes=config.max_bytes,
-            timeout_seconds=config.timeout_seconds,
+            timeout_seconds=min(8.0, config.timeout_seconds),
         )
 
     def format_status_label(self, arguments: Dict[str, Any]) -> str:
@@ -175,10 +184,12 @@ class ImageSearchTool(Tool):
             8,
             max(1, int(arguments.get("count") or self.config.max_results or 4)),
         )
+        candidate_limit = min(16, count * 2 + 2)
+        effective_query = str(arguments.get("en_query") or "").strip() or query
         try:
             hits = await self.provider.search(
-                query,
-                max_results=count,
+                effective_query,
+                max_results=candidate_limit,
                 safe_search=self.config.safe_search,
             )
         except Exception as exc:
@@ -199,36 +210,46 @@ class ImageSearchTool(Tool):
             )
 
         media_items: List[Dict[str, Any]] = []
-        sources: List[Dict[str, str]] = []
         failures = 0
-        for hit in hits[:count]:
-            try:
-                media = await self.cache.download(
-                    hit.image_url,
-                    title=hit.title or hit.source_title or query,
-                    source_url=hit.source_url,
-                    source_title=hit.source_title,
-                    license=hit.license,
-                    attribution=hit.attribution,
-                    provider=hit.provider,
-                )
-            except MediaDownloadError as exc:
+        semaphore = asyncio.Semaphore(4)
+
+        async def fetch_one(hit: ImageHit) -> Optional[Dict[str, Any]]:
+            nonlocal failures
+            async with semaphore:
+                urls = [hit.image_url]
+                if hit.thumbnail_url and hit.thumbnail_url != hit.image_url:
+                    urls.append(hit.thumbnail_url)
+                for url in urls:
+                    try:
+                        media = await self.cache.download(
+                            url,
+                            title=hit.title or hit.source_title or query,
+                            source_url=hit.source_url,
+                            source_title=hit.source_title,
+                            license=hit.license,
+                            attribution=hit.attribution,
+                            provider=hit.provider,
+                        )
+                        return media.as_media_item()
+                    except MediaDownloadError as exc:
+                        logger.info("Image candidate failed %s: %s", url, exc)
+                    except Exception as exc:
+                        logger.warning("Unexpected image download error: %s", type(exc).__name__)
                 failures += 1
-                logger.info("Skipping image %s: %s", hit.image_url, exc)
-                continue
-            except Exception as exc:
-                failures += 1
-                logger.warning("Unexpected image download error: %s", type(exc).__name__)
-                continue
-            media_items.append(media.as_media_item())
-            if hit.source_url.startswith(("http://", "https://")):
-                sources.append(
-                    {
-                        "title": hit.source_title or hit.title or query,
-                        "url": hit.source_url,
-                        "domain": urlparse(hit.source_url).hostname or "",
-                    }
-                )
+                return None
+
+        tasks = [asyncio.create_task(fetch_one(hit)) for hit in hits[:candidate_limit]]
+        try:
+            for task in asyncio.as_completed(tasks):
+                item = await task
+                if item is not None:
+                    media_items.append(item)
+                    if len(media_items) >= count:
+                        break
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
 
         if not media_items:
             return ToolResult(
@@ -237,6 +258,13 @@ class ImageSearchTool(Tool):
                 summary="图片下载失败",
                 status="error",
             )
+
+        try:
+            if ctx.memory_backend is not None:
+                refs = await ctx.memory_backend.list_referenced_media_paths()
+                self.cache.prune(refs)
+        except Exception:
+            logger.debug("Media cache prune skipped", exc_info=True)
 
         lines = [f"已找到并下载 {len(media_items)} 张图片，已放入媒体条："]
         for index, item in enumerate(media_items, start=1):
@@ -253,7 +281,6 @@ class ImageSearchTool(Tool):
             metadata={
                 "media_paths": [str(item["local_path"]) for item in media_items],
                 "media_items": media_items,
-                "sources": sources,
                 "count": len(media_items),
             },
         )

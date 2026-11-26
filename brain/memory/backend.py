@@ -380,6 +380,15 @@ class MemoryBackend(ABC):
     # --- Lossless Migration Contract ---
 
     @abstractmethod
+    async def list_referenced_media_paths(self) -> set[str]:
+        """Return local media paths referenced by persisted messages.
+
+        Media cache GC lives outside the storage layer; implementations that
+        can enumerate message media should override this. The default is empty
+        so read-only/mock backends remain valid.
+        """
+        return set()
+
     async def export_snapshot(self, output_path: Path) -> int:
         """Export all sessions, messages, facts, and episodes to standard JSONL."""
 

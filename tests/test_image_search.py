@@ -178,7 +178,7 @@ def test_image_search_tool_returns_media_metadata(tmp_path) -> None:
     assert result.ok
     assert result.metadata["media_paths"] == [str(png_path)]
     assert result.metadata["media_items"][0]["source_url"] == "https://example.com/page"
-    assert result.metadata["sources"][0]["url"] == "https://example.com/page"
+    assert "sources" not in result.metadata
     assert "http" not in result.output
 
 
@@ -269,3 +269,37 @@ def test_image_search_tool_is_registered_for_the_model() -> None:
     names = [tool.name for tool in registry.list_tools()]
     assert "image_search" in names
     assert "web_search" in names
+
+
+def test_media_cache_prunes_only_old_unreferenced_files(tmp_path) -> None:
+    import time
+
+    cache = MediaCache(tmp_path / "media")
+    referenced = cache.base_dir / "keep.png"
+    old_orphan = cache.base_dir / "old.png"
+    recent_orphan = cache.base_dir / "new.png"
+    for path in (referenced, old_orphan, recent_orphan):
+        path.write_bytes(b"x" * 600)
+    old_time = time.time() - 8 * 86400
+    os.utime(old_orphan, (old_time, old_time))
+    removed = cache.prune({str(referenced)}, max_bytes=1000, max_age_days=7)
+    assert removed == 1
+    assert referenced.exists()
+    assert recent_orphan.exists()
+    assert not old_orphan.exists()
+
+
+def test_private_ipv4_mapped_ipv6_is_rejected() -> None:
+    from brain.media_cache import _is_public_ip
+
+    assert _is_public_ip("127.0.0.1") is False
+    assert _is_public_ip("::ffff:127.0.0.1") is False
+    assert _is_public_ip("169.254.169.254") is False
+
+
+def test_image_search_without_key_returns_actionable_error() -> None:
+    tool = ImageSearchTool(ImageSearchToolConfig(api_key="", cache_dir="/tmp/qmx_no_key_cache"))
+    ctx = ToolExecutionContext(turn_id="t", session_id="s", config=AppConfig())
+    result = asyncio.run(tool.execute({"query": "草原"}, ctx))
+    assert result.ok is False
+    assert "Tavily" in result.output

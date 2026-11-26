@@ -1574,6 +1574,28 @@ class SQLiteMemoryStore(MemoryBackend):
 
     # --- Lossless JSONL Snapshot Export / Import ---
 
+    async def list_referenced_media_paths(self) -> set[str]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            rows = conn.execute(
+                "SELECT media_json FROM messages UNION ALL SELECT media_json FROM messages_archive"
+            ).fetchall()
+        paths: set[str] = set()
+        for row in rows:
+            try:
+                items = json.loads(str(row["media_json"] or "[]"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("local_path") or "").strip()
+                if path:
+                    paths.add(path)
+        return paths
+
     async def export_snapshot(self, output_path: Path) -> int:
         async with self._lock:
             conn = self._ensure_conn()

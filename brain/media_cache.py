@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import socket
+import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -18,14 +19,17 @@ from PIL import Image, UnidentifiedImageError
 
 logger = logging.getLogger("qimingxing.media_cache")
 
+# Pillow has no built-in HEIC decoder. Keep the whitelist to formats that
+# decode with the existing zero-dependency runtime; GIF is stored verbatim so
+# animation is preserved.
 _ALLOWED_FORMATS = {
     "JPEG": (".jpg", "image/jpeg"),
     "PNG": (".png", "image/png"),
     "WEBP": (".webp", "image/webp"),
     "GIF": (".gif", "image/gif"),
-    "HEIF": (".heic", "image/heic"),
 }
-_MAX_PIXELS = 40_000_000
+_MAX_PIXELS = 25_000_000
+Image.MAX_IMAGE_PIXELS = _MAX_PIXELS
 _MAX_DIMENSION = 12_000
 _MAX_REDIRECTS = 3
 
@@ -73,6 +77,10 @@ def _is_public_ip(value: str) -> bool:
         addr = ipaddress.ip_address(value)
     except ValueError:
         return False
+    # IPv4-mapped IPv6 addresses (::ffff:127.0.0.1) must be unwrapped before
+    # the global check, otherwise some reserved ranges can slip through.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
     return bool(addr.is_global)
 
 
@@ -220,3 +228,44 @@ class MediaCache:
             attribution=str(attribution or "")[:240],
             provider=str(provider or "")[:40],
         )
+
+    def prune(
+        self,
+        referenced_paths: set[str],
+        *,
+        max_bytes: int = 500 * 1024 * 1024,
+        max_age_days: int = 7,
+    ) -> int:
+        """Delete old unreferenced cache files once the cache exceeds a soft cap.
+
+        The caller supplies paths currently referenced by message/workspace
+        history; this module deliberately does not import sqlite3 (AST guard).
+        """
+        cutoff = time.time() - max(1, max_age_days) * 86400
+        files = [
+            p for p in self.base_dir.iterdir()
+            if p.is_file() and not p.name.endswith(".tmp")
+        ]
+        total = sum(p.stat().st_size for p in files if p.exists())
+        if total <= max_bytes:
+            return 0
+        referenced = {
+            str(Path(path).expanduser().resolve())
+            for path in referenced_paths
+            if str(path).strip()
+        }
+        removed = 0
+        for path in sorted(files, key=lambda p: p.stat().st_mtime):
+            if total <= max_bytes:
+                break
+            try:
+                resolved = str(path.resolve())
+                if resolved in referenced or path.stat().st_mtime >= cutoff:
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+                total -= size
+                removed += 1
+            except OSError:
+                continue
+        return removed
