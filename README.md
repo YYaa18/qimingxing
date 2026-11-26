@@ -1,6 +1,6 @@
-# 启明星（Qimingxing）— v1.0.3
+# 启明星（Qimingxing）— v1.0.4
 
-通用 AI 桌面数字人助手 — v1.0.3（原生 macOS SwiftUI 壳 + Python Brain + Router–Worker 调度 + 长期记忆/上下文工程 + 联网搜索与富媒体）。
+通用 AI 桌面数字人助手 — v1.0.4（原生 macOS SwiftUI 壳 + Python Brain + Router–Worker 调度 + 长期记忆/上下文工程 + 联网搜索与富媒体）。
 
 ## 架构概览
 

@@ -13,7 +13,7 @@ enum UIPreviewDumper {
         let client = BrainClient(
             httpBase: "http://127.0.0.1:18790",
             wsURLString: "ws://127.0.0.1:18790/ws",
-            appVersion: "1.0.3",
+            appVersion: "1.0.4",
             desktopActions: desktop,
             audioPlayer: audio
         )
@@ -392,7 +392,7 @@ enum UIPreviewDumper {
         let panelClient = BrainClient(
             httpBase: "http://127.0.0.1:18790",
             wsURLString: "ws://127.0.0.1:18790/ws",
-            appVersion: "1.0.3",
+            appVersion: "1.0.4",
             desktopActions: desktop,
             audioPlayer: audio
         )

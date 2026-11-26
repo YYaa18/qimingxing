@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qimingxing"
-version = "1.0.3"
+version = "1.0.4"
 description = "启明星（Qimingxing）macOS 原生桌面 AI 助手 — GA 1.0"
 requires-python = ">=3.11"
 dependencies = [
