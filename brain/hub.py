@@ -1144,7 +1144,7 @@ class Hub:
         inbox_tool = self.tool_registry.get("inbox_scan")
         if inbox_tool is not None and hasattr(inbox_tool, "config"):
             inbox_tool.config = fresh_cfg  # type: ignore[attr-defined]
-        image_tool = self.tool_registry.get("image_search")
+        image_tool = self.tool_registry.get("web_image_search")
         if fresh_cfg.tools.image_search.enabled:
             if image_tool is not None and hasattr(image_tool, "update_config"):
                 image_tool.update_config(fresh_cfg.tools.image_search)  # type: ignore[attr-defined]
@@ -1153,7 +1153,7 @@ class Hub:
 
                 self.tool_registry.register(ImageSearchTool(fresh_cfg.tools.image_search))
         elif image_tool is not None:
-            self.tool_registry.unregister("image_search")
+            self.tool_registry.unregister("web_image_search")
         await self._broadcast_welcome_to_bodies()
         await self._broadcast_privacy_state()
         await self._broadcast_shortcuts_sync()

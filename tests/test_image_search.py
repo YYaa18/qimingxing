@@ -183,7 +183,7 @@ def test_image_search_tool_returns_media_metadata(tmp_path) -> None:
 
 
 class _MetadataTool(Tool):
-    name = "image_search"
+    name = "web_image_search"
     description = "fake"
     parameters_schema = {"type": "object", "properties": {}}
     default_risk = "safe"
@@ -207,7 +207,7 @@ class _OneToolRouter(LLMRouter):
         self.steps = [
             LLMCompletionResult(
                 content="",
-                tool_calls=[ToolCallRequest(id="c1", name="image_search", arguments_json="{}")],
+                tool_calls=[ToolCallRequest(id="c1", name="web_image_search", arguments_json="{}")],
             ),
             LLMCompletionResult(content="好了"),
         ]
@@ -267,7 +267,7 @@ def test_image_search_settings_are_masked_and_persisted(tmp_path) -> None:
 def test_image_search_tool_is_registered_for_the_model() -> None:
     registry = build_default_tool_registry(AppConfig())
     names = [tool.name for tool in registry.list_tools()]
-    assert "image_search" in names
+    assert "web_image_search" in names
     assert "web_search" in names
 
 

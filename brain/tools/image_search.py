@@ -117,7 +117,10 @@ class TavilyImageSearchProvider:
 
 
 class ImageSearchTool(Tool):
-    name = "image_search"
+    # `image_search` is reserved by DeepSeek when server-side web tools are
+    # enabled. The local function tool must use a non-reserved name so it can
+    # coexist with deepseek_web_search/deepseek_read_url.
+    name = "web_image_search"
     description = (
         "联网搜索图片并下载到本地媒体条。适合找照片、配图、参考图、地点/人物图片；"
         "返回来源页面和许可信息，图片会直接显示在回答下方。"
