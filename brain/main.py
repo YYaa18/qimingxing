@@ -285,6 +285,20 @@ def create_app(
                     await close()
                 except Exception:
                     logger.debug("Failed closing audio HTTP client", exc_info=True)
+            screen_close = getattr(hub.screen_router, "aclose", None)
+            if screen_close is not None:
+                try:
+                    await screen_close()
+                except Exception:
+                    logger.debug("Failed closing screen router HTTP client", exc_info=True)
+            for tool in hub.tool_registry.list_tools():
+                close = getattr(tool, "aclose", None)
+                if close is None:
+                    continue
+                try:
+                    await close()
+                except Exception:
+                    logger.debug("Failed closing tool HTTP client", exc_info=True)
             await backend.close()
             artifacts.cleanup_all()
 

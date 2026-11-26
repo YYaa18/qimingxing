@@ -17,6 +17,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from PIL import Image, UnidentifiedImageError
 
+from brain.http_client import PooledHTTPClientMixin
+
 logger = logging.getLogger("qimingxing.media_cache")
 
 # Pillow has no built-in HEIC decoder. Keep the whitelist to formats that
@@ -154,7 +156,7 @@ def _validate_image(data: bytes) -> tuple[str, str, int, int]:
     return ext, mime, width, height
 
 
-class MediaCache:
+class MediaCache(PooledHTTPClientMixin):
     """Persistent, content-addressed image cache for downloaded search results."""
 
     def __init__(
@@ -193,14 +195,11 @@ class MediaCache:
         timeout = httpx.Timeout(self.timeout_seconds, connect=8.0)
         data = b""
         content_type = ""
-        client_kwargs: dict = {
-            "timeout": timeout,
-            "follow_redirects": False,
-            "headers": {"User-Agent": "Qimingxing/1.0 image-search"},
-        }
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
-        async with httpx.AsyncClient(**client_kwargs) as client:
+        async with self._client_ctx(
+            timeout,
+            follow_redirects=False,
+            headers={"User-Agent": "Qimingxing/1.0 image-search"},
+        ) as client:
             for _ in range(_MAX_REDIRECTS + 1):
                 async with client.stream("GET", url) as resp:
                     if resp.status_code in (301, 302, 303, 307, 308):

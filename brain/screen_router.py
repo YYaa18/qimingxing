@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
 
 from brain.config import AppConfig, OCRConfig, ProfileConfig, is_local_provider
+from brain.http_client import PooledHTTPClientMixin
 from brain.llm_router import LLMError, LLMUsage, estimate_cny_cost
 from protocol.models import ContextScreenRefPayload
 
@@ -22,12 +23,19 @@ class OCRProvider(ABC):
         """Extract readable text from compressed screenshot bytes."""
 
 
-class DeepSeekOCRProvider(OCRProvider):
+class DeepSeekOCRProvider(PooledHTTPClientMixin, OCRProvider):
     """Cloud OCR provider calling DeepSeek POST /v1/tools/ocr multipart endpoint."""
 
-    def __init__(self, ocr_config: OCRConfig, config: AppConfig) -> None:
+    def __init__(
+        self,
+        ocr_config: OCRConfig,
+        config: AppConfig,
+        *,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
+    ) -> None:
         self._ocr_cfg = ocr_config
         self._app_cfg = config
+        self._transport = transport
 
     async def extract_text(self, image_bytes: bytes, content_type: str = "image/jpeg") -> str:
         if not self._ocr_cfg.api_key:
@@ -42,13 +50,13 @@ class DeepSeekOCRProvider(OCRProvider):
         timeout = httpx.Timeout(self._ocr_cfg.timeout_seconds, connect=8.0)
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    files={"file": (f"screenshot.{ext}", image_bytes, content_type)},
-                    data={"purpose": self._ocr_cfg.mode or "text_recognition"},
-                )
+            client = self._pooled_client(timeout)
+            resp = await client.post(
+                url,
+                headers=headers,
+                files={"file": (f"screenshot.{ext}", image_bytes, content_type)},
+                data={"purpose": self._ocr_cfg.mode or "text_recognition"},
+            )
         except httpx.TimeoutException as exc:
             safe = self._app_cfg.redact_secrets(f"DeepSeek OCR 请求超时: {exc}")
             raise LLMError("OCR_TIMEOUT", safe) from exc
@@ -69,7 +77,7 @@ class DeepSeekOCRProvider(OCRProvider):
         return "\n\n".join(texts).strip()
 
 
-class ScreenUnderstandingRouter:
+class ScreenUnderstandingRouter(PooledHTTPClientMixin):
     """Dual-path screen understanding router: Vision direct vs Vision/OCR slot fallback."""
 
     def __init__(
@@ -93,6 +101,12 @@ class ScreenUnderstandingRouter:
         if hasattr(self.ocr_provider, "_app_cfg"):
             self.ocr_provider._app_cfg = config  # type: ignore[attr-defined]
 
+    async def aclose(self) -> None:
+        await super().aclose()
+        close = getattr(self.ocr_provider, "aclose", None)
+        if close is not None:
+            await close()
+
     async def _call_vision_slot(
         self,
         vision_prof: ProfileConfig,
@@ -108,7 +122,10 @@ class ScreenUnderstandingRouter:
             )
             assert self._app_config is not None
             ocr_helper = DeepSeekOCRProvider(ocr_cfg, self._app_config)
-            text = await ocr_helper.extract_text(image_bytes, content_type=content_type)
+            try:
+                text = await ocr_helper.extract_text(image_bytes, content_type=content_type)
+            finally:
+                await ocr_helper.aclose()
             self.last_ocr_usage = LLMUsage(
                 model=vision_prof.model,
                 profile=vision_prof.name,
@@ -147,19 +164,17 @@ class ScreenUnderstandingRouter:
             ],
             "stream": False,
         }
-        client_kwargs: Dict[str, Any] = {"timeout": httpx.Timeout(25.0, connect=8.0)}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code >= 400:
-                safe = (
-                    self._app_config.redact_secrets(resp.text[:300])
-                    if self._app_config is not None
-                    else resp.text[:300]
-                )
-                raise LLMError(f"VISION_HTTP_{resp.status_code}", f"视觉槽位接口返回 HTTP {resp.status_code}: {safe}")
-            data = resp.json()
+        timeout = httpx.Timeout(25.0, connect=8.0)
+        client = self._pooled_client(timeout)
+        resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code >= 400:
+            safe = (
+                self._app_config.redact_secrets(resp.text[:300])
+                if self._app_config is not None
+                else resp.text[:300]
+            )
+            raise LLMError(f"VISION_HTTP_{resp.status_code}", f"视觉槽位接口返回 HTTP {resp.status_code}: {safe}")
+        data = resp.json()
 
         choices = data.get("choices") or []
         content = ""

@@ -6,35 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
-import httpx
-
-
-class _PooledHTTPClientMixin:
-    """Lazily-created keep-alive HTTP client shared by one provider instance."""
-
-    _transport: Optional[httpx.AsyncBaseTransport] = None
-    _client: Optional[httpx.AsyncClient] = None
-
-    def _pooled_client(self, timeout: httpx.Timeout) -> httpx.AsyncClient:
-        client = self._client
-        if client is None or client.is_closed:
-            kwargs: dict = {
-                "timeout": timeout,
-                "limits": httpx.Limits(
-                    max_keepalive_connections=4,
-                    keepalive_expiry=300.0,
-                ),
-            }
-            if self._transport is not None:
-                kwargs["transport"] = self._transport
-            client = httpx.AsyncClient(**kwargs)
-            self._client = client
-        return client
-
-    async def aclose(self) -> None:
-        client, self._client = self._client, None
-        if client is not None and not client.is_closed:
-            await client.aclose()
+from brain.http_client import PooledHTTPClientMixin as _PooledHTTPClientMixin
 
 
 @dataclass
