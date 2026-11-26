@@ -268,12 +268,17 @@ class MCPClientManager:
         """Connect all enabled MCP servers cleanly; failed servers stay isolated and offline."""
         self._registry = registry
         self._sync_server_tables()
-        for srv in self.config.mcp_servers:
-            if not srv.enabled:
-                continue
+
+        async def _connect(srv: MCPServerConfig) -> None:
             runtime = self._runtimes[srv.name]
             async with runtime.lock:
                 await self._connect_server_locked(runtime, registry)
+
+        enabled = [srv for srv in self.config.mcp_servers if srv.enabled]
+        if enabled:
+            # Startup time was the sum of every server's handshake; run them
+            # concurrently (each server already has its own lock/state).
+            await asyncio.gather(*(_connect(srv) for srv in enabled))
         return self.list_statuses()
 
     async def _connect_server_locked(
