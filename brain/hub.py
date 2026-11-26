@@ -46,6 +46,7 @@ from brain.rich_content import clean_answer_and_sources, collect_media
 from protocol.models import MediaItem, SourceItem
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
+from brain.worker import build_router_registry
 from brain.tools import (
     BatchPathContextStore,
     ToolExecutionContext,
@@ -100,7 +101,10 @@ from protocol.models import (
     SystemPrivacyStatePayload,
     SystemShortcutsSyncPayload,
     SystemWelcomePayload,
+    TaskFollowupAckedPayload,
+    TaskStateChangedPayload,
     TaskStatusPayload,
+    TaskWatchdogAlertPayload,
     ToolApprovalRequestPayload,
     ToolApprovalResolvedPayload,
     ToolApprovalResponsePayload,
@@ -289,6 +293,8 @@ class Hub:
             if tool_registry is not None
             else build_default_tool_registry(self.config)
         )
+        self.router_include_mcp = False
+        self.router_tool_registry = build_router_registry(self.tool_registry)
         self.tool_executor = tool_executor or ToolExecutor(llm_router)
         if skill_manager is not None:
             self.skill_manager: Optional[SkillManager] = skill_manager
@@ -1154,6 +1160,8 @@ class Hub:
                 self.tool_registry.register(ImageSearchTool(fresh_cfg.tools.image_search))
         elif image_tool is not None:
             self.tool_registry.unregister("web_image_search")
+        self.router_include_mcp = False
+        self.router_tool_registry = build_router_registry(self.tool_registry)
         await self._broadcast_welcome_to_bodies()
         await self._broadcast_privacy_state()
         await self._broadcast_shortcuts_sync()
@@ -1534,6 +1542,32 @@ class Hub:
                     await client.send_envelope(env)
                 except Exception:
                     logger.debug("Failed broadcasting task.status to %s", client.client_id)
+
+    async def _broadcast_to_bodies(self, envelope: Any, label: str) -> None:
+        for client in list(self.clients.values()):
+            if client.role in ("body", None):
+                try:
+                    await client.send_envelope(envelope)
+                except Exception:
+                    logger.debug("Failed broadcasting %s to %s", label, client.client_id)
+
+    async def broadcast_task_state_changed(self, payload: TaskStateChangedPayload) -> None:
+        env = make_envelope(
+            "brain", "task.state_changed", payload, turn_id=payload.task_id
+        )
+        await self._broadcast_to_bodies(env, "task.state_changed")
+
+    async def broadcast_task_followup_acked(self, payload: TaskFollowupAckedPayload) -> None:
+        env = make_envelope(
+            "brain", "task.followup_acked", payload, turn_id=payload.task_id
+        )
+        await self._broadcast_to_bodies(env, "task.followup_acked")
+
+    async def broadcast_task_watchdog_alert(self, payload: TaskWatchdogAlertPayload) -> None:
+        env = make_envelope(
+            "brain", "task.watchdog_alert", payload, turn_id=payload.task_id
+        )
+        await self._broadcast_to_bodies(env, "task.watchdog_alert")
 
     async def broadcast_artifact_capsule(
         self, payload: OutputArtifactCapsulePayload
@@ -2213,6 +2247,28 @@ class Hub:
             if attached_manifest:
                 extra_l3_sections.append(attached_manifest)
 
+            # L3 dynamic tail: a deliberately tiny active-task table. It must
+            # never enter the stable L0/L1 prefix; details stay behind
+            # task_inspect(task_id, ref_id).
+            if self.task_runner is not None:
+                try:
+                    live_tasks = await self.task_runner.list_tasks(limit=8)
+                    live = [
+                        t for t in live_tasks
+                        if t.status in ("queued", "planning", "running", "waiting_approval", "waiting_input", "verifying", "stalled")
+                    ]
+                    if live:
+                        lines = ["【当前后台任务（仅摘要）】"]
+                        for t in live[:5]:
+                            step = (t.current_step or "").replace("\n", " ")[:60]
+                            lines.append(
+                                f"- {t.task_id} | {t.status} | {t.title[:40]} | {step}"
+                            )
+                        lines.append("需要细节时调用 task_inspect；追加要求调用 task_followup。")
+                        extra_l3_sections.append("\n".join(lines)[:700])
+                except Exception:
+                    logger.debug("Failed building active task L3 table", exc_info=True)
+
             active_session_id = ""
             rolling_summary = ""
             core_facts: List[MemoryFact] = []
@@ -2254,16 +2310,19 @@ class Hub:
                 categories_map = {}
                 recent_messages = self.memory_store.get_messages(conn.client_id, limit=16)
 
+            self.router_tool_registry = build_router_registry(
+                self.tool_registry, include_mcp=self.router_include_mcp
+            )
             use_tools = bool(
                 self.config.tools.enabled
-                and len(self.tool_registry) > 0
+                and len(self.router_tool_registry) > 0
                 and (
                     profile.provider != "mock"
                     or type(self.llm_router).complete_with_tools is not LLMRouter.complete_with_tools
                 )
             )
             tools_schema, native_web_tools = build_turn_tools_schema(
-                self.tool_registry,
+                self.router_tool_registry,
                 self.config,
                 profile,
                 use_tools=use_tools,
@@ -2463,7 +2522,7 @@ class Hub:
                 )
                 loop_res = await self.tool_executor.run(
                     messages=messages,
-                    registry=self.tool_registry,
+                    registry=self.router_tool_registry,
                     ctx=tool_ctx,
                     profile_name=profile.name,
                     on_text_delta=_on_text_delta,

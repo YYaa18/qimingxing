@@ -193,6 +193,9 @@ def create_app(
         on_soft_alert=hub.broadcast_soft_alert,
         on_request_approval=hub.request_background_approval,
         on_ask_user=hub.request_background_clarification,
+        on_task_state_changed=hub.broadcast_task_state_changed,
+        on_followup_acked=hub.broadcast_task_followup_acked,
+        on_watchdog_alert=hub.broadcast_task_watchdog_alert,
     )
     hub.task_runner = task_runner
 
@@ -200,6 +203,7 @@ def create_app(
     async def lifespan(_app: FastAPI):
         await backend.initialize()
         await task_runner.initialize()
+        await task_runner.start_watchdog()
         await active_mcp.start_all(hub.tool_registry)
         await active_scheduler.start()
 

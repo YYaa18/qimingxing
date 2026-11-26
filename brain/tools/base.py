@@ -68,6 +68,10 @@ class ToolExecutionContext:
         on_ui_command: Optional[UICommandSender] = None,
         usage_collector: Optional[List[LLMUsage]] = None,
         task_runner: Any = None,
+        allowed_tools: Optional[Set[str]] = None,
+        worker_mandate: Any = None,
+        on_step_start: Optional[Callable[[int, List[Dict[str, Any]]], Awaitable[None]]] = None,
+        on_step_complete: Optional[Callable[[int, ToolTraceStep], Awaitable[None]]] = None,
     ) -> None:
         self.turn_id = turn_id
         self.session_id = session_id
@@ -87,6 +91,10 @@ class ToolExecutionContext:
             usage_collector if usage_collector is not None else []
         )
         self.task_runner = task_runner
+        self.allowed_tools = allowed_tools
+        self.worker_mandate = worker_mandate
+        self.on_step_start = on_step_start
+        self.on_step_complete = on_step_complete
 
     def is_cancelled(self) -> bool:
         return self.cancel_event.is_set()

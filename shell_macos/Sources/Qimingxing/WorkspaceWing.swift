@@ -221,7 +221,7 @@ struct WorkspaceWingView: View {
     private func taskRow(_ task: WorkspaceItem) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
-                if task.status == "running" {
+                if ["running", "planning", "verifying"].contains(task.status) {
                     GlobeSpinner(size: 11, color: QMXTheme.accent)
                 } else {
                     Circle()
@@ -362,10 +362,10 @@ struct WorkspaceWingView: View {
 
     private func taskColor(_ status: String) -> Color {
         switch status {
-        case "running": return QMXTheme.accent
-        case "waiting_approval": return QMXTheme.warning
+        case "running", "planning", "verifying": return QMXTheme.accent
+        case "waiting_approval", "waiting_input": return QMXTheme.warning
         case "completed", "ready": return QMXTheme.success
-        case "failed", "cancelled", "interrupted": return QMXTheme.danger
+        case "failed", "cancelled", "interrupted", "stalled": return QMXTheme.danger
         default: return QMXTheme.textTertiary
         }
     }
@@ -373,12 +373,16 @@ struct WorkspaceWingView: View {
     private func wingStatusLabel(_ status: String) -> String {
         switch status {
         case "queued": return "排队中"
+        case "planning": return "规划中"
         case "running": return "运行中"
         case "waiting_approval": return "等待审批"
+        case "waiting_input": return "等待回复"
+        case "verifying": return "自检中"
         case "completed": return "已完成"
         case "failed": return "失败"
         case "cancelled": return "已取消"
         case "interrupted": return "已中断"
+        case "stalled": return "已停滞"
         case "waiting": return "等待回复"
         case "streaming": return "生成中"
         case "ready": return "已就绪"

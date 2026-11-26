@@ -240,6 +240,9 @@ final class SettingsViewStore: ObservableObject {
     @Published var chatSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-chat")
     @Published var visionSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-flash")
     @Published var fastSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-chat")
+    @Published var workerSlot = SlotRouteViewModel(provider: "", model: "")
+    @Published var workerFollowsChat = true
+    @Published var autoResumeTasks = true
     @Published var asrSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-asr")
     @Published var ttsSlot = SlotRouteViewModel(provider: "deepseek", model: "deepseek-tts", voice: "stella")
     @Published var privacyMode: String = "meta_only"
@@ -314,6 +317,9 @@ final class SettingsViewStore: ObservableObject {
                 imageSearchHasKey = (img["has_key"] as? Bool) ?? false
                 imageSearchMasked = (img["key_masked"] as? String) ?? ""
             }
+            if let bg = settings["background_tasks"] as? [String: Any] {
+                autoResumeTasks = (bg["auto_resume_on_restart"] as? Bool) ?? true
+            }
             if let sc = settings["shortcuts"] as? [String: Any] {
                 pttHotkey = (sc["ptt_hotkey"] as? String) ?? pttHotkey
                 chatInputHotkey = (sc["chat_input_hotkey"] as? String) ?? chatInputHotkey
@@ -369,6 +375,15 @@ final class SettingsViewStore: ObservableObject {
                 if let f = mr["fast_utility"] {
                     fastSlot = SlotRouteViewModel(provider: (f["provider"] as? String) ?? "deepseek", model: (f["model"] as? String) ?? "")
                 }
+                if let w = mr["worker"],
+                   let wp = w["provider"] as? String, !wp.isEmpty,
+                   let wm = w["model"] as? String, !wm.isEmpty {
+                    workerSlot = SlotRouteViewModel(provider: wp, model: wm)
+                    workerFollowsChat = false
+                } else {
+                    workerSlot = SlotRouteViewModel(provider: "", model: "")
+                    workerFollowsChat = true
+                }
                 if let a = mr["asr"] {
                     asrSlot = SlotRouteViewModel(provider: (a["provider"] as? String) ?? "deepseek", model: (a["model"] as? String) ?? "")
                 }
@@ -379,6 +394,9 @@ final class SettingsViewStore: ObservableObject {
             chatSlot = normalizedSlot(chatSlot, kind: .chat, providers: providers)
             visionSlot = normalizedSlot(visionSlot, kind: .vision, providers: providers)
             fastSlot = normalizedSlot(fastSlot, kind: .fast, providers: providers)
+            if !workerFollowsChat {
+                workerSlot = normalizedSlot(workerSlot, kind: .fast, providers: providers)
+            }
             asrSlot = normalizedSlot(asrSlot, kind: .asr, providers: providers)
             ttsSlot = normalizedSlot(ttsSlot, kind: .tts, providers: providers)
         }
@@ -524,6 +542,7 @@ struct SettingsRootView: View {
         if store.chatSlot.provider == pid { store.chatSlot = SlotRouteViewModel(provider: "", model: "") }
         if store.visionSlot.provider == pid { store.visionSlot = SlotRouteViewModel(provider: "", model: "") }
         if store.fastSlot.provider == pid { store.fastSlot = SlotRouteViewModel(provider: "", model: "") }
+        if store.workerSlot.provider == pid { store.workerSlot = SlotRouteViewModel(provider: "", model: "") }
         if store.asrSlot.provider == pid { store.asrSlot = SlotRouteViewModel(provider: "", model: "") }
         if store.ttsSlot.provider == pid { store.ttsSlot = SlotRouteViewModel(provider: "", model: "", voice: "stella") }
         providerPendingRemoval = nil
@@ -799,8 +818,27 @@ struct SettingsRootView: View {
                 slotRow("对话", slot: $store.chatSlot, kind: .chat, showVoice: false)
                 slotRow("看屏 / OCR", slot: $store.visionSlot, kind: .vision, showVoice: false)
                 slotRow("后台快任务", slot: $store.fastSlot, kind: .fast, showVoice: false)
+                HStack {
+                    Toggle("后台 Worker 跟随对话模型", isOn: $store.workerFollowsChat)
+                        .onChange(of: store.workerFollowsChat) { follows in
+                            if !follows && store.workerSlot.provider.isEmpty {
+                                store.workerSlot = store.chatSlot
+                            }
+                        }
+                    Spacer(minLength: 0)
+                }
+                .frame(minHeight: 40)
+                if !store.workerFollowsChat {
+                    slotRow("后台执行（Worker）", slot: $store.workerSlot, kind: .fast, showVoice: false)
+                }
                 slotRow("语音识别", slot: $store.asrSlot, kind: .asr, showVoice: false)
                 slotRow("语音合成", slot: $store.ttsSlot, kind: .tts, showVoice: true)
+            }
+
+            Section("后台任务") {
+                Toggle("重启后自动恢复中断的后台任务", isOn: $store.autoResumeTasks)
+                    .frame(minHeight: 40)
+                    .help("开启时只读/排队任务从检查点续跑；写操作中断后仍会转为等待审批，绝不静默重放。关闭时所有中断任务保持挂起。")
             }
 
             Section("DeepSeek 能力") {
@@ -1412,8 +1450,14 @@ struct SettingsRootView: View {
                 "chat": ["provider": store.chatSlot.provider, "model": store.chatSlot.model],
                 "vision_ocr": ["provider": store.visionSlot.provider, "model": store.visionSlot.model],
                 "fast_utility": ["provider": store.fastSlot.provider, "model": store.fastSlot.model],
+                "worker": store.workerFollowsChat
+                    ? ["provider": "", "model": ""]
+                    : ["provider": store.workerSlot.provider, "model": store.workerSlot.model],
                 "asr": ["provider": store.asrSlot.provider, "model": store.asrSlot.model],
                 "tts": ["provider": store.ttsSlot.provider, "model": store.ttsSlot.model, "voice": store.ttsSlot.voice]
+            ],
+            "background_tasks": [
+                "auto_resume_on_restart": store.autoResumeTasks
             ]
         ]
 

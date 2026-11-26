@@ -19,12 +19,16 @@ ScheduleKind = Literal["once", "daily", "interval"]
 TaskStatus = Literal["active", "paused", "completed", "cancelled"]
 BackgroundTaskStatus = Literal[
     "queued",
+    "planning",
     "running",
     "waiting_approval",
+    "waiting_input",
+    "verifying",
     "completed",
     "failed",
     "cancelled",
     "interrupted",
+    "stalled",
 ]
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_.\-]+")
@@ -420,6 +424,32 @@ class BackgroundTaskRecord:
     artifact_path: str = ""
     error_message: str = ""
     slot_used: str = "bg_task"
+    worker_session_id: str = ""
+    origin: str = "explicit_user"
+    mandate: Dict[str, Any] = field(default_factory=dict)
+    checkpoint: Dict[str, Any] = field(default_factory=dict)
+    result_refs: List[str] = field(default_factory=list)
+    watchdog_state: Dict[str, Any] = field(default_factory=dict)
+    last_heartbeat_at: float = 0.0
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+
+
+@dataclass
+class TaskInboxRecord:
+    id: int
+    task_id: str
+    sender: str
+    content: str
+    created_at: float
+    consumed_at: Optional[float] = None
+
+
+@dataclass
+class ResourceLockRecord:
+    resource_key: str
+    task_id: str
+    mode: str
+    acquired_at: float
+    lease_expires_at: float

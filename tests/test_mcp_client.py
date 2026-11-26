@@ -228,6 +228,9 @@ def test_mcp_hub_e2e_safe_and_confirm_approval_with_secret_redaction(tmp_path: P
     )
 
     app = create_app(config=cfg, llm_router=router, mcp_manager=mgr)
+    # MCP tools are Worker-only in production (Router prefix isolation).
+    # This e2e test explicitly opts them into the Router surface.
+    app.state.hub.router_include_mcp = True
 
     def _recv_until(ws, t: str) -> Dict[str, Any]:
         while True:

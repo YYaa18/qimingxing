@@ -124,6 +124,9 @@ class ModelRoutingConfig:
     fast_utility: SlotRouteConfig = field(
         default_factory=lambda: SlotRouteConfig(provider="deepseek", model="deepseek-chat")
     )
+    worker: SlotRouteConfig = field(
+        default_factory=lambda: SlotRouteConfig(provider="", model="")
+    )
     asr: SlotRouteConfig = field(
         default_factory=lambda: SlotRouteConfig(provider="deepseek", model="deepseek-asr")
     )
@@ -441,6 +444,13 @@ class BackgroundTaskConfig:
     max_concurrency: int = 2
     max_steps: int = 12
     timeout_sec: int = 300
+    auto_resume_on_restart: bool = True
+    # Two-level Semantic Watchdog. Rule screening costs zero tokens; only a
+    # rule hit calls the fast utility slot for a semantic verdict.
+    watchdog_enabled: bool = True
+    watchdog_interval_sec: int = 30
+    watchdog_stall_sec: int = 90
+    watchdog_max_nudges: int = 2
 
 
 @dataclass
@@ -600,6 +610,10 @@ class AppConfig:
     def resolve_slot_profile(self, slot: str) -> ProfileConfig:
         """Resolve a capability slot (`chat`, `vision_ocr`, `fast_utility`, `asr`, `tts`) to a ProfileConfig."""
         slot_clean = (slot or "chat").strip().lower()
+        if slot_clean == "worker":
+            route = getattr(self.model_routing, "worker", None)
+            if route is None or not route.provider or not route.model:
+                return self.resolve_slot_profile("chat")
         if not self.has_explicit_routing:
             if slot_clean == "fast_utility":
                 cand = self.profiles.get(self.memory.extraction.profile) or self.profiles.get(self.default_profile)
@@ -1104,6 +1118,11 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         max_concurrency=max(1, int(bg_raw.get("max_concurrency", 2))),
         max_steps=max(1, int(bg_raw.get("max_steps", 12))),
         timeout_sec=max(10, int(bg_raw.get("timeout_sec", 300))),
+        auto_resume_on_restart=bool(bg_raw.get("auto_resume_on_restart", True)),
+        watchdog_enabled=bool(bg_raw.get("watchdog_enabled", True)),
+        watchdog_interval_sec=max(5, int(bg_raw.get("watchdog_interval_sec", 30))),
+        watchdog_stall_sec=max(30, int(bg_raw.get("watchdog_stall_sec", 90))),
+        watchdog_max_nudges=max(0, min(5, int(bg_raw.get("watchdog_max_nudges", 2)))),
     )
 
     shortcuts_raw = raw.get("shortcuts") or {}
@@ -1171,6 +1190,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         chat=_parse_slot("chat", "deepseek", "deepseek-chat"),
         vision_ocr=_parse_slot("vision_ocr", "deepseek", "deepseek-flash"),
         fast_utility=_parse_slot("fast_utility", "deepseek", "deepseek-chat"),
+        worker=_parse_slot("worker", "", ""),
         asr=_parse_slot("asr", str(audio.asr.provider or "deepseek"), str(audio.asr.model or "deepseek-asr")),
         tts=_parse_slot("tts", str(audio.tts.provider or "deepseek"), str(audio.tts.model or "deepseek-tts"), str(audio.tts.voice or "stella")),
     )
@@ -1366,6 +1386,11 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
             "max_concurrency": cfg.background_tasks.max_concurrency,
             "max_steps": cfg.background_tasks.max_steps,
             "timeout_sec": cfg.background_tasks.timeout_sec,
+            "auto_resume_on_restart": cfg.background_tasks.auto_resume_on_restart,
+            "watchdog_enabled": cfg.background_tasks.watchdog_enabled,
+            "watchdog_interval_sec": cfg.background_tasks.watchdog_interval_sec,
+            "watchdog_stall_sec": cfg.background_tasks.watchdog_stall_sec,
+            "watchdog_max_nudges": cfg.background_tasks.watchdog_max_nudges,
         },
         "shortcuts": {
             "ptt_hotkey": cfg.shortcuts.ptt_hotkey,
@@ -1419,6 +1444,11 @@ def get_sanitized_settings(cfg: AppConfig) -> Dict[str, Any]:
                 "provider": cfg.model_routing.fast_utility.provider,
                 "model": cfg.model_routing.fast_utility.model,
                 "extra": cfg.model_routing.fast_utility.extra,
+            },
+            "worker": {
+                "provider": cfg.model_routing.worker.provider,
+                "model": cfg.model_routing.worker.model,
+                "extra": cfg.model_routing.worker.extra,
             },
             "asr": {
                 "provider": cfg.model_routing.asr.provider,
@@ -1757,6 +1787,16 @@ def save_settings_to_yaml(
                 bg_sec["max_steps"] = max(1, int(bg_up["max_steps"]))
             if "timeout_sec" in bg_up and bg_up["timeout_sec"] is not None:
                 bg_sec["timeout_sec"] = max(10, int(bg_up["timeout_sec"]))
+            if "auto_resume_on_restart" in bg_up:
+                bg_sec["auto_resume_on_restart"] = bool(bg_up["auto_resume_on_restart"])
+            if "watchdog_enabled" in bg_up:
+                bg_sec["watchdog_enabled"] = bool(bg_up["watchdog_enabled"])
+            if "watchdog_interval_sec" in bg_up and bg_up["watchdog_interval_sec"] is not None:
+                bg_sec["watchdog_interval_sec"] = max(5, int(bg_up["watchdog_interval_sec"]))
+            if "watchdog_stall_sec" in bg_up and bg_up["watchdog_stall_sec"] is not None:
+                bg_sec["watchdog_stall_sec"] = max(30, int(bg_up["watchdog_stall_sec"]))
+            if "watchdog_max_nudges" in bg_up and bg_up["watchdog_max_nudges"] is not None:
+                bg_sec["watchdog_max_nudges"] = max(0, min(5, int(bg_up["watchdog_max_nudges"])))
 
     shortcuts_up = updates.get("shortcuts")
     if isinstance(shortcuts_up, dict):
@@ -1906,12 +1946,17 @@ def save_settings_to_yaml(
         if not isinstance(mr_raw, dict):
             mr_raw = {}
             raw["model_routing"] = mr_raw
-        for slot_k in ("chat", "vision_ocr", "fast_utility", "asr", "tts"):
+        for slot_k in ("chat", "vision_ocr", "fast_utility", "asr", "tts", "worker"):
             su = routing_up.get(slot_k)
             if not isinstance(su, dict):
                 continue
             p_id = str(su.get("provider") or "").strip()
             m_id = str(su.get("model") or "").strip()
+            if slot_k == "worker" and not p_id and not m_id:
+                # Empty worker means "follow the chat slot"; remove the override
+                # instead of preserving stale values.
+                mr_raw.pop(slot_k, None)
+                continue
             entry: Dict[str, Any] = {}
             if p_id:
                 entry["provider"] = p_id

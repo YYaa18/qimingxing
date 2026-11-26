@@ -26,11 +26,17 @@ struct BackgroundTaskItem: Identifiable, Equatable, Sendable {
     var resultSummary: String
     var artifactPath: String
     var errorMessage: String
+    var blockReason: String = ""
+    var watchdogReason: String = ""
+    var followupAck: String = ""
+    var resultRefs: [String] = []
 
     var id: String { taskId }
 
     var isActive: Bool {
-        status == "queued" || status == "running" || status == "waiting_approval"
+        status == "queued" || status == "planning" || status == "running"
+            || status == "waiting_approval" || status == "waiting_input"
+            || status == "verifying"
     }
 }
 

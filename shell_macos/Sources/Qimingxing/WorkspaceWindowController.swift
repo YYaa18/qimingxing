@@ -145,7 +145,22 @@ final class WorkspaceStore: ObservableObject {
         for task in tasks {
             let itemID = "task_\(task.taskId)"
             let existing = items.first(where: { $0.id == itemID })
-            let body = task.resultSummary.isEmpty ? task.currentStep : task.resultSummary
+            var parts: [String] = []
+            if !task.resultSummary.isEmpty {
+                parts.append(task.resultSummary)
+            } else if !task.currentStep.isEmpty {
+                parts.append(task.currentStep)
+            }
+            if !task.blockReason.isEmpty {
+                parts.append(task.blockReason)
+            }
+            if !task.followupAck.isEmpty {
+                parts.append(task.followupAck)
+            }
+            if !task.watchdogReason.isEmpty && task.blockReason != task.watchdogReason {
+                parts.append(task.watchdogReason)
+            }
+            let body = parts.joined(separator: " · ")
             if let existing,
                existing.title == task.title,
                existing.body == body,

@@ -16,6 +16,15 @@ from brain.utils import truncate_head_tail
 
 logger = logging.getLogger("qimingxing.tools.executor")
 
+# Router single-step calls that mutate macOS apps must yield to an exclusive
+# Worker mandate holding the same app lock. Read-only list/search calls do not.
+_ROUTER_APP_LOCKS = {
+    "macos_notes_create": "app:notes",
+    "macos_calendar_create": "app:calendar",
+    "macos_reminders_create": "app:reminders",
+    "macos_mail_draft": "app:mail",
+}
+
 
 @dataclass
 class ToolLoopResult:
@@ -75,6 +84,8 @@ class ToolExecutor:
                     max_tokens=max_context_tokens,
                     keep_last=2,
                 )
+            if ctx.on_step_start is not None:
+                await ctx.on_step_start(step_idx, working_messages)
 
             completion_kwargs: Dict[str, Any] = {
                 "profile_name": profile_name,
@@ -155,6 +166,34 @@ class ToolExecutor:
                     if consecutive_errors[tc.name] >= 2:
                         circuit_broken = True
                         stopped_reason = "circuit_breaker"
+                    continue
+
+                mandate_reason = None
+                if ctx.allowed_tools is not None or ctx.worker_mandate is not None:
+                    from brain.worker import validate_tool_allowed
+
+                    mandate_reason = validate_tool_allowed(
+                        tool_name=tc.name,
+                        arguments=args,
+                        mandate=ctx.worker_mandate,
+                        allowed_tools=ctx.allowed_tools,
+                    ) if ctx.worker_mandate is not None else None
+                if mandate_reason:
+                    trace_steps.append(
+                        ToolTraceStep(
+                            step=step_idx,
+                            tool_name=tc.name,
+                            arguments=args,
+                            risk_level="blocked",
+                            status="blocked",
+                            summary="超出 Worker mandate",
+                            output_preview=mandate_reason,
+                        )
+                    )
+                    working_messages.append(
+                        {"role": "tool", "tool_call_id": tc.id, "content": f"BLOCKED: {mandate_reason}"}
+                    )
+                    consecutive_errors[tc.name] = consecutive_errors.get(tc.name, 0) + 1
                     continue
 
                 risk = tool.classify_risk(args)
@@ -250,19 +289,59 @@ class ToolExecutor:
                     limit,
                 )
                 t0 = time.perf_counter()
-                try:
-                    result = await tool.execute(args, ctx)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.exception("Tool execution failed unexpectedly: tool=%s", tc.name)
-                    safe_err = ctx.config.redact_secrets(f"{type(exc).__name__}: {exc}")
-                    result = ToolResult(
-                        ok=False,
-                        output=f"工具执行发生异常: {safe_err}",
-                        summary=f"异常: {type(exc).__name__}",
-                        status="error",
-                    )
+                app_lock = None
+                app_lock_blocked = False
+                app_key = _ROUTER_APP_LOCKS.get(tc.name)
+                if (
+                    app_key
+                    and ctx.worker_mandate is None
+                    and ctx.memory_backend is not None
+                    and hasattr(ctx.memory_backend, "acquire_resource_lock")
+                ):
+                    owner = f"router:{ctx.turn_id}"
+                    acquired = False
+                    for attempt in range(5):
+                        acquired = await ctx.memory_backend.acquire_resource_lock(
+                            app_key, owner, mode="exclusive", lease_seconds=60.0
+                        )
+                        if acquired:
+                            break
+                        if attempt < 4:
+                            await asyncio.sleep(0.4)
+                    if acquired:
+                        app_lock = (ctx.memory_backend, app_key, owner)
+                    else:
+                        app_lock_blocked = True
+                        result = ToolResult(
+                            ok=False,
+                            output=(
+                                "SYSTEM_BUSY: 该系统应用正被后台 Worker 独占执行，"
+                                "请稍后重试，或使用 task_inspect 查看后台任务进展。"
+                            ),
+                            summary="应用忙，稍后重试",
+                            status="error",
+                        )
+                if not app_lock_blocked:
+                    try:
+                        result = await tool.execute(args, ctx)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.exception("Tool execution failed unexpectedly: tool=%s", tc.name)
+                        safe_err = ctx.config.redact_secrets(f"{type(exc).__name__}: {exc}")
+                        result = ToolResult(
+                            ok=False,
+                            output=f"工具执行发生异常: {safe_err}",
+                            summary=f"异常: {type(exc).__name__}",
+                            status="error",
+                        )
+                    finally:
+                        if app_lock is not None:
+                            backend, key, owner = app_lock
+                            try:
+                                await backend.release_resource_lock(key, owner)
+                            except Exception:
+                                logger.debug("Failed releasing router app lock %s", key)
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
                 if result.ok:
@@ -313,6 +392,8 @@ class ToolExecutor:
                 working_messages.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": tool_output}
                 )
+                if ctx.on_step_complete is not None:
+                    await ctx.on_step_complete(step_idx, trace_steps[-1])
                 if consecutive_errors.get(tc.name, 0) >= 2:
                     logger.warning(
                         "Circuit breaker tripped for tool=%s after 2 consecutive errors",

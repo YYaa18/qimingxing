@@ -342,7 +342,7 @@ class ModelConfigStore:
                         (pid, model_id),
                     )
 
-        for slot in ("chat", "vision_ocr", "fast_utility", "asr", "tts"):
+        for slot in ("chat", "vision_ocr", "fast_utility", "asr", "tts", "worker"):
             route = getattr(cfg.model_routing, slot, None)
             if route is None or not route.provider or not route.model:
                 continue
@@ -421,6 +421,12 @@ class ModelConfigStore:
             (provider_id, model_id),
         ).fetchone()
         if row:
+            # An explicit route to an existing model must also make it usable;
+            # seeds may have disabled legacy chat/model IDs by default.
+            conn.execute(
+                "UPDATE provider_models SET enabled=1 WHERE provider_id=? AND model_id=?",
+                (provider_id, model_id),
+            )
             return
         caps = resolve_model_capabilities(provider_id, model_id)
         self._upsert_model(conn, provider_id, model_id, model_id, caps, source="catalog")
@@ -519,7 +525,7 @@ class ModelConfigStore:
         ]
         cfg.has_explicit_routing = bool(enabled_routes)
         if not enabled_routes:
-            for slot_name in ("chat", "vision_ocr", "fast_utility", "asr", "tts"):
+            for slot_name in ("chat", "vision_ocr", "fast_utility", "asr", "tts", "worker"):
                 setattr(cfg.model_routing, slot_name, SlotRouteConfig(provider="", model=""))
         for row in enabled_routes:
             slot = str(row["slot"])

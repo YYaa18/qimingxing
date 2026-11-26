@@ -13,6 +13,7 @@ from brain.memory.models import (
     DEFAULT_MEMORY_CATEGORIES,
     BackgroundTaskRecord,
     BackgroundTaskStatus,
+    ResourceLockRecord,
     EpisodeKind,
     EpisodeStatus,
     FactStatus,
@@ -26,6 +27,7 @@ from brain.memory.models import (
     ScheduledTaskRecord,
     SessionRecord,
     SkillStatus,
+    TaskInboxRecord,
     TaskStatus,
     TaskType,
     UsageLedgerRecord,
@@ -223,10 +225,41 @@ CREATE TABLE IF NOT EXISTS background_tasks (
     artifact_path TEXT NOT NULL DEFAULT '',
     error_message TEXT NOT NULL DEFAULT '',
     slot_used TEXT NOT NULL DEFAULT 'bg_task',
+    worker_session_id TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL DEFAULT 'explicit_user',
+    mandate_json TEXT NOT NULL DEFAULT '{}',
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    result_refs_json TEXT NOT NULL DEFAULT '[]',
+    watchdog_state_json TEXT NOT NULL DEFAULT '{}',
+    last_heartbeat_at REAL NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     started_at REAL NULL,
     finished_at REAL NULL
 );
+
+CREATE TABLE IF NOT EXISTS task_inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    consumed_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_inbox_pending
+    ON task_inbox(task_id, consumed_at);
+
+CREATE TABLE IF NOT EXISTS resource_locks (
+    resource_key TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    acquired_at REAL NOT NULL,
+    lease_expires_at REAL NOT NULL,
+    PRIMARY KEY (resource_key, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_locks_expiry
+    ON resource_locks(lease_expires_at);
 
 CREATE INDEX IF NOT EXISTS idx_bg_tasks_status_created
     ON background_tasks(status, created_at DESC);
@@ -293,6 +326,22 @@ class SQLiteMemoryStore(MemoryBackend):
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN media_json TEXT NOT NULL DEFAULT '[]'"
                     )
+            bg_cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(background_tasks)").fetchall()
+            }
+            bg_additions = {
+                "worker_session_id": "TEXT NOT NULL DEFAULT ''",
+                "origin": "TEXT NOT NULL DEFAULT 'explicit_user'",
+                "mandate_json": "TEXT NOT NULL DEFAULT '{}'",
+                "checkpoint_json": "TEXT NOT NULL DEFAULT '{}'",
+                "result_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+                "watchdog_state_json": "TEXT NOT NULL DEFAULT '{}'",
+                "last_heartbeat_at": "REAL NOT NULL DEFAULT 0",
+            }
+            for col, decl in bg_additions.items():
+                if col not in bg_cols:
+                    conn.execute(f"ALTER TABLE background_tasks ADD COLUMN {col} {decl}")
             for cat in DEFAULT_MEMORY_CATEGORIES:
                 conn.execute(
                     """
@@ -1433,8 +1482,11 @@ class SQLiteMemoryStore(MemoryBackend):
                 INSERT INTO background_tasks (
                     task_id, title, goal_prompt, source_session_id, status,
                     progress_pct, current_step, result_summary, artifact_path,
-                    error_message, slot_used, created_at, started_at, finished_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    error_message, slot_used, worker_session_id, origin,
+                    mandate_json, checkpoint_json, result_refs_json,
+                    watchdog_state_json, last_heartbeat_at, created_at,
+                    started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.task_id,
@@ -1448,6 +1500,13 @@ class SQLiteMemoryStore(MemoryBackend):
                     task.artifact_path,
                     task.error_message,
                     task.slot_used,
+                    task.worker_session_id,
+                    task.origin,
+                    json.dumps(task.mandate, ensure_ascii=False),
+                    json.dumps(task.checkpoint, ensure_ascii=False),
+                    json.dumps(task.result_refs, ensure_ascii=False),
+                    json.dumps(task.watchdog_state, ensure_ascii=False),
+                    task.last_heartbeat_at,
                     task.created_at,
                     task.started_at,
                     task.finished_at,
@@ -1497,6 +1556,13 @@ class SQLiteMemoryStore(MemoryBackend):
         artifact_path: Optional[str] = None,
         error_message: Optional[str] = None,
         slot_used: Optional[str] = None,
+        worker_session_id: Optional[str] = None,
+        origin: Optional[str] = None,
+        mandate: Optional[Dict[str, Any]] = None,
+        checkpoint: Optional[Dict[str, Any]] = None,
+        result_refs: Optional[List[str]] = None,
+        watchdog_state: Optional[Dict[str, Any]] = None,
+        last_heartbeat_at: Optional[float] = None,
         started_at: Optional[float] = None,
         finished_at: Optional[float] = None,
     ) -> Optional[BackgroundTaskRecord]:
@@ -1522,6 +1588,13 @@ class SQLiteMemoryStore(MemoryBackend):
             )
             new_error = error_message if error_message is not None else row["error_message"]
             new_slot = slot_used if slot_used is not None else row["slot_used"]
+            new_worker = worker_session_id if worker_session_id is not None else row["worker_session_id"]
+            new_origin = origin if origin is not None else row["origin"]
+            new_mandate = json.dumps(mandate, ensure_ascii=False) if mandate is not None else row["mandate_json"]
+            new_checkpoint = json.dumps(checkpoint, ensure_ascii=False) if checkpoint is not None else row["checkpoint_json"]
+            new_refs = json.dumps(result_refs, ensure_ascii=False) if result_refs is not None else row["result_refs_json"]
+            new_watchdog = json.dumps(watchdog_state, ensure_ascii=False) if watchdog_state is not None else row["watchdog_state_json"]
+            new_heartbeat = last_heartbeat_at if last_heartbeat_at is not None else row["last_heartbeat_at"]
             new_started = started_at if started_at is not None else row["started_at"]
             new_finished = finished_at if finished_at is not None else row["finished_at"]
             conn.execute(
@@ -1529,7 +1602,9 @@ class SQLiteMemoryStore(MemoryBackend):
                 UPDATE background_tasks
                 SET status = ?, progress_pct = ?, current_step = ?, result_summary = ?,
                     artifact_path = ?, error_message = ?, slot_used = ?,
-                    started_at = ?, finished_at = ?
+                    worker_session_id = ?, origin = ?, mandate_json = ?,
+                    checkpoint_json = ?, result_refs_json = ?, watchdog_state_json = ?,
+                    last_heartbeat_at = ?, started_at = ?, finished_at = ?
                 WHERE task_id = ?
                 """,
                 (
@@ -1540,6 +1615,13 @@ class SQLiteMemoryStore(MemoryBackend):
                     new_artifact,
                     new_error,
                     new_slot,
+                    new_worker,
+                    new_origin,
+                    new_mandate,
+                    new_checkpoint,
+                    new_refs,
+                    new_watchdog,
+                    new_heartbeat,
                     new_started,
                     new_finished,
                     task_id,
@@ -1550,6 +1632,123 @@ class SQLiteMemoryStore(MemoryBackend):
                 "SELECT * FROM background_tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
             return _row_to_background_task(updated) if updated else None
+
+    async def add_task_inbox(
+        self, task_id: str, *, sender: str, content: str
+    ) -> TaskInboxRecord:
+        async with self._lock:
+            conn = self._ensure_conn()
+            now = time.time()
+            cur = conn.execute(
+                "INSERT INTO task_inbox(task_id, sender, content, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, sender, content, now),
+            )
+            conn.commit()
+            return TaskInboxRecord(
+                id=int(cur.lastrowid), task_id=task_id, sender=sender,
+                content=content, created_at=now,
+            )
+
+    async def consume_task_inbox(self, task_id: str) -> List[TaskInboxRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            rows = conn.execute(
+                "SELECT * FROM task_inbox WHERE task_id = ? AND consumed_at IS NULL ORDER BY id ASC",
+                (task_id,),
+            ).fetchall()
+            if not rows:
+                return []
+            now = time.time()
+            conn.executemany(
+                "UPDATE task_inbox SET consumed_at = ? WHERE id = ?",
+                [(now, int(row["id"])) for row in rows],
+            )
+            conn.commit()
+            return [
+                TaskInboxRecord(
+                    id=int(row["id"]), task_id=str(row["task_id"]),
+                    sender=str(row["sender"]), content=str(row["content"]),
+                    created_at=float(row["created_at"]), consumed_at=now,
+                )
+                for row in rows
+            ]
+
+    async def acquire_resource_lock(
+        self,
+        resource_key: str,
+        task_id: str,
+        *,
+        mode: str = "exclusive",
+        lease_seconds: float = 120.0,
+    ) -> bool:
+        async with self._lock:
+            conn = self._ensure_conn()
+            now = time.time()
+            conn.execute("DELETE FROM resource_locks WHERE lease_expires_at <= ?", (now,))
+            rows = conn.execute(
+                "SELECT * FROM resource_locks WHERE resource_key = ?", (resource_key,)
+            ).fetchall()
+            for row in rows:
+                if str(row["task_id"]) == task_id:
+                    continue
+                if mode == "exclusive" or str(row["mode"]) == "exclusive":
+                    conn.commit()
+                    return False
+            conn.execute(
+                """INSERT OR REPLACE INTO resource_locks
+                   (resource_key, task_id, mode, acquired_at, lease_expires_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (resource_key, task_id, mode, now, now + max(15.0, lease_seconds)),
+            )
+            conn.commit()
+            return True
+
+    async def renew_resource_lock(
+        self, resource_key: str, task_id: str, *, lease_seconds: float = 120.0
+    ) -> bool:
+        async with self._lock:
+            conn = self._ensure_conn()
+            cur = conn.execute(
+                "UPDATE resource_locks SET lease_expires_at = ? WHERE resource_key = ? AND task_id = ?",
+                (time.time() + max(15.0, lease_seconds), resource_key, task_id),
+            )
+            conn.commit()
+            return bool(cur.rowcount)
+
+    async def release_resource_lock(self, resource_key: str, task_id: str) -> None:
+        async with self._lock:
+            conn = self._ensure_conn()
+            conn.execute(
+                "DELETE FROM resource_locks WHERE resource_key = ? AND task_id = ?",
+                (resource_key, task_id),
+            )
+            conn.commit()
+
+    async def cleanup_expired_resource_locks(self) -> int:
+        async with self._lock:
+            conn = self._ensure_conn()
+            cur = conn.execute("DELETE FROM resource_locks WHERE lease_expires_at <= ?", (time.time(),))
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    async def list_resource_locks(self, task_id: str = "") -> List[ResourceLockRecord]:
+        async with self._lock:
+            conn = self._ensure_conn()
+            if task_id:
+                rows = conn.execute(
+                    "SELECT * FROM resource_locks WHERE task_id = ? ORDER BY resource_key",
+                    (task_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM resource_locks ORDER BY resource_key").fetchall()
+            return [
+                ResourceLockRecord(
+                    resource_key=str(r["resource_key"]), task_id=str(r["task_id"]),
+                    mode=str(r["mode"]), acquired_at=float(r["acquired_at"]),
+                    lease_expires_at=float(r["lease_expires_at"]),
+                )
+                for r in rows
+            ]
 
     async def mark_unfinished_background_tasks_interrupted(
         self,
@@ -1565,7 +1764,7 @@ class SQLiteMemoryStore(MemoryBackend):
                 SET status = 'interrupted',
                     error_message = CASE WHEN error_message = '' THEN ? ELSE error_message END,
                     finished_at = COALESCE(finished_at, ?)
-                WHERE status IN ('queued', 'running', 'waiting_approval')
+                WHERE status IN ('queued', 'planning', 'running', 'waiting_approval', 'waiting_input', 'verifying')
                 """,
                 (reason, now),
             )
@@ -1952,8 +2151,11 @@ class SQLiteMemoryStore(MemoryBackend):
                             INSERT OR REPLACE INTO background_tasks (
                                 task_id, title, goal_prompt, source_session_id, status,
                                 progress_pct, current_step, result_summary, artifact_path,
-                                error_message, slot_used, created_at, started_at, finished_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                error_message, slot_used, worker_session_id, origin,
+                                mandate_json, checkpoint_json, result_refs_json,
+                                watchdog_state_json, last_heartbeat_at, created_at,
+                                started_at, finished_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["task_id"],
@@ -1967,6 +2169,13 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec.get("artifact_path", ""),
                                 rec.get("error_message", ""),
                                 rec.get("slot_used", "bg_task"),
+                                rec.get("worker_session_id", ""),
+                                rec.get("origin", "explicit_user"),
+                                rec.get("mandate_json", "{}"),
+                                rec.get("checkpoint_json", "{}"),
+                                rec.get("result_refs_json", "[]"),
+                                rec.get("watchdog_state_json", "{}"),
+                                rec.get("last_heartbeat_at", 0),
                                 rec["created_at"],
                                 rec.get("started_at"),
                                 rec.get("finished_at"),
@@ -2082,7 +2291,26 @@ def _row_to_scheduled_task(row: sqlite3.Row) -> ScheduledTaskRecord:
     )
 
 
+def _parse_json_dict(raw: Any) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_str_list(raw: Any) -> List[str]:
+    try:
+        parsed = json.loads(str(raw or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item).strip()]
+
+
 def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
+    keys = set(row.keys())
     return BackgroundTaskRecord(
         task_id=str(row["task_id"]),
         title=str(row["title"]),
@@ -2095,6 +2323,13 @@ def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
         artifact_path=str(row["artifact_path"] or ""),
         error_message=str(row["error_message"] or ""),
         slot_used=str(row["slot_used"] or "bg_task"),
+        worker_session_id=str(row["worker_session_id"] or "") if "worker_session_id" in keys else "",
+        origin=str(row["origin"] or "explicit_user") if "origin" in keys else "explicit_user",
+        mandate=_parse_json_dict(row["mandate_json"]) if "mandate_json" in keys else {},
+        checkpoint=_parse_json_dict(row["checkpoint_json"]) if "checkpoint_json" in keys else {},
+        result_refs=_parse_str_list(row["result_refs_json"]) if "result_refs_json" in keys else [],
+        watchdog_state=_parse_json_dict(row["watchdog_state_json"]) if "watchdog_state_json" in keys else {},
+        last_heartbeat_at=float(row["last_heartbeat_at"] or 0) if "last_heartbeat_at" in keys else 0.0,
         created_at=float(row["created_at"]),
         started_at=float(row["started_at"]) if row["started_at"] is not None else None,
         finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
@@ -2176,6 +2411,7 @@ def _row_to_scheduled_task(row: sqlite3.Row) -> ScheduledTaskRecord:
 
 
 def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
+    keys = set(row.keys())
     return BackgroundTaskRecord(
         task_id=str(row["task_id"]),
         title=str(row["title"]),
@@ -2188,6 +2424,13 @@ def _row_to_background_task(row: sqlite3.Row) -> BackgroundTaskRecord:
         artifact_path=str(row["artifact_path"] or ""),
         error_message=str(row["error_message"] or ""),
         slot_used=str(row["slot_used"] or "bg_task"),
+        worker_session_id=str(row["worker_session_id"] or "") if "worker_session_id" in keys else "",
+        origin=str(row["origin"] or "explicit_user") if "origin" in keys else "explicit_user",
+        mandate=_parse_json_dict(row["mandate_json"]) if "mandate_json" in keys else {},
+        checkpoint=_parse_json_dict(row["checkpoint_json"]) if "checkpoint_json" in keys else {},
+        result_refs=_parse_str_list(row["result_refs_json"]) if "result_refs_json" in keys else [],
+        watchdog_state=_parse_json_dict(row["watchdog_state_json"]) if "watchdog_state_json" in keys else {},
+        last_heartbeat_at=float(row["last_heartbeat_at"] or 0) if "last_heartbeat_at" in keys else 0.0,
         created_at=float(row["created_at"]),
         started_at=float(row["started_at"]) if row["started_at"] is not None else None,
         finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,

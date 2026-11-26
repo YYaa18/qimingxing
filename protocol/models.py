@@ -449,6 +449,28 @@ class TaskStatusPayload(ProtocolModel):
     error_message: str = ""
 
 
+class TaskStateChangedPayload(ProtocolModel):
+    task_id: str
+    title: str = ""
+    status: str
+    current_step: str = ""
+    progress_pct: int = 0
+    block_reason: str = ""
+    result_refs: List[str] = Field(default_factory=list)
+
+
+class TaskFollowupAckedPayload(ProtocolModel):
+    task_id: str
+    accepted: bool = True
+    message: str = ""
+
+
+class TaskWatchdogAlertPayload(ProtocolModel):
+    task_id: str
+    action: str
+    reason: str = ""
+
+
 class UICommandPayload(ProtocolModel):
     command_id: str
     target: Literal["avatar", "shell", "senses", "all"]
@@ -532,6 +554,9 @@ PAYLOAD_REGISTRY: Dict[str, Type[BaseModel]] = {
     "tool.approval_resolved": ToolApprovalResolvedPayload,
     "avatar.state": AvatarStatePayload,
     "task.status": TaskStatusPayload,
+    "task.state_changed": TaskStateChangedPayload,
+    "task.followup_acked": TaskFollowupAckedPayload,
+    "task.watchdog_alert": TaskWatchdogAlertPayload,
     "ui.command": UICommandPayload,
     "ui.command_result": UICommandResultPayload,
     "ui.state": UIStatePayload,

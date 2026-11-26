@@ -120,6 +120,15 @@
     "task.status": {
       "$ref": "#/$defs/TaskStatusPayload"
     },
+    "task.state_changed": {
+      "$ref": "#/$defs/TaskStateChangedPayload"
+    },
+    "task.followup_acked": {
+      "$ref": "#/$defs/TaskFollowupAckedPayload"
+    },
+    "task.watchdog_alert": {
+      "$ref": "#/$defs/TaskWatchdogAlertPayload"
+    },
     "ui.command": {
       "$ref": "#/$defs/UICommandPayload"
     },
@@ -1561,6 +1570,74 @@
       "title": "SystemWelcomePayload",
       "type": "object"
     },
+    "TaskFollowupAckedPayload": {
+      "properties": {
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "accepted": {
+          "default": true,
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "message": {
+          "default": "",
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "title": "TaskFollowupAckedPayload",
+      "type": "object"
+    },
+    "TaskStateChangedPayload": {
+      "properties": {
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "current_step": {
+          "default": "",
+          "title": "Current Step",
+          "type": "string"
+        },
+        "progress_pct": {
+          "default": 0,
+          "title": "Progress Pct",
+          "type": "integer"
+        },
+        "block_reason": {
+          "default": "",
+          "title": "Block Reason",
+          "type": "string"
+        },
+        "result_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Result Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "task_id",
+        "status"
+      ],
+      "title": "TaskStateChangedPayload",
+      "type": "object"
+    },
     "TaskStatusPayload": {
       "properties": {
         "task_id": {
@@ -1612,6 +1689,29 @@
         "status"
       ],
       "title": "TaskStatusPayload",
+      "type": "object"
+    },
+    "TaskWatchdogAlertPayload": {
+      "properties": {
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "action"
+      ],
+      "title": "TaskWatchdogAlertPayload",
       "type": "object"
     },
     "ToolApprovalRequestPayload": {

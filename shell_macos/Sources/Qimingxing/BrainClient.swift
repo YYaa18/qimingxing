@@ -25,6 +25,8 @@ final class BrainClient: ObservableObject {
     @Published var errorBannerText: String = ""
 
     @Published var backgroundTasks: [BackgroundTaskItem] = []
+    @Published var taskFollowupAcks: [String: String] = [:]
+    @Published var taskWatchdogAlerts: [String: String] = [:]
     @Published var pendingApprovals: [PendingApprovalItem] = []
     @Published var artifactCapsules: [ArtifactCapsuleItem] = []
 
@@ -362,20 +364,66 @@ final class BrainClient: ObservableObject {
 
         case "task.status":
             if let taskId = payload["task_id"] as? String, !taskId.isEmpty {
+                let existing = backgroundTasks.first(where: { $0.taskId == taskId })
                 let item = BackgroundTaskItem(
                     taskId: taskId,
-                    title: (payload["title"] as? String) ?? taskId,
+                    title: (payload["title"] as? String) ?? existing?.title ?? taskId,
                     status: (payload["status"] as? String) ?? "queued",
                     progressPct: (payload["progress_pct"] as? Int) ?? 0,
                     currentStep: (payload["current_step"] as? String) ?? "",
-                    resultSummary: (payload["result_summary"] as? String) ?? "",
-                    artifactPath: (payload["artifact_path"] as? String) ?? "",
-                    errorMessage: (payload["error_message"] as? String) ?? ""
+                    resultSummary: (payload["result_summary"] as? String) ?? existing?.resultSummary ?? "",
+                    artifactPath: (payload["artifact_path"] as? String) ?? existing?.artifactPath ?? "",
+                    errorMessage: (payload["error_message"] as? String) ?? existing?.errorMessage ?? "",
+                    blockReason: existing?.blockReason ?? "",
+                    watchdogReason: existing?.watchdogReason ?? taskWatchdogAlerts[taskId] ?? "",
+                    followupAck: existing?.followupAck ?? taskFollowupAcks[taskId] ?? "",
+                    resultRefs: existing?.resultRefs ?? []
                 )
+                upsertBackgroundTask(item)
+            }
+
+        case "task.state_changed":
+            if let taskId = payload["task_id"] as? String, !taskId.isEmpty {
+                let existing = backgroundTasks.first(where: { $0.taskId == taskId })
+                let item = BackgroundTaskItem(
+                    taskId: taskId,
+                    title: (payload["title"] as? String) ?? existing?.title ?? taskId,
+                    status: (payload["status"] as? String) ?? existing?.status ?? "queued",
+                    progressPct: (payload["progress_pct"] as? Int) ?? existing?.progressPct ?? 0,
+                    currentStep: (payload["current_step"] as? String) ?? existing?.currentStep ?? "",
+                    resultSummary: existing?.resultSummary ?? "",
+                    artifactPath: existing?.artifactPath ?? "",
+                    errorMessage: existing?.errorMessage ?? "",
+                    blockReason: (payload["block_reason"] as? String) ?? "",
+                    watchdogReason: existing?.watchdogReason ?? "",
+                    followupAck: existing?.followupAck ?? "",
+                    resultRefs: (payload["result_refs"] as? [String]) ?? existing?.resultRefs ?? []
+                )
+                upsertBackgroundTask(item)
+            }
+
+        case "task.followup_acked":
+            if let taskId = payload["task_id"] as? String, !taskId.isEmpty,
+               let message = payload["message"] as? String, !message.isEmpty {
+                taskFollowupAcks[taskId] = message
                 if let idx = backgroundTasks.firstIndex(where: { $0.taskId == taskId }) {
-                    backgroundTasks[idx] = item
-                } else {
-                    backgroundTasks.insert(item, at: 0)
+                    backgroundTasks[idx].followupAck = message
+                }
+            }
+
+        case "task.watchdog_alert":
+            if let taskId = payload["task_id"] as? String, !taskId.isEmpty {
+                let action = (payload["action"] as? String) ?? "nudge"
+                let reason = (payload["reason"] as? String) ?? ""
+                taskWatchdogAlerts[taskId] = reason
+                if let idx = backgroundTasks.firstIndex(where: { $0.taskId == taskId }) {
+                    backgroundTasks[idx].watchdogReason = reason
+                    backgroundTasks[idx].blockReason = reason
+                    if action == "abort" {
+                        backgroundTasks[idx].status = "failed"
+                    } else if action == "escalate" {
+                        backgroundTasks[idx].status = "waiting_input"
+                    }
                 }
             }
 
@@ -618,6 +666,14 @@ final class BrainClient: ObservableObject {
             messages.append(
                 ChatEntry(id: UUID().uuidString, turnId: turnId, isUser: false, meta: "启明星", text: delta, isStreaming: true)
             )
+        }
+    }
+
+    private func upsertBackgroundTask(_ item: BackgroundTaskItem) {
+        if let idx = backgroundTasks.firstIndex(where: { $0.taskId == item.taskId }) {
+            backgroundTasks[idx] = item
+        } else {
+            backgroundTasks.insert(item, at: 0)
         }
     }
 

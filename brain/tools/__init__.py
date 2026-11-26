@@ -39,6 +39,12 @@ from brain.tools.macos_apps import (
 from brain.tools.mcp_client import MCPClientManager, MCPServerStatus, MCPToolAdapter
 from brain.tools.mcp_oauth import FileTokenStorage, MCPOAuthCoordinator
 from brain.tools.registry import ToolRegistry
+from brain.tools.orchestration_tools import (
+    TaskCancelTool,
+    TaskDispatchTool,
+    TaskFollowupTool,
+    TaskInspectTool,
+)
 from brain.tools.scheduler_tool import CancelTaskTool, ListTasksTool, ScheduleTaskTool
 from brain.tools.shell_tool import ShellTool
 from brain.tools.ui_control import OpenQimingxingUITool
@@ -89,6 +95,10 @@ def build_default_tool_registry(
         registry.register(BgTaskListTool())
         registry.register(BgTaskCancelTool())
         registry.register(BgTaskInspectTool())
+        registry.register(TaskDispatchTool())
+        registry.register(TaskFollowupTool())
+        registry.register(TaskInspectTool())
+        registry.register(TaskCancelTool())
     registry.register(MacOSNotesSearchTool())
     registry.register(MacOSNotesCreateTool())
     registry.register(MacOSCalendarListTool())
@@ -115,6 +125,10 @@ __all__ = [
     "FileTokenStorage",
     "ImageSearchTool",
     "InboxScanTool",
+    "TaskCancelTool",
+    "TaskDispatchTool",
+    "TaskFollowupTool",
+    "TaskInspectTool",
     "ListTasksTool",
     "MCPClientManager",
     "MCPOAuthCoordinator",
