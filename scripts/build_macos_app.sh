@@ -28,6 +28,7 @@ Usage: scripts/build_macos_app.sh [--install] [--dmg] [--with-godot]
   --install     Install built Qimingxing.app to /Applications/Qimingxing.app
   --dmg         Create distributable drag-and-drop DMG in dist/
   --with-godot  Optionally bundle Godot.app & body_godot/ (disabled by default in v1.0.1)
+  Env QMX_CODESIGN_IDENTITY  Optional codesign identity (default: "Qimingxing Local Code Signing" if trusted, else ad-hoc)
 EOF
       exit 0
       ;;
@@ -275,15 +276,30 @@ if (( WITH_GODOT == 1 )) && [[ -n "${GODOT_APP_SRC}" ]]; then
   cp -R "${GODOT_APP_SRC}" "${APP_BUNDLE}/Contents/Resources/Godot.app"
 fi
 
-# 7. Strip quarantine/resource forks & ad-hoc codesign
+# 7. Strip quarantine/resource forks and sign
 echo "🧹 清理 Python 字节码缓存（避免首次运行破坏签名）..."
 find "${APP_BUNDLE}" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "${APP_BUNDLE}" -name "*.pyc" -type f -delete 2>/dev/null || true
 
-echo "🔏 清理扩展属性并执行本地 Ad-hoc 签名..."
+echo "🔏 清理扩展属性并执行本地签名..."
 xattr -cr "${APP_BUNDLE}" || true
-codesign --force --deep --sign - "${APP_BUNDLE}"
-codesign --verify --verbose=2 "${APP_BUNDLE}"
+CODESIGN_IDENTITY="${QMX_CODESIGN_IDENTITY:-Qimingxing Local Code Signing}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "\"${CODESIGN_IDENTITY}\""; then
+  echo "   Signing identity: ${CODESIGN_IDENTITY}"
+  # --deep does not reliably sign arbitrary Mach-O files inside the embedded
+  # Python runtime. Sign every nested Mach-O explicitly so TCC sees one stable
+  # code-signing identity for the app and its Python helpers.
+  while IFS= read -r -d '' candidate; do
+    if file "${candidate}" | grep -q "Mach-O"; then
+      codesign --force --timestamp=none --sign "${CODESIGN_IDENTITY}" "${candidate}" >/dev/null
+    fi
+  done < <(find "${APP_BUNDLE}/Contents" -type f -print0)
+else
+  echo "   ⚠️ 未找到签名身份 \"${CODESIGN_IDENTITY}\"，回退 ad-hoc（TCC 可能在重建后重置）"
+  CODESIGN_IDENTITY="-"
+fi
+codesign --force --deep --timestamp=none --sign "${CODESIGN_IDENTITY}" "${APP_BUNDLE}"
+codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
 
 echo "✅ 构建完成: ${APP_BUNDLE} ($(du -sh "${APP_BUNDLE}" | awk '{print $1}'))"
 
