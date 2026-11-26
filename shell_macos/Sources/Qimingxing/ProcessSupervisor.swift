@@ -115,6 +115,10 @@ final class ProcessSupervisor: ObservableObject {
         let alreadyHealthy = await checkBrainHealth()
         if !alreadyHealthy {
             launchBrain()
+            // Senses retries its WS connection on its own; starting it now
+            // overlaps its cold import with Brain's Python startup instead of
+            // adding them serially.
+            launchSenses()
             let healthy = await waitForBrainHealthy(timeoutSeconds: 15.0)
             if !healthy {
                 lastFatalError = "Brain 后端未能在 15 秒内启动就绪。"
@@ -126,9 +130,9 @@ final class ProcessSupervisor: ObservableObject {
             }
         } else {
             brainRunning = true
+            launchSenses()
         }
 
-        launchSenses()
         onReady()
     }
 
@@ -324,7 +328,8 @@ final class ProcessSupervisor: ObservableObject {
     }
 
     private func waitForBrainHealthy(timeoutSeconds: TimeInterval) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        let started = Date()
+        let deadline = started.addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             if await checkBrainHealth() {
                 brainRunning = true
@@ -333,7 +338,11 @@ final class ProcessSupervisor: ObservableObject {
             if let p = brainProcess, !p.isRunning {
                 return false
             }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            // Poll fast during the expected cold-start window, then back off.
+            let interval: UInt64 = Date().timeIntervalSince(started) < 2.0
+                ? 50_000_000
+                : 250_000_000
+            try? await Task.sleep(nanoseconds: interval)
         }
         return false
     }
