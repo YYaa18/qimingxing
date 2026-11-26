@@ -336,6 +336,7 @@ class Hub:
         self._orphaned_conns: Dict[str, ClientConnection] = {}
         self._conn_aliases: Dict[str, ClientConnection] = {}
         self._turn_cancel_events: Dict[str, asyncio.Event] = {}
+        self._turn_end_sent: Set[str] = set()
         self._active_audio_inputs: Dict[str, _AudioInputBuffer] = {}
         self._latest_audio_turn_by_client: Dict[str, str] = {}
         self._tts_tasks: Dict[str, asyncio.Task[None]] = {}
@@ -884,6 +885,10 @@ class Hub:
         if target_turn_id and old_turn_id and target_turn_id != old_turn_id:
             return
 
+        # Capture this before cancelling: the task's finally block discards the
+        # marker, but we must not emit a second turn_end for a turn that has
+        # already completed (only its audio was still playing).
+        end_already_sent = bool(old_turn_id and old_turn_id in self._turn_end_sent)
         logger.info("Cancelling active turn task turn_id=%s", old_turn_id)
         if old_turn_id and old_turn_id in self._turn_cancel_events:
             self._turn_cancel_events[old_turn_id].set()
@@ -901,7 +906,7 @@ class Hub:
                 conn.active_task = None
                 conn.active_turn_id = None
 
-        if notify and old_turn_id:
+        if notify and old_turn_id and not end_already_sent:
             await conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -1180,6 +1185,12 @@ class Hub:
                 self.tool_registry.register(ImageSearchTool(fresh_cfg.tools.image_search))
         elif image_tool is not None:
             self.tool_registry.unregister("web_image_search")
+            close = getattr(image_tool, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    logger.debug("Failed closing disabled image search tool", exc_info=True)
         self.router_include_mcp = False
         self.router_tool_registry = build_router_registry(
             self.tool_registry,
@@ -2103,6 +2114,7 @@ class Hub:
         # tiny chunks; one WS frame + one SwiftUI publish per chunk is wasteful.
         text_send_buffer: List[str] = []
         text_flush_task: Optional[asyncio.Task[None]] = None
+        text_flush_event = asyncio.Event()
         last_text_flush_at = 0.0
 
         async def _flush_text_delta_buffer() -> None:
@@ -2127,12 +2139,15 @@ class Hub:
             nonlocal text_flush_task
             try:
                 while text_send_buffer:
-                    wait = max(0.0, 0.04 - (time.monotonic() - last_text_flush_at))
-                    if wait > 0:
-                        await asyncio.sleep(wait)
+                    try:
+                        await asyncio.wait_for(text_flush_event.wait(), timeout=0.04)
+                    except asyncio.TimeoutError:
+                        pass
+                    text_flush_event.clear()
                     await _flush_text_delta_buffer()
             finally:
                 text_flush_task = None
+                text_flush_event.clear()
 
         async def _queue_text_delta(delta: str) -> None:
             nonlocal text_flush_task
@@ -2151,6 +2166,9 @@ class Hub:
             nonlocal text_flush_task
             task = text_flush_task
             if task is not None and not task.done():
+                # Wake the 40ms sleeper immediately instead of waiting for the
+                # timer to expire at the end of a turn.
+                text_flush_event.set()
                 try:
                     await task
                 except asyncio.CancelledError:
@@ -2529,6 +2547,7 @@ class Hub:
                         conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
                         collected_cards=collected_cards,
                         on_text_delta=_queue_text_delta,
+                        flush_pending_text=_drain_text_delta_buffer,
                     )
 
                 async def _on_status(
@@ -2538,6 +2557,9 @@ class Hub:
                     step: Optional[int],
                     max_steps: Optional[int],
                 ) -> None:
+                    # Keep textual order: tool status must not overtake text
+                    # that is still sitting in the 40ms coalescing buffer.
+                    await _drain_text_delta_buffer()
                     await conn.send_envelope(
                         make_envelope(
                             "brain",
@@ -2603,6 +2625,7 @@ class Hub:
                     details: Dict[str, Any],
                     timeout_sec: int,
                 ) -> tuple[bool, bool]:
+                    await _drain_text_delta_buffer()
                     return await self._request_tool_approval(
                         conn=conn,
                         turn_id=turn_id,
@@ -2617,6 +2640,7 @@ class Hub:
                     action: str,
                     args: Dict[str, Any],
                 ) -> tuple[bool, str]:
+                    await _drain_text_delta_buffer()
                     return await self._send_shell_ui_action(action, args)
 
                 async def _on_ask_user(
@@ -2624,6 +2648,7 @@ class Hub:
                     options: List[str],
                     timeout_sec: int,
                 ) -> Optional[str]:
+                    await _drain_text_delta_buffer()
                     return await self._request_user_clarification(
                         conn=conn,
                         turn_id=turn_id,
@@ -2675,6 +2700,7 @@ class Hub:
                         conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
                         collected_cards=collected_cards,
                         on_text_delta=_queue_text_delta,
+                        flush_pending_text=_drain_text_delta_buffer,
                     )
                 if self.llm_router.last_usage is not None:
                     turn_usages.append(self.llm_router.last_usage)
@@ -2693,6 +2719,7 @@ class Hub:
                 conn, turn_id, tail_events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
                 collected_cards=collected_cards,
                 on_text_delta=_queue_text_delta,
+                flush_pending_text=_drain_text_delta_buffer,
             )
 
             if chunker is not None and tts_queue is not None:
@@ -2864,7 +2891,12 @@ class Hub:
                         conn.client_id, "assistant", assistant_reply, scene_summary=scene_summary
                     )
 
-            await _drain_text_delta_buffer()
+            try:
+                await _drain_text_delta_buffer()
+            except Exception:
+                logger.debug(
+                    "Failed flushing text deltas on error path", exc_info=True
+                )
             await self._send_with_mirrors(
                 conn,
                 make_envelope(
@@ -2874,6 +2906,7 @@ class Hub:
                     turn_id=turn_id,
                 ),
             )
+            self._turn_end_sent.add(turn_id)
             await self._send_with_mirrors(
                 conn,
                 make_envelope(
@@ -2908,7 +2941,12 @@ class Hub:
         except LLMError as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             logger.error("Turn failed with LLMError turn_id=%s code=%s", turn_id, exc.code)
-            await _drain_text_delta_buffer()
+            try:
+                await _drain_text_delta_buffer()
+            except Exception:
+                logger.debug(
+                    "Failed flushing text deltas on error path", exc_info=True
+                )
             await conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -2921,6 +2959,7 @@ class Hub:
                     turn_id=turn_id,
                 )
             )
+            self._turn_end_sent.add(turn_id)
             await conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -2940,7 +2979,12 @@ class Hub:
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             logger.exception("Unexpected error in turn_id=%s", turn_id)
-            await _drain_text_delta_buffer()
+            try:
+                await _drain_text_delta_buffer()
+            except Exception:
+                logger.debug(
+                    "Failed flushing text deltas on error path", exc_info=True
+                )
             await conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -2953,6 +2997,7 @@ class Hub:
                     turn_id=turn_id,
                 )
             )
+            self._turn_end_sent.add(turn_id)
             await conn.send_envelope(
                 make_envelope(
                     "brain",
@@ -2975,11 +3020,19 @@ class Hub:
                 task.cancel()
                 try:
                     await task
-                except asyncio.CancelledError:
+                except BaseException:
+                    pass
+            elif task is not None:
+                # Consume any exception from an already-finished flush task so
+                # asyncio does not emit "Task exception was never retrieved".
+                try:
+                    task.exception()
+                except BaseException:
                     pass
             text_flush_task = None
             text_send_buffer.clear()
             self._turn_cancel_events.pop(turn_id, None)
+            self._turn_end_sent.discard(turn_id)
             await self._cancel_tts_for_turn(turn_id)
             if artifact_id_to_burn:
                 self.artifact_store.delete(artifact_id_to_burn)
@@ -2999,9 +3052,12 @@ class Hub:
         on_spoken_delta: Optional[Any] = None,
         collected_cards: Optional[List[str]] = None,
         on_text_delta: Optional[Any] = None,
+        flush_pending_text: Optional[Any] = None,
     ) -> int:
         for ev in events:
             if isinstance(ev, EmotionEvent):
+                if flush_pending_text is not None:
+                    await flush_pending_text()
                 await self._send_with_mirrors(
                     conn,
                     make_envelope(
@@ -3033,6 +3089,8 @@ class Hub:
                         ),
                     )
             elif isinstance(ev, CardEvent):
+                if flush_pending_text is not None:
+                    await flush_pending_text()
                 if collected_cards is not None and ev.content_markdown:
                     collected_cards.append(str(ev.content_markdown))
                 actions = []

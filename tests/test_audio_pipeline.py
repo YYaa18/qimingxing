@@ -338,13 +338,13 @@ def test_hub_voice_loop_barge_in_usage_ledger_and_godot_capture_hide(tmp_path: P
             )
             # turn_end is sent before TTS finishes, so the text turn may already
             # be complete when barge-in arrives; cancellation then applies to
-            # the remaining audio. Accept either ordering for the text turn.
+            # the remaining audio. No second (cancelled) turn_end may be emitted
+            # for a turn that already completed.
             cancel_audio_end, cancel_msgs = _recv_until(body_ws, "audio.output_end")
             assert cancel_audio_end["payload"]["finish_reason"] == "cancelled"
             turn_ends = [m for m in cancel_msgs if m["type"] == "output.turn_end"]
             assert all(
-                m["payload"]["finish_reason"] in ("completed", "cancelled")
-                for m in turn_ends
+                m["payload"]["finish_reason"] == "completed" for m in turn_ends
             )
 
             # 5. Godot auto-hide handshake during screen capture
