@@ -36,6 +36,7 @@ from brain.hub import SERVER_VERSION, Hub
 from brain.intent_detector import ScreenIntentDetector
 from brain.llm_router import LLMRouter, probe_provider_connectivity
 from brain.memory import MemoryBackend, create_memory_backend
+from brain.memory.threaded import ThreadedMemoryBackend
 from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from brain.memory.extractor import MemoryExtractor
 from brain.memory.models import FeedbackRecord
@@ -130,6 +131,11 @@ def create_app(
     router = llm_router or LLMRouter(cfg)
     artifacts = artifact_store or ArtifactStore()
     backend = memory_backend or create_memory_backend(cfg.memory)
+    if memory_backend is None:
+        # Production SQLite backend runs on its own loop thread so synchronous
+        # queries never block streaming/TTS/approvals. Injected test backends
+        # stay direct (tests often inspect them synchronously).
+        backend = ThreadedMemoryBackend(backend)
     emb_provider = embedding_provider or create_embedding_provider(cfg.memory.embedding)
     retriever = MemoryRetriever(
         backend,
