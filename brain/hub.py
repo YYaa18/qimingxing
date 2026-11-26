@@ -28,6 +28,7 @@ from brain.context_builder import BuildStats, ContextBuilder
 from brain.context_store import ContextStore
 from brain.history_store import InMemorySlidingWindowStore, MemoryStore
 from brain.intent_detector import ScreenIntentDetector
+from brain.intent_resolver import build_capability_catalog, build_intent_hint
 from brain.llm_router import LLMError, LLMRouter, LLMUsage
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import NullEmbeddingProvider
@@ -2074,6 +2075,7 @@ class Hub:
         seq = 0
         collected_spoken: List[str] = []
         collected_cards: List[str] = []
+        attachment_names: List[str] = []
         artifact_id_to_burn = ""
         artifacts_to_burn: List[str] = list(attachments or [])
         extra_l3_sections: List[str] = []
@@ -2202,6 +2204,7 @@ class Hub:
                     if rec is None:
                         extra_l3_sections.append(f"【附件提醒】临时附件 {aid} 不存在或已过期清理。")
                         continue
+                    attachment_names.append(str(rec.filename or ""))
                     if rec.kind == "image":
                         loaded_att = self.artifact_store.read_bytes(aid)
                         if loaded_att is None:
@@ -2280,6 +2283,13 @@ class Hub:
             attached_manifest = self.batch_path_store.consume_for_l3()
             if attached_manifest:
                 extra_l3_sections.append(attached_manifest)
+
+            # Router-only capability routing context. Insert first so file OCR
+            # or long attachment previews cannot truncate it away.
+            extra_l3_sections.insert(0, build_capability_catalog())
+            intent_hint = build_intent_hint(user_text, attachments=attachment_names)
+            if intent_hint:
+                extra_l3_sections.insert(1, intent_hint)
 
             # L3 dynamic tail: a deliberately tiny active-task table. It must
             # never enter the stable L0/L1 prefix; details stay behind
