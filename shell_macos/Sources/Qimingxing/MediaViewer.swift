@@ -113,11 +113,22 @@ enum MediaViewerLauncher {
 }
 
 @MainActor
+final class MediaViewerWindow: NSWindow {
+    var onKeyDown: ((NSEvent) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, onKeyDown?(event) == true {
+            return
+        }
+        super.sendEvent(event)
+    }
+}
+
+@MainActor
 final class MediaViewerWindowController: NSObject, NSWindowDelegate {
     static let shared = MediaViewerWindowController()
 
-    private var window: NSWindow?
-    private var keyMonitor: Any?
+    private var window: MediaViewerWindow?
 
     var isVisible: Bool { window?.isVisible ?? false }
 
@@ -125,14 +136,13 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
         if let window {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            installKeyMonitor()
             return
         }
         let host = NSHostingController(
             rootView: MediaViewerContent(model: MediaViewerModel.shared, mode: .detached)
         )
         host.sizingOptions = []
-        let window = NSWindow(
+        let window = MediaViewerWindow(
             contentRect: NSRect(x: 0, y: 0, width: 860, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -150,32 +160,30 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
             window.center()
         }
         window.setFrameAutosaveName("QMXMediaViewerWindow")
+        window.onKeyDown = { [weak self] event in
+            self?.handleKey(event) ?? false
+        }
         self.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        installKeyMonitor()
     }
 
-    private func installKeyMonitor() {
-        guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, let window = self.window, window.isKeyWindow else { return event }
-            switch event.keyCode {
-            case 123: // left
-                MediaViewerModel.shared.selectOffset(-1)
-                return nil
-            case 124: // right
-                MediaViewerModel.shared.selectOffset(1)
-                return nil
-            case 49: // space
-                NotificationCenter.default.post(name: .qmxToggleMediaPlayback, object: nil)
-                return nil
-            case 53: // escape
-                self.close()
-                return nil
-            default:
-                return event
-            }
+    private func handleKey(_ event: NSEvent) -> Bool {
+        switch event.keyCode {
+        case 123: // left
+            MediaViewerModel.shared.selectOffset(-1)
+            return true
+        case 124: // right
+            MediaViewerModel.shared.selectOffset(1)
+            return true
+        case 49: // space
+            NotificationCenter.default.post(name: .qmxToggleMediaPlayback, object: nil)
+            return true
+        case 53: // escape
+            close()
+            return true
+        default:
+            return false
         }
     }
 
@@ -185,10 +193,6 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        if let keyMonitor {
-            NSEvent.removeMonitor(keyMonitor)
-            self.keyMonitor = nil
-        }
         NotificationCenter.default.post(name: .qmxStopMediaPlayback, object: nil)
         window = nil
     }
@@ -288,6 +292,7 @@ struct MediaViewerContent: View {
             Button("停靠") { MediaViewerLauncher.dock() }
                 .buttonStyle(.qmxSecondary)
                 .help("停靠回启明星侧翼")
+
         }
         .padding(.horizontal, 20)
         .frame(height: 58)
