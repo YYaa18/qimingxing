@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -567,3 +568,32 @@ async def test_p5_02_mcp_output_4000_char_truncation_and_secret_redaction() -> N
     assert "cfg-secret-key-xyz999" not in res.output
     assert "tok_1234567890" not in res.output
     assert "sk-abcdefgh12345678" not in res.output
+
+
+async def test_cancelled_start_all_closes_the_exit_stack() -> None:
+    closed: List[str] = []
+    started = asyncio.Event()
+
+    async def opener(srv: MCPServerConfig, stack) -> Any:
+        stack.callback(lambda: closed.append(srv.name))
+        started.set()
+        await asyncio.Event().wait()  # hang until cancelled
+
+    cfg = AppConfig(
+        mcp_servers=[
+            MCPServerConfig(
+                name="slow",
+                enabled=True,
+                transport="stdio",
+                command="sleep",
+            )
+        ]
+    )
+    reg = build_default_tool_registry(cfg)
+    mgr = MCPClientManager(cfg, transport_opener=opener)
+    task = asyncio.create_task(mgr.start_all(reg))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed == ["slow"], "cancelled MCP startup leaked its AsyncExitStack"
