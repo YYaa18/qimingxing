@@ -86,6 +86,8 @@ final class BrainClient: ObservableObject {
     func stop() {
         shouldRun = false
         reconnectTask?.cancel()
+        turnAckTask?.cancel()
+        turnAckTask = nil
         pingTask?.cancel()
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
@@ -138,6 +140,8 @@ final class BrainClient: ObservableObject {
         guard shouldRun else { return }
         phase = .offline
         isGenerating = false
+        turnAckTask?.cancel()
+        turnAckTask = nil
         reconnectTask?.cancel()
         reconnectAttempt += 1
         let delay = min(5.0, pow(2.0, Double(reconnectAttempt - 1)))
@@ -213,6 +217,7 @@ final class BrainClient: ObservableObject {
         messages.append(
             ChatEntry(id: UUID().uuidString, turnId: turnId, isUser: true, meta: "我", text: prefix + effectiveText)
         )
+        trimMessagesIfNeeded()
 
         if includeScreen && attachments.isEmpty {
             sendEnvelope(
@@ -515,11 +520,9 @@ final class BrainClient: ObservableObject {
             }
 
         case "output.turn_end":
-            isGenerating = false
-            toolStatusText = ""
-            turnAckTask?.cancel()
-            turnAckTask = nil
+            let isCurrentTurn = turnId.isEmpty || turnId == currentTurnId
             if let idx = messages.lastIndex(where: { !$0.isUser && $0.turnId == turnId }) {
+                let wasStreaming = messages[idx].isStreaming
                 messages[idx].isStreaming = false
                 if let rawSources = payload["sources"] as? [[String: Any]] {
                     messages[idx].sources = rawSources.compactMap(SourceItem.init(dict:))
@@ -527,9 +530,18 @@ final class BrainClient: ObservableObject {
                 if let rawMedia = payload["media"] as? [[String: Any]] {
                     messages[idx].media = rawMedia.compactMap(MediaItem.init(dict:))
                 }
-                if (payload["finish_reason"] as? String) == "cancelled" {
+                if (payload["finish_reason"] as? String) == "cancelled", wasStreaming {
                     messages[idx].meta += " · [已中断]"
                 }
+            }
+            // A late turn_end for a previous turn (e.g. its TTS was still
+            // playing when the next turn started) must not unlock the current
+            // turn or cancel its ack watchdog.
+            if isCurrentTurn {
+                isGenerating = false
+                toolStatusText = ""
+                turnAckTask?.cancel()
+                turnAckTask = nil
             }
 
         case "output.tool_status":
@@ -714,6 +726,7 @@ final class BrainClient: ObservableObject {
         messages.append(
             ChatEntry(id: UUID().uuidString, turnId: turnId, isUser: false, meta: meta, text: "", isStreaming: true)
         )
+        trimMessagesIfNeeded()
     }
 
     private func appendDelta(turnId: String, delta: String) {
@@ -724,9 +737,13 @@ final class BrainClient: ObservableObject {
                 ChatEntry(id: UUID().uuidString, turnId: turnId, isUser: false, meta: "启明星", text: delta, isStreaming: true)
             )
         }
-        // The live panel only needs the recent tail; workspaces keep the full
-        // history. Bounding this array prevents per-update cost from growing
-        // without limit across multi-day sessions.
+        trimMessagesIfNeeded()
+    }
+
+    /// The live panel only needs the recent tail; workspaces keep the full
+    /// history. Bounding this array prevents per-update cost from growing
+    /// without limit across multi-day sessions.
+    private func trimMessagesIfNeeded() {
         let maxInMemoryMessages = 400
         if messages.count > maxInMemoryMessages {
             messages.removeFirst(messages.count - maxInMemoryMessages)

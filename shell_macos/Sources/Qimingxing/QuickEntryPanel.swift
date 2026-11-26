@@ -1242,18 +1242,23 @@ struct QuickEntryRootView: View {
     /// 60Hz; recomputing this from the whole history per frame was the main
     /// streaming jank source in long sessions.
     private var latestTurn: LiveTurn? {
-        cachedLatestTurn
+        if let cachedLatestTurn {
+            return cachedLatestTurn
+        }
+        // Headless snapshot hosts never run onReceive/onAppear; derive directly.
+        if QMXTheme.isHeadlessDump {
+            return Self.makeLatestTurn(from: brainClient.messages)
+        }
+        return nil
     }
 
     private static func makeLatestTurn(from messages: [ChatEntry]) -> LiveTurn? {
         guard let last = messages.last else { return nil }
         let turnId = last.turnId
-        var start = messages.count - 1
-        while start > 0 && messages[start - 1].turnId == turnId {
-            start -= 1
-        }
         var turn = LiveTurn(id: turnId)
-        for message in messages[start...] where message.turnId == turnId {
+        // Do not assume a turn's entries are contiguous: mirrored or reordered
+        // messages can interleave. Scan by turnId, still only for the last turn.
+        for message in messages where message.turnId == turnId {
             if message.isUser {
                 turn.prompt = message.text
             } else {
@@ -1352,10 +1357,16 @@ struct QuickEntryRootView: View {
         // The send button honors canSend, but Enter must too: without a
         // connected Brain / configured model the turn would be rejected and
         // leave the panel in a generating state.
-        guard brainClient.phase == .connected, !brainClient.profiles.isEmpty else {
-            brainClient.errorBannerText = brainClient.phase == .connected
-                ? "还没有配置可用模型，请先打开设置完成配置。"
-                : "Brain 尚未连接，请稍候或检查后端日志。"
+        guard brainClient.phase == .connected else {
+            brainClient.errorBannerText = "Brain 尚未连接，请稍候或检查后端日志。"
+            return
+        }
+        guard !brainClient.profiles.isEmpty else {
+            brainClient.errorBannerText = "还没有配置可用模型，请先打开设置完成配置。"
+            return
+        }
+        guard inputState.uploadingNames.isEmpty else {
+            brainClient.errorBannerText = "附件还在上传，请稍候再发送。"
             return
         }
         inputState.forceExpanded = true
@@ -1454,7 +1465,15 @@ private struct AnswerScrollView: View {
                             lastAutoScrollAt = now
                             proxy.scrollTo("answerBottom", anchor: .bottom)
                         },
-                        onFinish: onFinish
+                        onFinish: {
+                            // Ensure the last content lands at the bottom even
+                            // if the 30Hz throttle or reduce-motion path
+                            // skipped the final onTick.
+                            if shouldAutoScroll {
+                                proxy.scrollTo("answerBottom", anchor: .bottom)
+                            }
+                            onFinish()
+                        }
                     )
                     .id(turnID)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1529,6 +1548,13 @@ private struct TypewriterText: View {
         self.onFinish = onFinish
         // Parsing in init would run on every parent body evaluation, even when
         // State discards the value. Parse lazily in onAppear/onChange instead.
+        // Headless snapshots never run onAppear, so seed synchronously there.
+        if QMXTheme.isHeadlessDump {
+            let parsed = Self.parse(text)
+            _blocks = State(initialValue: parsed)
+            _visibleCount = State(initialValue: parsed.reduce(0) { $0 + $1.text.count })
+            _pendingParseText = State(initialValue: text)
+        }
     }
 
     var body: some View {
@@ -1647,19 +1673,27 @@ private struct TypewriterText: View {
         blocks.reduce(0) { $0 + $1.text.count }
     }
 
+    private func finishRevealIfCaughtUp() {
+        // If a throttled parse is still pending, the visible blocks are stale;
+        // ending the reveal now would mark the answer complete before the last
+        // delta is actually rendered.
+        guard parseTask == nil, pendingParseText == text else { return }
+        onFinish()
+    }
+
     private func start() {
         if reduceMotion || QMXTheme.isHeadlessDump {
             revealTask?.cancel()
             revealTask = nil
             visibleCount = totalCount
-            onFinish()
+            finishRevealIfCaughtUp()
             return
         }
         if visibleCount > totalCount {
             visibleCount = 0
         }
         if visibleCount >= totalCount {
-            onFinish()
+            finishRevealIfCaughtUp()
             return
         }
         guard revealTask == nil else { return }
@@ -1678,7 +1712,7 @@ private struct TypewriterText: View {
                 onTick()
             }
             revealTask = nil
-            onFinish()
+            finishRevealIfCaughtUp()
         }
     }
 
