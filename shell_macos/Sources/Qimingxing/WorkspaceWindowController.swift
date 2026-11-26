@@ -26,7 +26,7 @@ enum WorkspaceKind: String, Codable, CaseIterable {
     }
 }
 
-struct WorkspaceItem: Identifiable, Codable, Equatable {
+struct WorkspaceItem: Identifiable, Codable, Equatable, Sendable {
     var id: String
     var kind: WorkspaceKind
     var title: String
@@ -53,6 +53,10 @@ final class WorkspaceStore: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var persistTask: Task<Void, Never>?
     private var hasIngestedMessages = false
+    private let persistQueue = DispatchQueue(
+        label: "com.qimingxing.workspace.persist",
+        qos: .utility
+    )
 
     init(brainClient: BrainClient) {
         self.brainClient = brainClient
@@ -262,12 +266,21 @@ final class WorkspaceStore: ObservableObject {
 
     private func persistNow() {
         guard let fileURL else { return }
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(items) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        let snapshot = items
+        // Encoding ~500 items (hundreds of KB) on the main actor caused a
+        // visible hitch at the end of long turns; a serial queue keeps writes
+        // ordered without blocking UI.
+        persistQueue.async {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let data = try? encoder.encode(snapshot) else { return }
+            try? data.write(to: fileURL, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: fileURL.path
+            )
+        }
     }
 
     private func load() {
