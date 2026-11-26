@@ -198,6 +198,15 @@ struct MediaStripView: View {
         .buttonStyle(.plain)
         .help(item.title)
         .contextMenu {
+            if item.isMarkdownTable {
+                Button("在媒体预览中查看") { openViewer(item) }
+                Button("复制表格") {
+                    _ = qmxCopyTableToPasteboard(
+                        columns: item.previewColumns,
+                        rows: item.previewRows
+                    )
+                }
+            }
             if let path = item.fileURL?.path {
                 Button("快速预览") { _ = DesktopActions().quickLook(path) }
                 Button("在访达中显示") { _ = DesktopActions().revealPath(path) }
@@ -206,6 +215,10 @@ struct MediaStripView: View {
     }
 
     private func fileIcon(_ item: MediaItem) -> NSImage {
+        if item.isMarkdownTable {
+            return NSImage(systemSymbolName: "tablecells", accessibilityDescription: "表格")
+                ?? NSImage(size: NSSize(width: 26, height: 26))
+        }
         if let path = item.fileURL?.path, FileManager.default.fileExists(atPath: path) {
             return NSWorkspace.shared.icon(forFile: path)
         }
@@ -325,7 +338,7 @@ struct MediaStripView: View {
 
     private func fileRow(_ item: MediaItem) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "doc")
+            Image(systemName: item.isMarkdownTable ? "tablecells" : "doc")
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.title)
                     .font(.system(size: 12))
@@ -336,7 +349,10 @@ struct MediaStripView: View {
                 }
             }
             Spacer()
-            if let path = item.fileURL?.path {
+            if item.isMarkdownTable {
+                Button("查看表格") { openViewer(item) }
+                    .buttonStyle(.qmxSecondary)
+            } else if let path = item.fileURL?.path {
                 Button("快速预览") { _ = DesktopActions().quickLook(path) }
                     .buttonStyle(.qmxSecondary)
             }
@@ -401,6 +417,7 @@ private struct MediaThumbnailView: View {
     }
 
     private var placeholderSymbol: String {
+        if media.isMarkdownTable { return "tablecells" }
         switch media.kind {
         case "video": return "film"
         case "audio": return "waveform"

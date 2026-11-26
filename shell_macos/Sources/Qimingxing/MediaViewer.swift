@@ -232,7 +232,7 @@ struct MediaViewerContent: View {
                 compactMetadata
             }
         }
-        .background(QMXTheme.surface.opacity(0.24))
+        .background(mode == .detached ? QMXTheme.surface : QMXTheme.surface.opacity(0.24))
     }
 
     private var pendingBanner: some View {
@@ -240,7 +240,7 @@ struct MediaViewerContent: View {
             Image(systemName: "sparkles")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(QMXTheme.accent)
-            Text("新回答包含 \(model.pendingItems.count) 张图片")
+            Text("新回答包含 \(model.pendingItems.count) 项媒体")
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(QMXTheme.textSecondary)
             Spacer(minLength: 0)
@@ -285,7 +285,7 @@ struct MediaViewerContent: View {
 
             Spacer(minLength: 0)
 
-            if let item = model.selectedItem {
+            if let item = model.selectedItem, !item.isMarkdownTable {
                 Button("快速预览") { quickLook(item) }
                     .buttonStyle(.qmxSecondary)
                     .help("打开系统 Quick Look")
@@ -411,7 +411,15 @@ struct MediaViewerContent: View {
                     Spacer(minLength: 0)
 
                     HStack(spacing: 8) {
-                        if let path = item.fileURL?.path, FileManager.default.fileExists(atPath: path) {
+                        if item.isMarkdownTable {
+                            Button("复制表格") {
+                                _ = qmxCopyTableToPasteboard(
+                                    columns: item.previewColumns,
+                                    rows: item.previewRows
+                                )
+                            }
+                            .buttonStyle(.qmxSecondary)
+                        } else if let path = item.fileURL?.path, FileManager.default.fileExists(atPath: path) {
                             Button("打开文件") { quickLook(item) }
                                 .buttonStyle(.qmxSecondary)
                             Button("在访达中显示") { _ = DesktopActions().revealPath(path) }
@@ -656,7 +664,9 @@ private struct MediaViewerFileStage: View {
     }
 
     var body: some View {
-        if path == nil {
+        if ext == "md-table" {
+            TableMediaStage(item: item)
+        } else if path == nil {
             missingFile
         } else if ext == "pdf" {
             PDFFileStage(item: item, path: path!)
@@ -850,6 +860,19 @@ private struct SpreadsheetFileStage: View {
     }
 
     private var table: some View {
+        TableGrid(columns: columns, rows: rows, monospaced: true)
+    }
+}
+
+private struct TableGrid: View {
+    let columns: [String]
+    let rows: [[String]]
+    var monospaced: Bool = false
+    var maxWidth: CGFloat = 220
+    var lineLimit: Int = 2
+    var headerLineLimit: Int = 1
+
+    var body: some View {
         ScrollView([.horizontal, .vertical]) {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
@@ -857,8 +880,8 @@ private struct SpreadsheetFileStage: View {
                         Text(column)
                             .font(.system(size: 10.5, weight: .semibold))
                             .foregroundStyle(QMXTheme.textPrimary)
-                            .lineLimit(1)
-                            .frame(minWidth: 92, maxWidth: 220, alignment: .leading)
+                            .lineLimit(headerLineLimit)
+                            .frame(minWidth: 92, maxWidth: maxWidth, alignment: .leading)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 7)
                     }
@@ -868,10 +891,10 @@ private struct SpreadsheetFileStage: View {
                     GridRow {
                         ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, _ in
                             Text(columnIndex < row.count ? row[columnIndex] : "")
-                                .font(.system(size: 10.5, design: .monospaced))
+                                .font(.system(size: 10.5, design: monospaced ? .monospaced : .default))
                                 .foregroundStyle(QMXTheme.textSecondary)
-                                .lineLimit(2)
-                                .frame(minWidth: 92, maxWidth: 220, alignment: .leading)
+                                .lineLimit(lineLimit)
+                                .frame(minWidth: 92, maxWidth: maxWidth, alignment: .leading)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 6)
                         }
@@ -882,6 +905,60 @@ private struct SpreadsheetFileStage: View {
             .padding(10)
         }
         .scrollIndicators(.visible)
+    }
+}
+
+private struct TableMediaStage: View {
+    let item: MediaItem
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "tablecells")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(QMXTheme.textSecondary)
+                Text(item.title.isEmpty ? "表格" : item.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(QMXTheme.textPrimary)
+                    .lineLimit(1)
+                if !item.summaryBadge.isEmpty {
+                    Text(item.summaryBadge)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                }
+                Spacer(minLength: 0)
+                Button("复制表格") {
+                    _ = qmxCopyTableToPasteboard(
+                        columns: item.previewColumns,
+                        rows: item.previewRows
+                    )
+                }
+                .buttonStyle(.qmxSecondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 42)
+
+            Divider().opacity(0.4)
+
+            if item.previewColumns.isEmpty || item.previewRows.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "tablecells")
+                        .font(.system(size: 26, weight: .light))
+                    Text("没有可用的表格预览")
+                        .font(.system(size: 11))
+                }
+                .foregroundStyle(QMXTheme.textTertiary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                TableGrid(
+                    columns: item.previewColumns,
+                    rows: item.previewRows,
+                    maxWidth: 260,
+                    lineLimit: 3,
+                    headerLineLimit: 2
+                )
+            }
+        }
     }
 }
 
@@ -994,6 +1071,7 @@ private struct MediaViewerThumb: View {
     }
 
     private var symbol: String {
+        if item.isMarkdownTable { return "tablecells" }
         switch item.kind {
         case "video": return "film"
         case "audio": return "waveform"
