@@ -1746,7 +1746,7 @@ private struct ChineseIMETextView: NSViewRepresentable {
         tv.allowsUndo = true
         tv.font = NSFont.systemFont(ofSize: fontSize)
         tv.textColor = .labelColor
-        tv.insertionPointColor = .labelColor
+        tv.insertionPointColor = .clear
         tv.drawsBackground = false
         tv.isEditable = true
         tv.isSelectable = true
@@ -1908,11 +1908,13 @@ private final class QMXTextView: NSTextView {
         super.didChangeText()
         needsDisplay = true
         updateVerticalInsetIfNeeded()
+        startCaretBlink()
     }
 
     override func layout() {
         super.layout()
         updateVerticalInsetIfNeeded()
+        invalidateCaret()
     }
 
     /// Single-line content sits at the optical center of the composer. Once
@@ -1933,16 +1935,154 @@ private final class QMXTextView: NSTextView {
         }
     }
 
+    private var caretTimer: Timer?
+    private var caretVisible = false
+
+    private var caretLineHeight: CGFloat {
+        ceil((font ?? NSFont.systemFont(ofSize: 22)).boundingRectForFont.height)
+    }
+
+    /// AppKit's insertion rect for a multi-line composer can point at the
+    /// first line (or above it). Locate the glyph at the caret and derive the
+    /// line rect from the layout manager instead.
+    private func caretRectInView() -> NSRect? {
+        let origin = textContainerOrigin
+        let lineHeight = caretLineHeight
+        let length = textStorage?.length ?? 0
+        let location = selectedRange().location
+        var x = origin.x
+        var y = origin.y
+        var height = lineHeight
+
+        if length > 0, location >= 0,
+           let manager = layoutManager, let container = textContainer {
+            if location < length {
+                let glyph = manager.glyphIndexForCharacter(at: location)
+                let rect = manager.boundingRect(
+                    forGlyphRange: NSRange(location: glyph, length: 1),
+                    in: container
+                )
+                x = origin.x + rect.minX
+                y = origin.y + rect.minY
+                height = max(rect.height, lineHeight)
+            } else {
+                let text = string as NSString
+                if location > 0, text.character(at: location - 1) == 10 {
+                    let extra = manager.extraLineFragmentRect
+                    if extra.height > 0 {
+                        y = origin.y + extra.minY
+                        height = max(extra.height, lineHeight)
+                    } else {
+                        y = origin.y + manager.usedRect(for: container).maxY
+                    }
+                } else if location > 0 {
+                    let glyph = manager.glyphIndexForCharacter(at: location - 1)
+                    let rect = manager.boundingRect(
+                        forGlyphRange: NSRange(location: glyph, length: 1),
+                        in: container
+                    )
+                    x = origin.x + rect.maxX
+                    y = origin.y + rect.minY
+                    height = max(rect.height, lineHeight)
+                }
+            }
+        }
+
+        return NSRect(x: x - 1, y: y, width: 3, height: height)
+    }
+
+    private func invalidateCaret() {
+        guard let rect = caretRectInView() else { return }
+        setNeedsDisplay(rect.insetBy(dx: -4, dy: -1))
+    }
+
+    private func startCaretBlink() {
+        caretTimer?.invalidate()
+        caretVisible = true
+        invalidateCaret()
+        let timer = Timer(
+            timeInterval: 0.5,
+            target: self,
+            selector: #selector(blinkCaret),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        caretTimer = timer
+    }
+
+    private func stopCaretBlink() {
+        caretTimer?.invalidate()
+        caretTimer = nil
+        caretVisible = false
+        invalidateCaret()
+    }
+
+    @objc private func blinkCaret() {
+        caretVisible.toggle()
+        invalidateCaret()
+    }
+
+    private var shouldDrawCaret: Bool {
+        caretVisible
+            && window?.isKeyWindow == true
+            && selectedRange().length == 0
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        // Custom caret is drawn in draw(_:) so it can be widened, snapped to
+        // the text baseline and blinked independently of AppKit's 1pt bar.
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { startCaretBlink() }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        stopCaretBlink()
+        return super.resignFirstResponder()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        startCaretBlink()
+    }
+
+    override func setSelectedRange(
+        _ charRange: NSRange,
+        affinity: NSSelectionAffinity,
+        stillSelecting stillSelectingFlag: Bool
+    ) {
+        super.setSelectedRange(charRange, affinity: affinity, stillSelecting: stillSelectingFlag)
+        startCaretBlink()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            stopCaretBlink()
+        } else {
+            invalidateCaret()
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard string.isEmpty, !placeholder.isEmpty else { return }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font ?? NSFont.systemFont(ofSize: 22),
-            .foregroundColor: NSColor.tertiaryLabelColor
-        ]
-        // The text container inset is what centers an empty single-line
-        // composer, so the placeholder shares the caret's baseline.
-        (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: attrs)
+        if string.isEmpty, !placeholder.isEmpty {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font ?? NSFont.systemFont(ofSize: 22),
+                .foregroundColor: NSColor.tertiaryLabelColor
+            ]
+            // The text container inset is what centers an empty single-line
+            // composer, so the placeholder shares the caret's baseline.
+            (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: attrs)
+        }
+        if shouldDrawCaret, let caret = caretRectInView() {
+            NSColor.labelColor.setFill()
+            NSBezierPath(roundedRect: caret, xRadius: 1, yRadius: 1).fill()
+        }
     }
 
     override func paste(_ sender: Any?) {
