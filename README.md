@@ -19,7 +19,8 @@
 - `senses/`：跨平台真实桌面感官客户端（macOS / Windows 双平台 `WindowProvider` 极薄隔离 + `PrivacyGuard` 三档隐私模式与敏感黑名单 + `ScreenCapture` 跨平台截屏压缩上传）。
 - `mock_senses/`：离线模拟感官客户端（供无桌面环境或单测使用）。
 - `shell_macos/`：原生 Swift 6 壳，包含 Quick Entry、Live Line、工作区/媒体预览双宿主、设置中心、审批与菜单栏。**这是唯一 UI**；历史 Web 控制台（`body_web`）已于 v1.1 移除，`GET /` 现在只返回服务描述 JSON。
-- `tests/`：全量自动化测试集（282 项用例，覆盖上下文、记忆、联网、图片搜索、富媒体、Router–Worker 调度、文档/表格/PDF 处理、双模式浏览器自动化与壳侧模型/缓存约束）。
+- 桌面头像（Godot）：已迁出主仓，独立维护于 [YYaa18/qimingxing-avatar](https://github.com/YYaa18/qimingxing-avatar)（private），需自行启动并连接 `ws://127.0.0.1:18790/ws`。
+- `tests/`：全量自动化测试集（296 项用例，覆盖上下文、记忆、联网、图片搜索、富媒体、Router–Worker 调度、文档/表格/PDF 处理、双模式浏览器自动化与壳侧模型/缓存约束）。
 
 ## 快速开始
 

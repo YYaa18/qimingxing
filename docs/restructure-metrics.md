@@ -26,7 +26,8 @@ git worktree add /tmp/qmx-baseline 22ca135
 | `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | **0**（Phase 1b） |
 | `body_web` 代码行 | 1,933 | 0 | **0**（Phase 1b） |
 | `body_web` 打包产物 | 随 `Resources/app/body_web` 打入 | 不打包 | **不在产物内**（Phase 1b） |
-| `body_godot` 产品代码引用 | 7 文件 / 20 次 | 0（Phase 2） | **3 文件 / 7 次**（主仓启动/打包/预览已摘除；`body_godot/` 自身仍计入，`git rm` 待 split 推送） |
+| `body_godot` 产品代码引用 | 7 文件 / 20 次 | 0（Phase 2） | **2 文件 / 5 次**（仅协议兼容面：client type + schema） |
+| `body_godot` 代码行 | 6,521 | 0 | **0**（Phase 2） |
 | 应用包体 | 417.5 MB | ≤ 基线 | **418 MB**（body_web 仅 64K，体积由 Python runtime 主导） |
 | `brain/hub.py` | 3,135 行 | 不增长 | **3,207**（1a 净增 72；Phase 5 基线改为 3,207） |
 | `QuickEntryPanel.swift` | 2,548 行 | 不增长 | **2,614**（1a 净增 66） |
@@ -163,8 +164,19 @@ git ls-tree --name-only split/body-godot
 git ls-tree split/body-godot assets/sprites/happy.png   # 头像精灵在
 ```
 
-主仓已摘除：`--with-godot`、`Godot.app` 打包、`ProcessSupervisor` 启动器、设置页头像开关、`avatar_enabled` 写入、`qimingxing.sh` Godot 分支、AppIcon/预览对 `body_godot` 的路径依赖（改用 `assets/app_icon.png`）。
-`git rm -r body_godot` 与推送到独立仓库尚未执行（等待仓库名与可见性确认）。
+主仓已摘除：`--with-godot`、`Godot.app` 打包、`ProcessSupervisor` 启动器、设置页头像开关、`avatar_enabled` 写入、`qimingxing.sh` Godot 分支、AppIcon/预览对 `body_godot` 的路径依赖（改用 `assets/app_icon.png`）；最后 `git rm -r body_godot`（6,521 行 GDScript）。
+
+**独立仓库运行时验证**（`YYaa18/qimingxing-avatar`，private）：
+
+```bash
+# 临时 Brain（隔离数据目录，端口 18791）
+cd /tmp/qmx-run && PYTHONPATH=<repo> QIMINGXING_PORT=18791 <repo>/.venv/bin/python -m brain.main
+# 从新仓库 clone 出来的项目，headless 启动
+QIMINGXING_WS_URL=ws://127.0.0.1:18791/ws \
+  ~/Downloads/Godot.app/Contents/MacOS/Godot --headless --path /tmp/qmx-avatar --quit-after 400
+```
+
+Brain 日志：`Handshake hello: client=client_1 role=body type=body_godot name=body_godot`，随后干净断开。头像/场景/脚本/主题与 80 个提交历史均在远程仓库中。
 
 ## 4. 性能
 
