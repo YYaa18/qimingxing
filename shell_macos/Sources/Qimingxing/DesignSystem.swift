@@ -294,11 +294,11 @@ struct GlobeSpinner: View {
     }
 
     private func draw(_ graphics: GraphicsContext, size: CGSize, angle: Double) {
-        let radius = min(size.width, size.height) / 2 - 1
+        let radius = Double(min(size.width, size.height)) / 2 - 1
         guard radius > 1 else { return }
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let tilt = 0.42
-        let unit = size.width / 18
+        let unit = Double(size.width) / 18
 
         for latitude in stride(from: -60.0, through: 60.0, by: 30.0) {
             let phi = latitude * .pi / 180
@@ -316,7 +316,7 @@ struct GlobeSpinner: View {
                 let depth = (depthZ / radius + 1) / 2
                 let alpha = 0.14 + 0.86 * depth
                 let dot = (0.70 + 0.80 * depth) * unit
-                let point = CGPoint(x: center.x + x, y: center.y + y)
+                let point = CGPoint(x: center.x + CGFloat(x), y: center.y + CGFloat(y))
                 graphics.fill(
                     Path(ellipseIn: CGRect(
                         x: point.x - dot,

@@ -1,6 +1,6 @@
 import AppKit
 import Combine
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import SwiftUI
 
 // MARK: - Pure Testable Spatial Geometry
