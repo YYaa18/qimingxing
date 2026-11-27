@@ -341,12 +341,14 @@ final class WindowCoordinator {
 
 ### 5.5 迁移顺序
 
-1. 引入 `WindowCoordinator` + `FocusArbitrator` + `PanelFactory` 骨架，先注册 12+ 窗口拥有者，不改变行为。
-2. 吸收 QuickEntry 的 5 个焦点特例（先 `installFocusRecovery`，最后 `hiddenForMediaViewer`）。
-3. 加 suspend/restore，先覆盖 Settings 和 detached Media。
-4. 覆盖完整 Workspace；Wing 保持不挂起。
-5. 迁移 Approval、Permission、Toast、DropPocket、Lasso、Walkie、菜单栏弹层、QL 面板。
-6. 删除各控制器里的直接激活和 `hiddenForMediaViewer` 特例。
+`[现状]` Phase 3 已落地（PR #21）：
+
+1. ~~骨架~~：`WindowCoordinator` + `FocusArbitrator` + `PanelFactory` 已入，59→60 XCTest。
+2. ~~QuickEntry 焦点特例~~：show/hide 走 lease；`installFocusRecovery` 在非 owner 时让位；`hiddenForMediaViewer` 及其 250ms+350ms 延迟链已删除。
+3. ~~Settings / detached Media~~：present/dismiss + suspend/restore；决策 A 已人工验证。
+4. ~~Workspace~~：只接管 key、保留并排布局（决策见 §5.4）。
+5. ~~Approval / Permission~~：Approval 为可成为 key 的独立浮窗（`ApprovalWindow.canBecomeKey`）；Permission 最高优先级但永不拿 key。Toast / DropPocket / Lasso / Walkie / 菜单栏 / QL 面板按 passive/transient **不注册**（不接管 key、不挂起别人）。
+6. **仍保留的直接激活（例外清单）**：`NSOpenPanel.runModal` 前后、fatal error `NSAlert`、SpatialLasso overlay/popover、QL 预览、composer 焦点通知。这些是系统模态或瞬态浮层，不经 coordinator；其余 content/modal 角色的激活只经 `FocusArbitrator`。
 
 ### 5.6 Sidecar
 
