@@ -207,6 +207,21 @@ class ScreenUnderstandingRouter(PooledHTTPClientMixin):
         )
         return content
 
+    @staticmethod
+    def _resolve_image_mime(content_type: str, image_bytes: bytes) -> str:
+        ctype = (content_type or "").lower().split(";")[0].strip()
+        if ctype.startswith("image/"):
+            return ctype
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        return "image/png"
+
     async def prepare_user_message(
         self,
         *,
@@ -217,6 +232,7 @@ class ScreenUnderstandingRouter(PooledHTTPClientMixin):
         screen_ref: ContextScreenRefPayload,
     ) -> Tuple[Union[str, List[Dict[str, Any]]], str]:
         self.last_ocr_usage = None
+        content_type = self._resolve_image_mime(content_type, image_bytes)
         window_desc = (
             f"当前主窗口：{screen_ref.target_app} - {screen_ref.target_title}".strip(" -")
             if screen_ref.target_app or screen_ref.target_title
@@ -234,7 +250,12 @@ class ScreenUnderstandingRouter(PooledHTTPClientMixin):
                 and (vision_prof.provider_id == (profile.provider_id or ""))
                 and (vision_prof.model == profile.model)
             )
-            if not same_as_chat and vision_prof.model:
+            use_separate_vision_slot = (
+                not same_as_chat
+                and bool(vision_prof.model)
+                and (vision_prof.supports_vision or not profile.supports_vision)
+            )
+            if use_separate_vision_slot:
                 logger.info(
                     "Routing screenshot via vision_ocr slot: provider=%s model=%s bytes=%d",
                     vision_prof.provider_id,

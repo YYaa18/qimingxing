@@ -386,3 +386,60 @@ def test_screen_capture_permission_guide_offline_timeout_and_burn(tmp_path: Path
                 cleared_msg = json.loads(body_ws.receive_text())
                 assert cleared_msg["type"] == "output.tool_status"
                 assert cleared_msg["payload"]["tool"] == "memory"
+
+
+async def test_vision_chat_does_not_downgrade_to_non_vision_ocr_slot() -> None:
+    from brain.config import ModelRoutingConfig, ProviderConfig, SlotRouteConfig
+
+    cfg = AppConfig(
+        providers={
+            "deepseek": ProviderConfig(
+                name="deepseek",
+                label="DeepSeek",
+                protocol="openai_compatible",
+                base_url="https://api.deepseek.com/v1",
+                api_key="sk-ds",
+                models=["deepseek-chat"],
+            ),
+            "gemini": ProviderConfig(
+                name="gemini",
+                label="Gemini",
+                protocol="gemini_native",
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                api_key="AIzaDummy",
+                models=["gemini-4-hydrogen"],
+            ),
+        },
+        model_capabilities={
+            "deepseek/deepseek-chat": {"supports_vision": False},
+            "gemini/gemini-4-hydrogen": {"supports_vision": True},
+        },
+        has_explicit_routing=True,
+        model_routing=ModelRoutingConfig(
+            chat=SlotRouteConfig(provider="gemini", model="gemini-4-hydrogen"),
+            vision_ocr=SlotRouteConfig(provider="deepseek", model="deepseek-chat"),
+        ),
+    )
+    router = ScreenUnderstandingRouter(DeepSeekOCRProvider(cfg.ocr, cfg), config=cfg)
+    chat_prof = cfg.resolve_slot_profile("chat")
+    assert chat_prof.supports_vision is True
+
+    screen_ref = ContextScreenRefPayload(
+        request_id="r_mime",
+        turn_id="t_mime",
+        status="ok",
+        artifact_id="art_mime",
+        target_app="用户直投图片",
+        target_title="shot.png",
+    )
+    msg, path = await router.prepare_user_message(
+        user_text="图里有什么",
+        image_bytes=b"\x89PNG\r\n\x1a\nfakepng",
+        content_type="application/octet-stream",
+        profile=chat_prof,
+        screen_ref=screen_ref,
+    )
+    assert path == "vision"
+    assert isinstance(msg, list)
+    url = msg[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")

@@ -881,9 +881,10 @@ final class BrainClient: ObservableObject {
 
         var body = Data()
         let filename = fileURL.lastPathComponent
+        let partContentType = Self.mimeType(for: fileURL)
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+        body.append("Content-Type: \(partContentType)\r\n\r\n".data(using: .utf8)!)
         body.append(fileData)
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         req.httpBody = body
@@ -901,6 +902,20 @@ final class BrainClient: ObservableObject {
             )
         } catch {
             return nil
+        }
+    }
+
+    private static func mimeType(for fileURL: URL) -> String {
+        switch fileURL.pathExtension.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "webp": return "image/webp"
+        case "gif": return "image/gif"
+        case "heic": return "image/heic"
+        case "pdf": return "application/pdf"
+        case "txt", "md", "markdown": return "text/plain"
+        case "json": return "application/json"
+        default: return "application/octet-stream"
         }
     }
 

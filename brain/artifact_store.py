@@ -83,6 +83,39 @@ def _pick_extension(kind: ArtifactKind, filename: str, content_type: str) -> str
     return ".png" if "png" in (content_type or "").lower() else ".jpg"
 
 
+def _normalize_content_type(
+    kind: ArtifactKind, filename: str, content_type: str, data: bytes
+) -> str:
+    """Ensure image artifacts always carry a valid image/* MIME type for multimodal APIs."""
+    ctype = (content_type or "").lower().split(";")[0].strip()
+    if kind != "image":
+        if kind == "pdf" and ctype != "application/pdf":
+            return "application/pdf"
+        return ctype or "application/octet-stream"
+    if ctype.startswith("image/"):
+        return ctype
+    ext = Path(filename or "").suffix.lower()
+    ext_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".heic": "image/heic",
+    }
+    if ext in ext_map:
+        return ext_map[ext]
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
 @dataclass
 class ArtifactRecord:
     artifact_id: str
@@ -129,8 +162,9 @@ class ArtifactStore:
             )
 
         kind = classify_artifact_kind(filename, content_type)
+        normalized_ctype = _normalize_content_type(kind, filename, content_type, data)
         artifact_id = f"art_{uuid.uuid4().hex[:14]}"
-        ext = _pick_extension(kind, filename, content_type)
+        ext = _pick_extension(kind, filename, normalized_ctype)
         file_path = self.base_dir / f"{artifact_id}{ext}"
         file_path.write_bytes(data)
 
@@ -138,7 +172,7 @@ class ArtifactStore:
         record = ArtifactRecord(
             artifact_id=artifact_id,
             path=file_path,
-            content_type=content_type,
+            content_type=normalized_ctype,
             size_bytes=len(data),
             created_at=now,
             expires_at=now + self.ttl_seconds,

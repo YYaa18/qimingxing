@@ -274,3 +274,38 @@ async def test_clipboard_tool_on_demand_redaction_and_privacy_guard() -> None:
     assert res_priv.ok is False
     assert res_priv.status == "privacy_blocked"
     assert called == 1
+
+
+def test_image_artifact_octet_stream_normalizes_mime_for_gemini(tmp_path: Path) -> None:
+    from brain.gemini_native import convert_messages
+
+    store = ArtifactStore(base_dir=tmp_path / "arts_mime")
+    rec_png = store.save(
+        b"\x89PNG\r\n\x1a\nfakepng",
+        content_type="application/octet-stream",
+        filename="photo.png",
+    )
+    assert rec_png.kind == "image"
+    assert rec_png.content_type == "image/png"
+
+    rec_jpg = store.save(
+        b"\xff\xd8\xff\xe0fakejpeg",
+        content_type="application/octet-stream",
+        filename="photo.JPG",
+    )
+    assert rec_jpg.kind == "image"
+    assert rec_jpg.content_type == "image/jpeg"
+
+    _, contents = convert_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "图里有什么？"},
+                    {"type": "image_url", "image_url": {"url": f"data:{rec_png.content_type};base64,AAAA"}},
+                ],
+            }
+        ]
+    )
+    inline_parts = [p["inlineData"] for p in contents[0]["parts"] if "inlineData" in p]
+    assert inline_parts and inline_parts[0]["mimeType"] == "image/png"

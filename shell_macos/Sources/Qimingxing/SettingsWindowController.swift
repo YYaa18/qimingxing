@@ -828,7 +828,7 @@ struct SettingsRootView: View {
 
             Section("能力路由") {
                 slotRow("对话", slot: $store.chatSlot, kind: .chat, showVoice: false)
-                slotRow("看屏 / OCR", slot: $store.visionSlot, kind: .vision, showVoice: false)
+                slotRow("识图 / 看屏 / OCR", slot: $store.visionSlot, kind: .vision, showVoice: false)
                 slotRow("后台快任务", slot: $store.fastSlot, kind: .fast, showVoice: false)
                 HStack {
                     Toggle("后台 Worker 跟随对话模型", isOn: $store.workerFollowsChat)
