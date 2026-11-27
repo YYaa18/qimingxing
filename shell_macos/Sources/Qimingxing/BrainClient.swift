@@ -11,7 +11,6 @@ final class BrainClient: ObservableObject {
     @Published var activeWindowSummary: String = ""
     @Published var permissionHint: String = ""
 
-    @Published var avatarEnabled: Bool = false
     @Published var earconsEnabled: Bool = true
     @Published var roamEnabled: Bool = true
     @Published var ambientEnabled: Bool = false
@@ -31,7 +30,6 @@ final class BrainClient: ObservableObject {
     @Published var artifactCapsules: [ArtifactCapsuleItem] = []
     private var terminalTaskStatuses: [String: String] = [:]
 
-    var onAvatarEnabledChanged: ((Bool) -> Void)?
     var onShortcutsSynced: ((String, String, String) -> Void)?
     var onPendingApprovalsUpdated: (([PendingApprovalItem]) -> Void)?
     var onApprovalResolved: ((String) -> Void)?
@@ -370,11 +368,6 @@ final class BrainClient: ObservableObject {
             permissionHint = (payload["permission_hint"] as? String) ?? ""
 
         case "ui.state":
-            let nextAvatar = (payload["avatar_enabled"] as? Bool) ?? false
-            if nextAvatar != avatarEnabled {
-                avatarEnabled = nextAvatar
-                onAvatarEnabledChanged?(nextAvatar)
-            }
             earconsEnabled = (payload["earcons"] as? Bool) ?? earconsEnabled
             roamEnabled = (payload["roam"] as? Bool) ?? roamEnabled
             ambientEnabled = (payload["ambient"] as? Bool) ?? ambientEnabled

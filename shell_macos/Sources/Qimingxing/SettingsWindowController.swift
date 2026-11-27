@@ -236,7 +236,6 @@ final class SettingsViewStore: ObservableObject {
     @Published var statusMessage: String = ""
     @Published var isSaving: Bool = false
 
-    @Published var avatarEnabled: Bool = false
     @Published var earconsEnabled: Bool = true
     @Published var roamEnabled: Bool = true
     @Published var ambientEnabled: Bool = false
@@ -296,7 +295,6 @@ final class SettingsViewStore: ObservableObject {
         }
         if let settings = await brainClient.fetchSettings() {
             if let ui = settings["ui"] as? [String: Any] {
-                avatarEnabled = (ui["avatar_enabled"] as? Bool) ?? false
                 earconsEnabled = (ui["earcons"] as? Bool) ?? true
                 roamEnabled = (ui["roam"] as? Bool) ?? true
                 ambientEnabled = (ui["ambient"] as? Bool) ?? false
@@ -755,15 +753,6 @@ struct SettingsRootView: View {
                     NotificationCenter.default.post(name: .qmxDragShakeSettingChanged, object: enabled)
                 }
                 .padding(.vertical, 2)
-                if supervisor.isGodotPluginAvailable {
-                    Toggle("可选桌面头像插件", isOn: $store.avatarEnabled)
-                        .frame(minHeight: 40)
-                } else {
-                    Text("可选桌面头像插件未随此安装包提供")
-                        .font(.system(size: 11))
-                        .foregroundStyle(QMXTheme.textTertiary)
-                        .frame(minHeight: 32)
-                }
             }
 
             Section("回答显示") {
@@ -1584,7 +1573,6 @@ struct SettingsRootView: View {
 
         let payload: [String: Any] = [
             "ui": [
-                "avatar_enabled": store.avatarEnabled,
                 "earcons": store.earconsEnabled,
                 "roam": store.roamEnabled,
                 "ambient": store.ambientEnabled
@@ -1634,7 +1622,7 @@ struct SettingsRootView: View {
         store.statusMessage = msg
         if ok {
             removedProviderIDs.removeAll()
-            brainClient.setUIStatePatch(["avatar_enabled": store.avatarEnabled, "earcons": store.earconsEnabled])
+            brainClient.setUIStatePatch(["earcons": store.earconsEnabled])
             await store.reload(brainClient: brainClient)
             store.clearDraftKeys()
         }

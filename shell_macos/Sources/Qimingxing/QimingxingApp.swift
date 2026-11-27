@@ -231,9 +231,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func wireEvents() {
-        brainClient.onAvatarEnabledChanged = { [weak self] enabled in
-            self?.supervisor.syncAvatarEnabled(enabled)
-        }
         brainClient.onPendingApprovalsUpdated = { [weak self] items in
             self?.approvalController.syncPending(items)
         }

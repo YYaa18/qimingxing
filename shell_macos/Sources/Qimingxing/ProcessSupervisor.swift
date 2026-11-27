@@ -5,7 +5,6 @@ import Foundation
 final class ProcessSupervisor: ObservableObject {
     @Published private(set) var brainRunning = false
     @Published private(set) var sensesRunning = false
-    @Published private(set) var godotRunning = false
     @Published private(set) var lastFatalError = ""
 
     let host: String
@@ -19,27 +18,12 @@ final class ProcessSupervisor: ObservableObject {
 
     private var brainProcess: Process?
     private var sensesProcess: Process?
-    private var godotProcess: Process?
     private var isShuttingDown = false
     private var brainCrashCount = 0
     private var sensesCrashCount = 0
-    private var lastAvatarEnabled = false
 
     var httpBase: String { "http://\(host):\(port)" }
     var wsURL: String { "ws://\(host):\(port)/ws" }
-
-    /// True only when both a Godot binary and the optional body_godot project
-    /// are actually present. Packaged builds intentionally omit them.
-    var isGodotPluginAvailable: Bool {
-        let fm = FileManager.default
-        let candidates = [
-            Bundle.main.resourceURL?.appendingPathComponent("Godot.app/Contents/MacOS/Godot"),
-            URL(fileURLWithPath: "/Applications/Godot.app/Contents/MacOS/Godot"),
-            fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Godot.app/Contents/MacOS/Godot"),
-        ].compactMap { $0 }
-        let hasBinary = candidates.contains { fm.isExecutableFile(atPath: $0.path) }
-        return hasBinary && fm.fileExists(atPath: appDir.appendingPathComponent("body_godot").path)
-    }
 
     init() {
         self.host = ProcessInfo.processInfo.environment["QIMINGXING_HOST"] ?? "127.0.0.1"
@@ -141,24 +125,8 @@ final class ProcessSupervisor: ObservableObject {
         onReady()
     }
 
-    func syncAvatarEnabled(_ enabled: Bool) {
-        lastAvatarEnabled = enabled
-        if enabled {
-            if godotProcess == nil || godotProcess?.isRunning == false {
-                launchOptionalGodot()
-            }
-        } else {
-            stopProcess(godotProcess)
-            godotProcess = nil
-            godotRunning = false
-        }
-    }
-
     func terminateAll() {
         isShuttingDown = true
-        stopProcess(godotProcess)
-        godotProcess = nil
-        godotRunning = false
 
         stopProcess(sensesProcess)
         sensesProcess = nil
@@ -258,41 +226,6 @@ final class ProcessSupervisor: ObservableObject {
             sensesRunning = true
         } catch {
             NSLog("Failed to launch senses: \(error)")
-        }
-    }
-
-    private func launchOptionalGodot() {
-        guard !isShuttingDown, lastAvatarEnabled else { return }
-        let resGodot = Bundle.main.resourceURL?.appendingPathComponent("Godot.app/Contents/MacOS/Godot")
-        let candidates = [
-            resGodot,
-            URL(fileURLWithPath: "/Applications/Godot.app/Contents/MacOS/Godot"),
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads/Godot.app/Contents/MacOS/Godot")
-        ].compactMap { $0 }
-
-        guard let godotBin = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
-            return
-        }
-        let godotProject = appDir.appendingPathComponent("body_godot")
-        guard FileManager.default.fileExists(atPath: godotProject.path) else { return }
-
-        let proc = Process()
-        proc.executableURL = godotBin
-        proc.arguments = ["--path", godotProject.path]
-        proc.environment = baseEnvironment()
-        redirectOutput(proc: proc, logName: "godot.log")
-        proc.terminationHandler = { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.godotRunning = false
-                self?.godotProcess = nil
-            }
-        }
-        do {
-            try proc.run()
-            godotProcess = proc
-            godotRunning = true
-        } catch {
-            NSLog("Optional Godot launch skipped: \(error)")
         }
     }
 

@@ -63,7 +63,7 @@ enum UIPreviewDumper {
                 mediaId: "media_demo_image",
                 kind: "image",
                 title: "live-line-preview.png",
-                localPath: repoPath + "/body_godot/assets/sprites/happy.png",
+                localPath: repoPath + "/assets/app_icon.png",
                 mimeType: "image/png",
                 width: 256, height: 256, sizeBytes: 49_207,
                 sourceURL: "https://www.weather.com.cn/",
@@ -451,7 +451,7 @@ enum UIPreviewDumper {
         )
 
         let stashedController = DropPocketController(brainClient: client)
-        let sampleImage = NSImage(contentsOfFile: repoPath + "/body_godot/assets/sprites/happy.png")
+        let sampleImage = NSImage(contentsOfFile: repoPath + "/assets/app_icon.png")
         let stashedDemoItems = [
             DropPocketItem(
                 id: UUID(),

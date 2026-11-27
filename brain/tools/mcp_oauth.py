@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import sys
 import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
@@ -20,7 +21,45 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger("qimingxing.tools.mcp_oauth")
 
-_DEFAULT_OAUTH_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "mcp_oauth"
+
+def _default_oauth_dir() -> Path:
+    """Per-user data dir; never the repo/signed bundle."""
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "Qimingxing"
+    elif os.name == "nt":
+        base = Path(os.environ.get("APPDATA") or Path.home()) / "Qimingxing"
+    else:
+        data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        base = Path(data_home) / "qimingxing"
+    return base / "mcp_oauth"
+
+
+def _legacy_oauth_dir() -> Path:
+    return Path(__file__).resolve().parent.parent.parent / "data" / "mcp_oauth"
+
+
+def _migrate_legacy_tokens(target: Path) -> None:
+    """Copy tokens written by older builds (repo-relative) exactly once."""
+    legacy = _legacy_oauth_dir()
+    if legacy == target or not legacy.is_dir():
+        return
+    if target.is_dir() and any(target.glob("*.json")):
+        return
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for src in legacy.glob("*.json"):
+            dst = target / src.name
+            if not dst.exists():
+                dst.write_bytes(src.read_bytes())
+                try:
+                    os.chmod(dst, 0o600)
+                except OSError:
+                    pass
+    except OSError as exc:
+        logger.warning("Failed migrating legacy MCP OAuth tokens: %s", exc)
+
+
+_DEFAULT_OAUTH_DIR = _default_oauth_dir()
 
 
 def _safe_server_slug(server_name: str) -> str:
@@ -34,6 +73,8 @@ class FileTokenStorage:
     def __init__(self, server_name: str, base_dir: Optional[Path] = None) -> None:
         self.server_name = server_name
         self.base_dir = base_dir or _DEFAULT_OAUTH_DIR
+        if base_dir is None:
+            _migrate_legacy_tokens(self.base_dir)
         self.path = self.base_dir / f"{_safe_server_slug(server_name)}.json"
 
     def _read_doc(self) -> Dict[str, object]:
