@@ -168,7 +168,8 @@ private final class ApprovalWindow: NSWindow {
 }
 
 @MainActor
-final class ApprovalSheetController {    private var window: NSWindow?
+final class ApprovalSheetController {
+    private var window: NSWindow?
     private var windowLease: WindowLease?
     private weak var brainClient: BrainClient?
     private let windowCoordinator: WindowCoordinator?
