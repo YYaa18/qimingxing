@@ -271,7 +271,7 @@ git push <new-remote> split/body-godot:main
 |---|---|---|
 | passive | `taskToast`、`sidecarSuggestion` | 不抢 key、不 `NSApp.activate`、不挂起其他窗口 |
 | transient | `dropPocket`、`spatialLasso`、`walkieTalkie`、`menuBarPopover`、`quickLookPanel` | 非激活浮层；不改变 key owner |
-| content | `quickEntry`、`workspaceWing`、`workspaceWindow`、`mediaAttached`、`mediaDetached`、`settings`、`pinnedNote` | 同一时刻只有一个 key owner；大内容面打开时挂起 QuickEntry |
+| content | `quickEntry`、`workspaceWing`、`workspaceWindow`、`mediaAttached`、`mediaDetached`、`settings`、`pinnedNote` | 同一时刻只有一个 key owner；Settings / Detached Media 打开时挂起 QuickEntry（Workspace 只接管 key，保留并排） |
 | modal | `approval` | 高于 content；不挂起 QuickEntry，只接管 key，关闭后归还 |
 | security | `permissionGuide` | 最高优先级；不抢焦点，关闭后归还 |
 
@@ -321,7 +321,7 @@ final class WindowCoordinator {
 | 场景 | QuickEntry 行为 | 关闭后 |
 |---|---|---|
 | 打开 Workspace Wing | 不挂起，wing 是同一面板的一部分 | 收 wing，不重建面板 |
-| 打开完整 Workspace 窗口 | **挂起**：`orderOut`，保留 frame/draft/焦点状态 | 若挂起前可见且 App 仍在前台，恢复并聚焦输入框 |
+| 打开完整 Workspace 窗口 | **不挂起**（决策：保留并排布局）；Workspace 接管 key，QuickEntry 留在原位 | 关闭 Workspace 后 key 还给 QuickEntry |
 | 打开 Settings | **挂起** | 同上；若用户已切到别的 App，不抢焦点 |
 | 打开 detached Media Viewer | **挂起** | 同上；保留现有 250 ms 延迟但走 lease generation |
 | 打开 Approval | 不挂起；QuickEntry 保留但让出 key | 归还 key 给之前 owner |

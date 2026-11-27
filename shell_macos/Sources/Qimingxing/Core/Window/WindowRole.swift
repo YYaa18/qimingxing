@@ -51,9 +51,11 @@ enum WindowRole: String, CaseIterable, Sendable {
     }
 
     /// Opening one of these suspends QuickEntry (plan §5.4).
+    /// Workspace is intentionally absent: it docks beside QuickEntry and only
+    /// takes the key, keeping the side-by-side layout.
     var suspendsQuickEntryWhenPresented: Bool {
         switch self {
-        case .settings, .workspaceWindow, .mediaDetached:
+        case .settings, .mediaDetached:
             return true
         default:
             return false

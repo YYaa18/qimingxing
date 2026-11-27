@@ -109,7 +109,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             windowCoordinator: windowCoordinator
         )
         approvalController = ApprovalSheetController(brainClient: brainClient)
-        workspaceController = WorkspaceWindowController(store: workspaceStore, brainClient: brainClient)
+        workspaceController = WorkspaceWindowController(
+            store: workspaceStore,
+            brainClient: brainClient,
+            windowCoordinator: windowCoordinator
+        )
         wireWindowCoordinator()
 
         MediaViewerLauncher.openHandler = { [weak self] prefersLargeWindow in
@@ -248,6 +252,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.quickEntryController.orderOutForSuspend()
             case .settings:
                 self?.settingsController.orderOutForSuspend()
+            case .workspaceWindow:
+                self?.workspaceController.orderOutForSuspend()
             default:
                 break
             }
@@ -258,6 +264,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.quickEntryController.restoreFromSuspend()
             case .settings:
                 self?.settingsController.restoreFromSuspend()
+            case .workspaceWindow:
+                self?.workspaceController.restoreFromSuspend()
             default:
                 break
             }

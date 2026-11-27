@@ -456,22 +456,52 @@ enum WorkspaceEntry: Identifiable {
 // MARK: - Window
 
 @MainActor
-final class WorkspaceWindowController {
+final class WorkspaceWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
+    private var windowLease: WindowLease?
 
     var isVisible: Bool { window?.isVisible ?? false }
     private let store: WorkspaceStore
     private let brainClient: BrainClient
+    private let windowCoordinator: WindowCoordinator?
 
-    init(store: WorkspaceStore, brainClient: BrainClient) {
+    init(
+        store: WorkspaceStore,
+        brainClient: BrainClient,
+        windowCoordinator: WindowCoordinator? = nil
+    ) {
         self.store = store
         self.brainClient = brainClient
+        self.windowCoordinator = windowCoordinator
+        super.init()
     }
 
     func show(anchoredTo anchor: NSRect? = nil, movePanelBy: ((CGFloat) -> Void)? = nil) {
         ensureWindow()
         positionWindow(anchoredTo: anchor, movePanelBy: movePanelBy)
-        NSApp.activate(ignoringOtherApps: true)
+        // Decision: the full workspace docks beside QuickEntry instead of
+        // suspending it; it only takes the key.
+        windowLease = windowCoordinator?.present(
+            WindowRequest(role: .workspaceWindow, activation: .required)
+        )
+        if windowCoordinator == nil {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let lease = windowLease, let windowCoordinator {
+            windowCoordinator.dismiss(lease)
+        }
+        windowLease = nil
+    }
+
+    func orderOutForSuspend() {
+        window?.orderOut(nil)
+    }
+
+    func restoreFromSuspend() {
         window?.makeKeyAndOrderFront(nil)
     }
 
@@ -555,6 +585,7 @@ final class WorkspaceWindowController {
         win.minSize = NSSize(width: 820, height: 540)
         win.center()
         win.isReleasedWhenClosed = false
+        win.delegate = self
         self.window = win
     }
 }

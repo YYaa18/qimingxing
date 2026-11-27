@@ -179,6 +179,19 @@ final class WindowCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.isActive(.workspaceWing))
     }
 
+    func testWorkspaceTakesKeyWithoutSuspendingQuickEntry() {
+        let coordinator = makeCoordinator()
+        coordinator.present(WindowRequest(role: .quickEntry))
+        let workspace = coordinator.present(WindowRequest(role: .workspaceWindow))
+
+        XCTAssertFalse(coordinator.isSuspended(.quickEntry))
+        XCTAssertTrue(coordinator.isActive(.quickEntry))
+        XCTAssertEqual(coordinator.keyOwner, .workspaceWindow)
+
+        coordinator.dismiss(workspace)
+        XCTAssertEqual(coordinator.keyOwner, .quickEntry)
+    }
+
     func testPresentCallbacksReceiveActivationPolicy() {
         let coordinator = makeCoordinator()
         var seen: [(WindowRole, ActivationPolicy)] = []

@@ -190,8 +190,9 @@ cd shell_macos && swift test   # 56 passed（新增 29）
 - 决策 A 已进规则并接线：QuickEntry 覆盖 Settings 时挂起 Settings，QuickEntry 关闭后恢复。
 - `FocusArbitrator` 是当前唯一允许 `NSApp.activate` 的组件；记录外部前台 App，用户已切走时不抢焦点。
 - `PanelConfiguration` 按 role 给出 level/styleMask/collectionBehavior，可在无窗口环境下断言。
-- 已接线：QuickEntry（show/hide 走 lease，`installFocusRecovery` 在非 owner 时让位）、Settings（present/dismiss + suspend/restore）。
-- 仍走旧路径：Media、Workspace、Approval、Permission、Toast、DropPocket、Lasso、Walkie、菜单栏、QL 面板。
+- 已接线：QuickEntry（show/hide 走 lease，`installFocusRecovery` 在非 owner 时让位）、Settings（present/dismiss + suspend/restore）、Media（detached 走 lease，移除 `hiddenForMediaViewer` 与延迟链）、Workspace（只接管 key，保留并排布局）。
+- 卡片内表格可点击打开媒体查看器（`MarkdownMessageView.onOpenTable`）。
+- 仍走旧路径：Approval、Permission、Toast、DropPocket、Lasso、Walkie、菜单栏、QL 面板。
 
 ## 4. 性能
 
