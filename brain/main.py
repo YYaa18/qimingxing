@@ -14,10 +14,12 @@ import httpx
 import uvicorn
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from brain.artifact_store import ArtifactStore
+from brain.app.routes.artifacts import build_artifacts_router
+from brain.app.routes.health import build_health_router
 from brain.audio import ASRProvider, TTSProvider
 from brain.config import (
     AppConfig,
@@ -381,22 +383,17 @@ def create_app(
                     )
         return await call_next(request)
 
-    @app.get("/health")
-    async def health() -> JSONResponse:
-        return JSONResponse(
-            {
-                "status": "ok",
-                "server_version": SERVER_VERSION,
-                "protocol_version": PROTOCOL_VERSION,
-                "active_profile": router.active_profile,
-                "privacy_mode": hub.privacy_mode,
-                "memory_backend": cfg.memory.backend,
-                "embedding_enabled": emb_provider.enabled,
-                "model_store_mode": model_store_mode,
-                "mcp_starting": mcp_state["starting"],
-            }
+    app.include_router(
+        build_health_router(
+            server_version=SERVER_VERSION,
+            llm_router=router,
+            hub=hub,
+            config=cfg,
+            embedding_provider=emb_provider,
+            model_store_mode=model_store_mode,
+            mcp_state=mcp_state,
         )
-
+    )
     @app.get("/api/memory/debug")
     async def memory_debug(request: Request) -> JSONResponse:
         client_host = request.client.host if request.client else ""
@@ -485,39 +482,9 @@ def create_app(
             }
         )
 
-    @app.post("/api/artifacts")
-    async def upload_artifact(request: Request, file: UploadFile = File(...)) -> JSONResponse:
-        client_host = request.client.host if request.client else ""
-        if client_host not in _LOOPBACK_HOSTS:
-            raise HTTPException(status_code=403, detail="Artifact uploads are restricted to localhost.")
-
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="Empty artifact payload.")
-        if len(data) > artifacts.max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Artifact exceeds maximum allowed size of {artifacts.max_bytes} bytes.",
-            )
-
-        try:
-            rec = artifacts.save(
-                data,
-                content_type=file.content_type or "application/octet-stream",
-                filename=file.filename or "",
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(
-            {
-                "artifact_id": rec.artifact_id,
-                "kind": rec.kind,
-                "filename": rec.filename,
-                "content_type": rec.content_type,
-                "expires_at": rec.expires_at,
-                "size_bytes": rec.size_bytes,
-            }
-        )
+    app.include_router(
+        build_artifacts_router(artifacts=artifacts, loopback_hosts=_LOOPBACK_HOSTS)
+    )
 
     @app.post("/api/mcp/reload")
     async def reload_mcp_servers(request: Request) -> JSONResponse:
@@ -1068,17 +1035,6 @@ def create_app(
         if not ok and "未找到" in msg:
             raise HTTPException(status_code=404, detail=msg)
         return JSONResponse({"status": "ok" if ok else "noop", "ok": ok, "message": msg})
-
-    @app.get("/")
-    async def index() -> JSONResponse:
-        return JSONResponse(
-            {
-                "service": "qimingxing",
-                "version": SERVER_VERSION,
-                "status": "ok",
-                "ui": "native",
-            }
-        )
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
