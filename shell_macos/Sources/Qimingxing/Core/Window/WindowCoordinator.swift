@@ -183,11 +183,12 @@ final class WindowCoordinator {
 
 extension WindowRole {
     /// Roles that can actually hold the keyboard. Wings attached to QuickEntry
-    /// and passive/transient overlays never become key owners on their own.
+    /// and passive/transient overlays never become key owners on their own;
+    /// the security guide is highest priority but deliberately never takes key.
     var canOwnKey: Bool {
         switch self {
         case .quickEntry, .workspaceWindow, .mediaDetached, .settings,
-             .pinnedNote, .approval, .permissionGuide:
+             .pinnedNote, .approval:
             return true
         default:
             return false

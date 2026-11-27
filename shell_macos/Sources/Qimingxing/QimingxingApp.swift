@@ -108,7 +108,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             desktopActions: desktopActions,
             windowCoordinator: windowCoordinator
         )
-        approvalController = ApprovalSheetController(brainClient: brainClient)
+        approvalController = ApprovalSheetController(
+            brainClient: brainClient,
+            windowCoordinator: windowCoordinator
+        )
         workspaceController = WorkspaceWindowController(
             store: workspaceStore,
             brainClient: brainClient,
@@ -243,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func wireWindowCoordinator() {
         MediaViewerWindowController.shared.windowCoordinator = windowCoordinator
+        PermissionGuideController.shared.windowCoordinator = windowCoordinator
         windowCoordinator.onPresent = { [weak self] role, policy in
             self?.focusArbitrator.activate(for: role, policy: policy)
         }
@@ -286,6 +290,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settingsController.focusIfVisible()
         case .workspaceWindow:
             workspaceController.focusIfVisible()
+        case .approval:
+            approvalController.focusIfVisible()
         default:
             break
         }

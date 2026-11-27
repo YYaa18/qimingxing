@@ -219,6 +219,18 @@ final class WindowCoordinatorTests: XCTestCase {
         XCTAssertNil(coordinator.keyOwner)
     }
 
+    func testPermissionGuideDoesNotTakeKey() {
+        let coordinator = makeCoordinator()
+        coordinator.present(WindowRequest(role: .quickEntry))
+        coordinator.present(WindowRequest(role: .permissionGuide, activation: .none))
+
+        XCTAssertTrue(coordinator.isActive(.permissionGuide))
+        XCTAssertEqual(coordinator.keyOwner, .quickEntry)
+
+        coordinator.suspend(.permissionGuide, reason: "closed")
+        XCTAssertEqual(coordinator.keyOwner, .quickEntry)
+    }
+
     func testPresentCallbacksReceiveActivationPolicy() {
         let coordinator = makeCoordinator()
         var seen: [(WindowRole, ActivationPolicy)] = []

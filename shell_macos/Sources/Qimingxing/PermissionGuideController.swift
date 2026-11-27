@@ -412,6 +412,9 @@ final class PermissionGuideController: ObservableObject {
 
     private var panel: NSPanel?
     private var pollTask: Task<Void, Never>?
+    private var windowLease: WindowLease?
+    /// Injected by AppDelegate; nil in previews.
+    var windowCoordinator: WindowCoordinator?
 
     func show(for kind: SystemPermissionKind, openSettings: Bool = true) {
         activeKind = kind
@@ -421,6 +424,11 @@ final class PermissionGuideController: ObservableObject {
             PermissionGuideHelper.openSystemSettings(for: kind)
         }
 
+        // Security surface: highest priority in the model, but it never takes
+        // the key and never calls NSApp.activate.
+        windowLease = windowCoordinator?.present(
+            WindowRequest(role: .permissionGuide, activation: .none)
+        )
         ensurePanel()
         refreshContentView()
         positionPanelOnScreen()
@@ -431,6 +439,10 @@ final class PermissionGuideController: ObservableObject {
     func close() {
         pollTask?.cancel()
         pollTask = nil
+        if let lease = windowLease, let windowCoordinator {
+            windowCoordinator.dismiss(lease)
+        }
+        windowLease = nil
         panel?.orderOut(nil)
     }
 
