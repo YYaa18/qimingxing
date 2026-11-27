@@ -398,7 +398,7 @@ Phase 4 补到 80–120，覆盖：
 - `ApprovalQueue`：去重、顺序、resolved；
 - `MediaViewerModel`：表格大窗口条件、关闭通知。
 
-`UIPreviewDumper.swift` 当前 1,342 行，Phase 4 移到 `Tools/UIPreviewDumper/`，保留截图能力，但不再作为唯一 UI 验收手段。
+`[现状]` Phase 4 已扩到 **90 个 XCTest**（ApprovalQueue、MediaViewerModel、MarkdownTable 解析/上限/TSV、StreamingBlockParser 的代码围栏/CJK/未闭合强调/表格检测）。`UIPreviewDumper.swift` 当前 1,371 行，移出生产 target 需要先有 `QimingxingUI` library + public API，**延后到 Phase 6 的 Feature 拆分一起做**（本阶段不做，避免一次性 public 化全仓类型）。**尚未覆盖**：`GhostWriteEngine`、`ReconnectPolicy`（当前无独立类型）、`ProcessSupervisor`（需要 fake process/clock 注入）。
 
 ### 6.2 Python 测试
 
@@ -475,7 +475,7 @@ Tools/UIPreviewDumper/
 - 文件大小基线：`hub.py 3,135`、`QuickEntryPanel.swift 2,548`、`UIPreviewDumper.swift 1,342`；存量只降不升，新增文件 >800 行需拆分；
   `[现状]` Phase 1a 是功能净增（`hub.py` 3,207、`QuickEntryPanel.swift` 2,614）；Phase 5 起以 1a 后的数值为新基线。
 - 行数由 `scripts/metrics_report.py` 采集；**是否在 CI 阻断**留到 Phase 4 定（先只报告）；
-- `Package.swift` 的 `-disable-dynamic-actor-isolation` / `-disable-actor-data-race-checks`（`:18-19`）在并发问题修复后移除，不作为长期配置。
+- `[现状]` Phase 4 已移除 `Package.swift` 的 `-disable-dynamic-actor-isolation` / `-disable-actor-data-race-checks`：新 build path 下干净构建 + 90 tests 全绿，不再作为长期配置。
 
 ---
 

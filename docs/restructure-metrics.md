@@ -22,7 +22,7 @@ git worktree add /tmp/qmx-baseline 22ca135
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
 |---|---:|---:|---:|
 | Python 测试 | 276 | ≥276 | **296**（1a +6，1c +11，Phase 2 +3） |
-| Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **60**（Phase 1a 27 + Phase 3 33） |
+| Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **90**（Phase 1a 27 + Phase 3 33 + Phase 4 30） |
 | `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | **0**（Phase 1b） |
 | `body_web` 代码行 | 1,933 | 0 | **0**（Phase 1b） |
 | `body_web` 打包产物 | 随 `Resources/app/body_web` 打入 | 不打包 | **不在产物内**（Phase 1b） |
@@ -195,6 +195,18 @@ cd shell_macos && swift test   # 56 passed（新增 29）
 - 不注册（passive/transient，不接管 key）：Toast、DropPocket、Lasso、Walkie、菜单栏、QL 面板。
 - 例外清单（仍可直接 `NSApp.activate`）：`NSOpenPanel` 系统模态、fatal `NSAlert`、SpatialLasso overlay/popover、QL 预览、composer 焦点通知。
 - `resume` 保留原 sequence；`onKeyOwnerChanged` 会把模型里的 keyOwner 强制落到真实窗口（含 `ApprovalWindow.canBecomeKey = true`）。
+
+### 3.6 Phase 4 证据
+
+```bash
+cd shell_macos && swift test                          # 90 passed
+swift build --build-path /tmp/qmx-noflags             # 去掉 unsafe flags 后干净构建
+swift test --build-path /tmp/qmx-noflags2             # 90 passed，无并发诊断错误
+```
+
+- 新增 30 个测试：`ApprovalQueueModel`、`MediaViewerModel`、`MarkdownTable` 解析/15×100 上限/TSV、`StreamingBlockParser`（代码围栏、CJK、未闭合强调、表格检测、空输入）。
+- `Package.swift` 已删除 `-disable-dynamic-actor-isolation` / `-disable-actor-data-race-checks`。
+- 未做：`UIPreviewDumper` 移出生产 target（需要 library + public API，顺延到 Phase 6）；`GhostWriteEngine`/`ProcessSupervisor` 测试（缺少注入点）。
 
 ## 4. 性能
 
