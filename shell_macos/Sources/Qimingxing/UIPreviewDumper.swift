@@ -440,7 +440,38 @@ enum UIPreviewDumper {
             to: outputDir.appendingPathComponent("drop_pocket_stashed.png")
         )
 
-        // 5b. Detached media viewer with a virtual markdown table
+        // 5b. Phase 2: Walkie-Talkie Capsule, Spatial Lasso Popover & Pinned Note
+        let walkieController = WalkieTalkieVoiceController()
+        walkieController.configureForPreview(transcript: "帮我检查一下 18790 端口现在是否正常", level: 0.72)
+        render(
+            WalkieTalkieCapsuleView(controller: walkieController, onCancel: {}, onDone: {}),
+            size: CGSize(width: 360, height: 58),
+            to: outputDir.appendingPathComponent("walkie_talkie_capsule.png")
+        )
+
+        let lassoState = LassoPopoverState()
+        lassoState.thumbnail = sampleImage
+        lassoState.submittedQuestion = "这是什么报错？怎么修"
+        lassoState.answerText = "这是 Swift 6 跨隔离域传递非 Sendable 值引发的编译错误。可以在回调中先提取 `CGImage` 或基础标量字段后再切换回 `@MainActor`。"
+        render(
+            LassoPopoverView(state: lassoState, onSubmit: { _ in }, onPin: {}, onClose: {}),
+            size: CGSize(width: SpatialLassoGeometry.popoverWidth, height: SpatialLassoGeometry.answeredHeight),
+            to: outputDir.appendingPathComponent("lasso_popover.png")
+        )
+
+        let pinnedDemo = PinnedNoteItem(
+            id: UUID(),
+            thumbnail: sampleImage,
+            question: "端口排查要点",
+            answer: "1. 使用 lsof -i :18790 确认监听进程\n2. 若旧实例残留，先 pkill 后重新启动"
+        )
+        render(
+            PinnedNoteView(note: pinnedDemo, onClose: {}),
+            size: CGSize(width: 320, height: 260),
+            to: outputDir.appendingPathComponent("pinned_note.png")
+        )
+
+        // 5c. Detached media viewer with a virtual markdown table
         let tableView = MediaViewerContent(model: MediaViewerModel.shared, mode: .detached)
         render(tableView, size: CGSize(width: 860, height: 620), to: outputDir.appendingPathComponent("media_viewer_table.png"))
 
@@ -961,5 +992,95 @@ enum Phase1Verifier {
             to: targetURL
         )
         check(FileManager.default.fileExists(atPath: targetURL.path), "lazy write must produce target CSV file")
+    }
+}
+
+@MainActor
+enum Phase2Verifier {
+    private static func check(_ condition: Bool, _ message: String) {
+        if !condition {
+            fatalError("PHASE2_VERIFY FAIL: \(message)")
+        }
+    }
+
+    static func runAll() {
+        verifyDualStateHotkey()
+        verifySpatialLassoGeometry()
+        verifyWalkieTalkiePanel()
+        print("PHASE2_VERIFY PASS")
+    }
+
+    private static func verifyDualStateHotkey() {
+        // 1. Tap < 220ms
+        var tapState = DualStateHotkeyState()
+        tapState.handlePress(at: 10.00)
+        check(tapState.phase == .pendingTap, "press must enter pendingTap")
+        check(tapState.handleThresholdTick(at: 10.15) == .none, "<220ms tick must not trigger hold")
+        check(tapState.handleRelease(at: 10.18) == .tap, "release before 220ms must trigger tap")
+        check(tapState.phase == .idle, "tap release must return to idle")
+
+        // 2. Hold >= 220ms
+        var holdState = DualStateHotkeyState()
+        holdState.handlePress(at: 20.00)
+        check(holdState.handleThresholdTick(at: 20.22) == .holdStart, ">=220ms tick must start hold")
+        check(holdState.phase == .holding, "phase must be holding")
+        check(holdState.handleRelease(at: 21.50) == .holdEnd, "release after hold must trigger holdEnd")
+        check(holdState.phase == .idle, "holdEnd must reset to idle")
+
+        // 3. Cancel during hold (Esc)
+        var cancelState = DualStateHotkeyState()
+        cancelState.handlePress(at: 30.00)
+        check(cancelState.handleThresholdTick(at: 30.25) == .holdStart, "expected holdStart")
+        check(cancelState.cancel() == .holdCancel, "cancel during hold must emit holdCancel")
+        check(cancelState.handleRelease(at: 30.40) == .none, "release after cancel must be no-op")
+    }
+
+    private static func verifySpatialLassoGeometry() {
+        // Normalized rect from reverse drag
+        let norm = SpatialLassoGeometry.normalizedRect(
+            from: CGPoint(x: 400, y: 600),
+            to: CGPoint(x: 200, y: 450)
+        )
+        check(norm == CGRect(x: 200, y: 450, width: 200, height: 150), "normalizedRect mismatch")
+
+        // AppKit bottom-left -> display-local top-left
+        let screenFrame = CGRect(x: 1440, y: 0, width: 1920, height: 1080)
+        let appKitSelection = CGRect(x: 1640, y: 680, width: 300, height: 200)
+        let localRect = SpatialLassoGeometry.displayLocalSourceRect(
+            selection: appKitSelection,
+            screenFrame: screenFrame
+        )
+        check(
+            localRect == CGRect(x: 200, y: 200, width: 300, height: 200),
+            "displayLocalSourceRect coordinate flip mismatch: \(localRect)"
+        )
+
+        // Popover placement below selection + clamping inside visibleFrame
+        let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = CGSize(width: 340, height: 152)
+        let below = SpatialLassoGeometry.popoverFrame(
+            for: CGRect(x: 500, y: 500, width: 240, height: 160),
+            popoverSize: size,
+            visibleFrame: visible
+        )
+        check(abs(below.maxY - 490) < 0.5 && abs(below.minX - 500) < 0.5, "popover should sit 10pt below selection")
+
+        // Selection near bottom edge flips above selection
+        let nearBottom = SpatialLassoGeometry.popoverFrame(
+            for: CGRect(x: 1200, y: 20, width: 200, height: 120),
+            popoverSize: size,
+            visibleFrame: visible
+        )
+        check(nearBottom.minY >= 150 - 0.5 && nearBottom.maxX <= visible.maxX - 12 + 0.5, "bottom selection must flip above and clamp right edge")
+    }
+
+    private static func verifyWalkieTalkiePanel() {
+        let capsulePanel = WalkieTalkieCapsulePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 58),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        check(!capsulePanel.canBecomeKey && !capsulePanel.canBecomeMain, "WalkieTalkieCapsulePanel must never steal key/main focus")
     }
 }

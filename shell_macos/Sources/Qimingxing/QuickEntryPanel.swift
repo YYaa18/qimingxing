@@ -382,6 +382,25 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         show()
     }
 
+    func submitPromptText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if brainClient.phase != .connected {
+            brainClient.errorBannerText = "Brain 尚未连接，请稍候或检查后端日志。"
+            show()
+            return
+        }
+        if brainClient.profiles.isEmpty {
+            brainClient.errorBannerText = "还没有配置可用模型，请先打开设置完成配置。"
+            show()
+            return
+        }
+        inputState.forceExpanded = true
+        inputState.text = ""
+        show()
+        brainClient.sendText(trimmed, attachments: [], includeScreen: false)
+    }
+
     func hideAndRestoreFocus() {
         stopHeightDriver()
         inputState.isWorkspaceWingOpen = false
@@ -1291,14 +1310,13 @@ struct QuickEntryRootView: View {
             Spacer()
 
             Button {
-                // Voice input is not wired to a microphone pipeline yet.
-                // Keep the microphone target in place for the upcoming PTT work.
+                NotificationCenter.default.post(name: .qmxToggleWalkieTalkie, object: nil)
             } label: {
                 Image(systemName: "mic")
                     .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(.qmxIcon)
-            .help("语音输入（即将支持）")
+            .help("语音输入（或长按 ⌥Space 说话）")
             .accessibilityLabel("语音输入")
 
             Button {
@@ -1328,7 +1346,12 @@ struct QuickEntryRootView: View {
             }
             .buttonStyle(.qmxIcon)
             .foregroundStyle(inputState.includeScreen ? QMXTheme.accent : QMXTheme.textSecondary)
-            .help("看屏")
+            .help("看屏（右键可选择圈选问答 ⌥⇧Space）")
+            .contextMenu {
+                Button("屏幕圈选问答 (⌥⇧Space)") {
+                    NotificationCenter.default.post(name: .qmxStartSpatialLasso, object: nil)
+                }
+            }
 
             Button(action: startNewConversation) {
                 Image(systemName: "square.and.pencil")

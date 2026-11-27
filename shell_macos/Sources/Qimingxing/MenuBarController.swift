@@ -14,6 +14,7 @@ final class MenuBarController: NSObject {
     private let onOpenSettings: () -> Void
     private let onOpenWorkspace: () -> Void
     private let onOpenDropPocket: (() -> Void)?
+    private let onSpatialLasso: (() -> Void)?
     private var dropPocketBadgeCount: Int = 0
 
     init(
@@ -23,7 +24,8 @@ final class MenuBarController: NSObject {
         onOpenQuickEntry: @escaping () -> Void,
         onOpenSettings: @escaping () -> Void,
         onOpenWorkspace: @escaping () -> Void,
-        onOpenDropPocket: (() -> Void)? = nil
+        onOpenDropPocket: (() -> Void)? = nil,
+        onSpatialLasso: (() -> Void)? = nil
     ) {
         self.brainClient = brainClient
         self.supervisor = supervisor
@@ -32,6 +34,7 @@ final class MenuBarController: NSObject {
         self.onOpenSettings = onOpenSettings
         self.onOpenWorkspace = onOpenWorkspace
         self.onOpenDropPocket = onOpenDropPocket
+        self.onSpatialLasso = onSpatialLasso
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
 
@@ -123,8 +126,9 @@ final class MenuBarController: NSObject {
 
     private func configureContextMenu() {
         let items: [(String, Selector)] = [
-            ("打开对话", #selector(menuQuickEntry)),
+            ("打开对话 (⌥Space)", #selector(menuQuickEntry)),
             ("投喂口袋 (⌥D)", #selector(menuDropPocket)),
+            ("屏幕圈选问答 (⌥⇧Space)", #selector(menuSpatialLasso)),
             ("打开工作区", #selector(menuWorkspace)),
             ("设置与 API Key", #selector(menuSettings)),
             ("打开日志目录", #selector(menuOpenLogs)),
@@ -169,6 +173,7 @@ final class MenuBarController: NSObject {
 
     @objc private func menuQuickEntry() { onOpenQuickEntry() }
     @objc private func menuDropPocket() { onOpenDropPocket?() }
+    @objc private func menuSpatialLasso() { onSpatialLasso?() }
     @objc private func menuSettings() { onOpenSettings() }
     @objc private func menuWorkspace() { onOpenWorkspace() }
     @objc private func menuOpenLogs() { desktopActions.openLogsDirectory() }

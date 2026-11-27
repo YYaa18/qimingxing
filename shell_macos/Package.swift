@@ -19,6 +19,8 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("QuickLookUI"),
                 .linkedFramework("QuickLookThumbnailing"),
+                .linkedFramework("Speech"),
+                .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("UserNotifications"),
                 .linkedFramework("ServiceManagement")
