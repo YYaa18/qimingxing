@@ -329,7 +329,7 @@ final class WindowCoordinator {
 | 打开 Permission Guide | 不挂起；security 优先 | 归还 key |
 | Task Toast / Drop Pocket / Lasso / Walkie / 菜单栏弹层 | 不挂起 | 不改变 key |
 | QuickEntry 热键 | 切换 QuickEntry；若被挂起则恢复并置于当前内容之上 | 关闭后 key 回到原内容；审批/权限存在时不抢 |
-| Settings 打开时按 QuickEntry 热键 | `[待定]` 两种方案：A) 把 QuickEntry 提到 Settings 之上并挂起 Settings；B) 热键被吞掉，只把 Settings 置前 | Phase 3 开工前定 |
+| Settings 打开时按 QuickEntry 热键 | **A（已定）**：把 QuickEntry 提到 Settings 之上并挂起 Settings | 关闭 QuickEntry 后恢复 Settings；审批/权限存在时不抢 |
 
 **焦点归还规则**：
 
