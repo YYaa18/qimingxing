@@ -1525,6 +1525,7 @@ private struct TypewriterText: View {
     @State private var revealTask: Task<Void, Never>?
     @State private var blocks: [StageBlock] = []
     @State private var pendingParseText = ""
+    @State private var parsedText = ""
     @State private var parseTask: Task<Void, Never>?
     @State private var lastParseAt = Date.distantPast
 
@@ -1554,6 +1555,7 @@ private struct TypewriterText: View {
             _blocks = State(initialValue: parsed)
             _visibleCount = State(initialValue: parsed.reduce(0) { $0 + $1.text.count })
             _pendingParseText = State(initialValue: text)
+            _parsedText = State(initialValue: text)
         }
     }
 
@@ -1624,6 +1626,7 @@ private struct TypewriterText: View {
         guard force else { return }
         lastParseAt = Date()
         pendingParseText = raw
+        parsedText = raw
         blocks = Self.parse(raw)
     }
 
@@ -1676,8 +1679,9 @@ private struct TypewriterText: View {
     private func finishRevealIfCaughtUp() {
         // If a throttled parse is still pending, the visible blocks are stale;
         // ending the reveal now would mark the answer complete before the last
-        // delta is actually rendered.
-        guard parseTask == nil, pendingParseText == text else { return }
+        // delta is actually rendered. Compare the two @State values: `text` is
+        // a captured struct property and may be older than the latest delta.
+        guard parseTask == nil, parsedText == pendingParseText else { return }
         onFinish()
     }
 
