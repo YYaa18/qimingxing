@@ -22,7 +22,7 @@ git worktree add /tmp/qmx-baseline 22ca135
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
 |---|---:|---:|---:|
 | Python 测试 | 276 | ≥276 | 待填 |
-| Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | 待填 |
+| Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **1**（Phase 0 骨架） |
 | `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | 待填 |
 | `body_web` 代码行 | 1,933 | 0 | 待填 |
 | `body_web` 打包产物 | 随 `Resources/app/body_web` 打入 | 不打包 | 待填 |
@@ -105,5 +105,9 @@ assert not victim.exists()          # 基线：True（文件被删）
 |---|---:|---:|---:|
 | 冷启动到可输入 | 未采集（改造 PR 不得回退 >10%） | ≤ 基线 | 待填 |
 | 空闲内存 | 未采集 | ≤ 基线 | 待填 |
+| Swift debug 构建（`swift test`） | 18.5 s | 不回退 >10% | 18.5 s（Phase 0） |
+| Swift release 构建 | 27.6 s | 不回退 >10% | 27.6 s（Phase 0） |
+
+> 构建时间为本机 arm64 实测，仅用于同一台机器上的前后对比。
 
 > 性能基线需要真实启动 App 采样，在 Phase 1b 前补采一次；本轮不以性能为主目标，只做防回退。

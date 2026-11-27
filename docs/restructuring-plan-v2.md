@@ -374,7 +374,7 @@ Sources/Qimingxing/         # App 入口与依赖装配
 Tests/QimingxingCoreTests/
 ```
 
-Phase 0 的 10 分钟 spike：先验证 SwiftPM 能否让 test target 直接 `@testable import Qimingxing`（现有 `@main class AppDelegate` 可能受限）。可行则 Phase 1a 直接测；不可行则把纯逻辑搬进 `QimingxingCore`。
+`[现状]` Phase 0 已验证：SwiftPM 6.4 允许 test target 直接依赖 executable target，`@testable import Qimingxing` 可用（`ModuleSmokeTests` 通过；本地 debug 构建 18.5s、release 27.6s）。Phase 1a 直接测；`QimingxingCore` 拆分留到 Phase 4，按需进行。
 
 首期（Phase 1a）≥20 个 XCTest，覆盖：
 
