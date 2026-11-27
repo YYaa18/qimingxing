@@ -5,6 +5,7 @@ import SwiftUI
 struct QMXOutputCardView: View {
     let card: OutputCardItem
     var isBusy: Bool = false
+    var onOpenTable: ((QMXMarkdownTable) -> Void)? = nil
     var onAction: (CardActionItem) -> Void = { _ in }
 
     @State private var isCollapsed = false
@@ -15,7 +16,10 @@ struct QMXOutputCardView: View {
             header
 
             if !isCollapsed, !card.contentMarkdown.isEmpty {
-                MarkdownMessageView(text: QMXCardMarkers.strip(card.contentMarkdown))
+                MarkdownMessageView(
+                    text: QMXCardMarkers.strip(card.contentMarkdown),
+                    onOpenTable: onOpenTable
+                )
             }
 
             if !card.actions.isEmpty {

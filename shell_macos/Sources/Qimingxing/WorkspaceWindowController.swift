@@ -196,6 +196,43 @@ final class WorkspaceStore: ObservableObject {
         brainClient.sendCardAction(cardId: card.cardId, action: action.id, turnId: turnId)
     }
 
+    /// Card tables are deduped out of the media strip; the notice inside the
+    /// card opens the full viewer, preferring the brain media twin.
+    func openCardTable(
+        _ table: QMXMarkdownTable,
+        media: [MediaItem]?,
+        contextTitle: String
+    ) {
+        let signature = table.dedupeSignature
+        if let match = (media ?? []).first(where: {
+            $0.isMarkdownTable
+                && QMXTableDedupe.signature(
+                    columns: $0.previewColumns,
+                    rows: $0.previewRows
+                ) == signature
+        }) {
+            MediaViewerLauncher.open(
+                items: [match],
+                selectedID: match.mediaId,
+                title: match.title.isEmpty ? "表格" : match.title,
+                contextLabel: contextTitle,
+                prefersLargeWindow: true
+            )
+            return
+        }
+        let fallback = table.asMediaItem(
+            id: "card_table_\(table.id)",
+            contextTitle: contextTitle
+        )
+        MediaViewerLauncher.open(
+            items: [fallback],
+            selectedID: fallback.mediaId,
+            title: fallback.title,
+            contextLabel: contextTitle,
+            prefersLargeWindow: true
+        )
+    }
+
     private func ingestTasks(_ tasks: [BackgroundTaskItem]) {
         for task in tasks {
             let itemID = "task_\(task.taskId)"
@@ -856,7 +893,16 @@ struct WorkspaceRootView: View {
                 }
                 if let cards = turn.cards, !cards.isEmpty {
                     ForEach(cards) { card in
-                        QMXOutputCardView(card: card) { action in
+                        QMXOutputCardView(
+                            card: card,
+                            onOpenTable: { table in
+                                store.openCardTable(
+                                    table,
+                                    media: turn.media,
+                                    contextTitle: "工作区"
+                                )
+                            }
+                        ) { action in
                             store.sendCardAction(card, action: action, turnItemID: turn.id)
                         }
                     }
@@ -920,7 +966,16 @@ struct WorkspaceRootView: View {
             }
             if let cards = item.cards, !cards.isEmpty {
                 ForEach(cards) { card in
-                    QMXOutputCardView(card: card) { action in
+                    QMXOutputCardView(
+                        card: card,
+                        onOpenTable: { table in
+                            store.openCardTable(
+                                table,
+                                media: item.media,
+                                contextTitle: "工作区"
+                            )
+                        }
+                    ) { action in
                         store.sendCardAction(card, action: action, turnItemID: item.id)
                     }
                 }

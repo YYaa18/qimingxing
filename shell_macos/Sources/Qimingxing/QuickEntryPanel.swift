@@ -1287,11 +1287,48 @@ struct QuickEntryRootView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: latestTurn?.media.isEmpty ?? true)
     }
 
+    /// Card tables are deduped out of the media strip, so the notice inside
+    /// the card is the only entry point. Prefer the brain media twin (full
+    /// payload); fall back to the parsed table.
+    private func openCardTable(_ table: QMXMarkdownTable, turn: LiveTurn) {
+        let signature = table.dedupeSignature
+        if let media = turn.media.first(where: {
+            $0.isMarkdownTable
+                && QMXTableDedupe.signature(
+                    columns: $0.previewColumns,
+                    rows: $0.previewRows
+                ) == signature
+        }) {
+            MediaViewerLauncher.open(
+                items: [media],
+                selectedID: media.mediaId,
+                title: media.title.isEmpty ? "表格" : media.title,
+                contextLabel: "本轮回答",
+                prefersLargeWindow: true
+            )
+            return
+        }
+        let fallback = table.asMediaItem(
+            id: "card_table_\(table.id)_\(turn.id)",
+            contextTitle: "本轮回答"
+        )
+        MediaViewerLauncher.open(
+            items: [fallback],
+            selectedID: fallback.mediaId,
+            title: fallback.title,
+            contextLabel: "本轮回答",
+            prefersLargeWindow: true
+        )
+    }
+
     @ViewBuilder
-    private func cardsView(_ turn: LiveTurn) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func cardsView(_ turn: LiveTurn) -> some View {        VStack(alignment: .leading, spacing: 8) {
             ForEach(turn.cards) { card in
-                QMXOutputCardView(card: card, isBusy: brainClient.isGenerating) { action in
+                QMXOutputCardView(
+                    card: card,
+                    isBusy: brainClient.isGenerating,
+                    onOpenTable: { table in openCardTable(table, turn: turn) }
+                ) { action in
                     brainClient.sendCardAction(
                         cardId: card.cardId,
                         action: action.id,

@@ -710,6 +710,8 @@ struct InlineMarkdownText: View {
 
 struct MarkdownMessageView: View {
     let text: String
+    /// When provided, table notices become tappable and open the full viewer.
+    var onOpenTable: ((QMXMarkdownTable) -> Void)? = nil
 
     var body: some View {
         let blocks = Self.parseBlocks(QMXCardMarkers.strip(text))
@@ -721,7 +723,10 @@ struct MarkdownMessageView: View {
                 case .prose(let proseText):
                     ProseMarkdownText(proseText)
                 case .table(let table):
-                    QMXTableNotice(table: table)
+                    QMXTableNotice(
+                        table: table,
+                        onOpen: onOpenTable.map { handler in { handler(table) } }
+                    )
                 }
             }
         }
