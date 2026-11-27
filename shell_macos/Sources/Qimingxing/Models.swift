@@ -340,6 +340,7 @@ extension Notification.Name {
     static let qmxFocusComposer = Notification.Name("com.qimingxing.desktop.focusComposer")
     static let qmxToggleWalkieTalkie = Notification.Name("com.qimingxing.desktop.toggleWalkieTalkie")
     static let qmxStartSpatialLasso = Notification.Name("com.qimingxing.desktop.startSpatialLasso")
+    static let qmxDragShakeSettingChanged = Notification.Name("com.qimingxing.desktop.dragShakeSettingChanged")
 }
 
 enum JSONHelper {

@@ -493,6 +493,7 @@ private struct RouteModelMenu: View {
 struct SettingsRootView: View {
     @AppStorage("qmx.answerFontSize") private var answerFontSize: Double = 16
     @AppStorage("qmx.answerMaxLines") private var answerMaxLines: Int = 30
+    @AppStorage("qmx.dropPocket.dragShakeEnabled") private var dragShakeEnabled: Bool = false
     @ObservedObject var store: SettingsViewStore
     @ObservedObject var brainClient: BrainClient
     let supervisor: ProcessSupervisor
@@ -728,6 +729,18 @@ struct SettingsRootView: View {
 
                 Toggle("状态提示音", isOn: $store.earconsEnabled)
                     .frame(minHeight: 40)
+                Toggle(isOn: $dragShakeEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("拖拽文件时晃动鼠标唤出托盘")
+                        Text("开启后，在 Finder 等应用中拖起文件并左右快速晃动鼠标，将在屏边自动弹出投喂托盘")
+                            .font(.system(size: 11))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                    }
+                }
+                .onChange(of: dragShakeEnabled) { enabled in
+                    NotificationCenter.default.post(name: .qmxDragShakeSettingChanged, object: enabled)
+                }
+                .padding(.vertical, 2)
                 if supervisor.isGodotPluginAvailable {
                     Toggle("可选桌面头像插件", isOn: $store.avatarEnabled)
                         .frame(minHeight: 40)

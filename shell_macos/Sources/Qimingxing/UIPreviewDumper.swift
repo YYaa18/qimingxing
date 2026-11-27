@@ -249,6 +249,28 @@ enum UIPreviewDumper {
             to: outputDir.appendingPathComponent("quick_entry_thinking.png")
         )
 
+        // 2c. Quick Entry (Phase 3 Ghost Write captured selection capsule)
+        client.isGenerating = false
+        let inputStateGhost = QuickEntryInputState()
+        let sampleLines = (1...18).map { "line \($0)" }.joined(separator: "\n")
+        inputStateGhost.capturedSelection = CapturedSelectionContext.make(
+            text: sampleLines,
+            appName: "Xcode",
+            bundleId: "com.apple.dt.Xcode"
+        )
+        let qeGhost = QuickEntryRootView(
+            brainClient: client,
+            desktopActions: desktop,
+            workspaceStore: workspaceStore,
+            inputState: inputStateGhost,
+            onClose: {}
+        )
+        render(
+            qeGhost,
+            size: CGSize(width: QuickEntryLayout.chatWidth, height: QuickEntryLayout.idleHeight + 34),
+            to: outputDir.appendingPathComponent("quick_entry_ghost_selection.png")
+        )
+
         // 3. Menu Bar Popover
         let popover = MenuBarPopoverView(
             brainClient: client,
@@ -436,8 +458,24 @@ enum UIPreviewDumper {
         stashedController.configureForPreview(edge: .right, phase: .stashedStack, items: stashedDemoItems)
         render(
             EdgeShelfRootView(controller: stashedController, onClose: {}),
-            size: ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: stashedDemoItems.count),
+            size: ScreenEdgeResolver.targetSize(for: .stashedStack, edge: .right, itemCount: stashedDemoItems.count),
             to: outputDir.appendingPathComponent("drop_pocket_stashed.png")
+        )
+
+        let topEmptyController = DropPocketController(brainClient: client)
+        topEmptyController.configureForPreview(edge: .top, phase: .idleEar, items: [])
+        render(
+            EdgeShelfRootView(controller: topEmptyController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .idleEar, edge: .top, itemCount: 0),
+            to: outputDir.appendingPathComponent("drop_pocket_top_empty.png")
+        )
+
+        let topStashedController = DropPocketController(brainClient: client)
+        topStashedController.configureForPreview(edge: .top, phase: .stashedStack, items: stashedDemoItems)
+        render(
+            EdgeShelfRootView(controller: topStashedController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .stashedStack, edge: .top, itemCount: stashedDemoItems.count),
+            to: outputDir.appendingPathComponent("drop_pocket_top_stashed.png")
         )
 
         // 5b. Phase 2: Walkie-Talkie Capsule, Spatial Lasso Popover & Pinned Note
@@ -882,7 +920,7 @@ enum Phase1Verifier {
         check(leftPlace.edge == .left, "single screen left cursor should dock left")
         let leftIdleFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: leftPlace)
         check(abs(leftIdleFrame.minX - primary.visibleFrame.minX) < 0.5, "left dock must sit flush at minX")
-        check(leftIdleFrame.size == CGSize(width: 48, height: 220), "idle ear size must be 48x220")
+        check(leftIdleFrame.size == CGSize(width: 48, height: 330), "idle ear size must be 48x330")
 
         let rightPlace = ScreenEdgeResolver.resolve(for: CGPoint(x: 1300, y: 500), screens: [primary])
         check(rightPlace.edge == .right, "single screen right cursor should dock right")
@@ -907,11 +945,11 @@ enum Phase1Verifier {
 
         // 4. Target sizes across all 3 phases + edge-anchored resize invariant
         let expSize = ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: .summary), itemCount: 0)
-        check(expSize == CGSize(width: 224, height: 220), "dragExpanded size must be 224x220")
+        check(expSize == CGSize(width: 224, height: 330), "dragExpanded size must be 224x330")
         let stashed1 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 1)
         let stashed3 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 5)
-        check(stashed1.width == 112 && stashed1.height >= 176, "stashed 1-item size mismatch")
-        check(stashed3 == CGSize(width: 112, height: 288), "stashed 3+-item size mismatch: \(stashed3)")
+        check(stashed1.width == 112 && stashed1.height >= 264, "stashed 1-item size mismatch")
+        check(stashed3 == CGSize(width: 112, height: 432), "stashed 3+-item size mismatch: \(stashed3)")
 
         let earRightFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: rightPlace)
         let expRightFrame = ScreenEdgeResolver.frame(for: expSize, placement: rightPlace)
@@ -925,6 +963,44 @@ enum Phase1Verifier {
             defer: false
         )
         check(!shelfPanel.canBecomeKey && !shelfPanel.canBecomeMain, "DropShelfPanel must never steal key/main focus")
+
+        // 6. 3-Edge magnetic snap classification, top horizontal layout & multi-monitor fallback
+        let leftSnap = ScreenEdgeResolver.snapToNearestEdge(
+            CGRect(x: 40, y: 400, width: 48, height: 220),
+            in: primary.visibleFrame
+        )
+        check(leftSnap.edge == .left && leftSnap.x == primary.visibleFrame.minX, "drag near left edge must snap .left")
+
+        let rightSnap = ScreenEdgeResolver.snapToNearestEdge(
+            CGRect(x: 1360, y: 400, width: 48, height: 220),
+            in: primary.visibleFrame
+        )
+        check(rightSnap.edge == .right && rightSnap.x == primary.visibleFrame.maxX, "drag near right edge must snap .right")
+
+        let topSnap = ScreenEdgeResolver.snapToNearestEdge(
+            CGRect(x: 570, y: 810, width: 300, height: 44),
+            in: primary.visibleFrame
+        )
+        check(topSnap.edge == .top && topSnap.y == primary.visibleFrame.maxY && abs(topSnap.x - 720) < 0.5, "drag near top edge must snap .top")
+
+        let topIdle = ScreenEdgeResolver.targetSize(for: .idleEar, edge: .top, itemCount: 0)
+        let topExp = ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: nil), edge: .top, itemCount: 0)
+        let topStash = ScreenEdgeResolver.targetSize(for: .stashedStack, edge: .top, itemCount: 4)
+        check(topIdle == CGSize(width: 300, height: 44), "top idle size must be 300x44")
+        check(topExp == CGSize(width: 450, height: 184), "top expanded size must be 450x184")
+        check(topStash == CGSize(width: 519, height: 88), "top stashed 3+ size mismatch: \(topStash)")
+
+        let restoredTop = ScreenEdgeResolver.resolveFromSaved(topSnap, screens: [primary, secondary])
+        let topDockFrame = ScreenEdgeResolver.frame(for: topIdle, placement: restoredTop)
+        check(abs(topDockFrame.maxY - primary.visibleFrame.maxY) < 0.5 && abs(topDockFrame.midX - topSnap.x) < 0.5, "top dock must sit flush at top visibleFrame and keep horizontal anchor")
+
+        // Disconnected monitor fallback: saved position on secondary falls back cleanly onto primary
+        let offlineFallback = ScreenEdgeResolver.resolveFromSaved(
+            SavedShelfPosition(x: 2400, y: 800, edge: .right),
+            screens: [primary]
+        )
+        let offlineFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: offlineFallback)
+        check(primary.visibleFrame.contains(offlineFrame), "disconnected monitor saved coords must clamp onto active screen")
     }
 
     private static func verifyHoldToApproveAndQueue() {
@@ -1091,5 +1167,79 @@ enum Phase2Verifier {
             defer: false
         )
         check(!capsulePanel.canBecomeKey && !capsulePanel.canBecomeMain, "WalkieTalkieCapsulePanel must never steal key/main focus")
+    }
+}
+
+@MainActor
+enum Phase3Verifier {
+    private static func check(_ condition: Bool, _ message: String) {
+        if !condition {
+            fatalError("PHASE3_VERIFY FAIL: \(message)")
+        }
+    }
+
+    static func runAll() {
+        verifyCapturedSelectionAndPrompt()
+        verifyPasteboardSnapshotRoundTrip()
+        verifyDragShakeDetector()
+        print("PHASE3_VERIFY PASS")
+    }
+
+    private static func verifyCapturedSelectionAndPrompt() {
+        check(
+            CapturedSelectionContext.make(text: "   \n\t ", appName: "Notes", bundleId: "com.apple.Notes") == nil,
+            "whitespace-only selection must be ignored"
+        )
+        let lines = (1...18).map { "let line\($0) = \($0)" }.joined(separator: "\n")
+        guard let ctx = CapturedSelectionContext.make(text: lines, appName: "Xcode", bundleId: "com.apple.dt.Xcode") else {
+            check(false, "valid multiline selection must succeed")
+            return
+        }
+        check(ctx.lineCount == 18 && ctx.summaryLabel == "已捕获 · Xcode 选区 · 18 行", "summaryLabel mismatch: \(ctx.summaryLabel)")
+
+        let prompt = GhostWriteEngine.formatPromptWithSelection(userPrompt: "优化这段代码", selection: ctx)
+        check(prompt.contains("Xcode") && prompt.contains("let line18 = 18") && prompt.contains("优化这段代码"), "formatted ghost write prompt missing fields")
+    }
+
+    private static func verifyPasteboardSnapshotRoundTrip() {
+        let items = [
+            PasteboardSnapshotItem(entries: [
+                .init(typeRawValue: NSPasteboard.PasteboardType.string.rawValue, data: Data("原始剪贴板内容".utf8)),
+                .init(typeRawValue: "com.example.custom-type", data: Data([0xDE, 0xAD, 0xBE, 0xEF])),
+            ])
+        ]
+        check(PasteboardSnapshot.roundTripVerify(items: items), "pasteboard snapshot must losslessly preserve multi-type items")
+    }
+
+    private static func verifyDragShakeDetector() {
+        var detector = DragShakeDetector()
+
+        // Linear drag in one direction must not trigger
+        check(!detector.record(x: 100, at: 1.00), "initial sample should not trigger")
+        check(!detector.record(x: 120, at: 1.05), "linear drag step 1 should not trigger")
+        check(!detector.record(x: 140, at: 1.10), "linear drag step 2 should not trigger")
+        check(!detector.record(x: 165, at: 1.15), "linear drag step 3 should not trigger")
+
+        // Micro-jitter < 12pt must not trigger
+        check(!detector.record(x: 158, at: 1.18), "micro jitter should be ignored")
+
+        // 3 rapid reversals >= 12pt within 400ms must trigger
+        var fast = DragShakeDetector()
+        check(!fast.record(x: 500, at: 2.00), "start")
+        check(!fast.record(x: 524, at: 2.07), "right move")
+        check(!fast.record(x: 496, at: 2.14), "reversal 1")
+        check(!fast.record(x: 530, at: 2.21), "reversal 2")
+        check(fast.record(x: 498, at: 2.28), "reversal 3 within 400ms must trigger")
+
+        // Immediate follow-up inside 1.2s cooldown must be suppressed
+        check(!fast.record(x: 530, at: 2.35), "cooldown must suppress immediate repeat")
+        check(!fast.record(x: 495, at: 2.42), "cooldown must suppress reversal 1")
+
+        // Slow reversals > 400ms must reset and not trigger
+        var slow = DragShakeDetector()
+        check(!slow.record(x: 500, at: 5.00), "slow start")
+        check(!slow.record(x: 524, at: 5.20), "slow right")
+        check(!slow.record(x: 496, at: 5.45), "window expired -> reset")
+        check(!slow.record(x: 530, at: 5.65), "only reversal 1 after reset")
     }
 }

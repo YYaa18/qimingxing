@@ -6,9 +6,48 @@ import UniformTypeIdentifiers
 
 // MARK: - Scheme C Geometry, Multi-Screen Resolver & State Models
 
-enum ShelfDockEdge: Equatable {
+enum ShelfDockEdge: String, Equatable {
     case left
     case right
+    case top
+
+    var isHorizontal: Bool { self == .top }
+}
+
+struct SavedShelfPosition: Equatable {
+    static let hasKey = "qmx.dropPocket.hasSavedPosition"
+    static let xKey = "qmx.dropPocket.savedX"
+    static let yKey = "qmx.dropPocket.savedY"
+    static let edgeKey = "qmx.dropPocket.savedEdge"
+    static let legacyModeKey = "qmx.dropPocket.savedMode"
+
+    let x: CGFloat
+    let y: CGFloat
+    let edge: ShelfDockEdge
+
+    static func load(defaults: UserDefaults = .standard) -> SavedShelfPosition? {
+        guard defaults.bool(forKey: hasKey) else { return nil }
+        let x = CGFloat(defaults.double(forKey: xKey))
+        let y = CGFloat(defaults.double(forKey: yKey))
+        let rawEdge = defaults.string(forKey: edgeKey) ?? defaults.string(forKey: legacyModeKey) ?? ShelfDockEdge.right.rawValue
+        let edge = ShelfDockEdge(rawValue: rawEdge) ?? .right
+        return SavedShelfPosition(x: x, y: y, edge: edge)
+    }
+
+    func save(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: Self.hasKey)
+        defaults.set(Double(x), forKey: Self.xKey)
+        defaults.set(Double(y), forKey: Self.yKey)
+        defaults.set(edge.rawValue, forKey: Self.edgeKey)
+    }
+
+    static func clear(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: hasKey)
+        defaults.removeObject(forKey: xKey)
+        defaults.removeObject(forKey: yKey)
+        defaults.removeObject(forKey: edgeKey)
+        defaults.removeObject(forKey: legacyModeKey)
+    }
 }
 
 struct ShelfScreenBounds: Equatable {
@@ -19,7 +58,22 @@ struct ShelfScreenBounds: Equatable {
 struct ShelfPlacement: Equatable {
     let edge: ShelfDockEdge
     let visibleFrame: CGRect
-    let anchorY: CGFloat
+    let anchorPoint: CGPoint
+
+    var anchorY: CGFloat { anchorPoint.y }
+
+    init(edge: ShelfDockEdge, visibleFrame: CGRect, anchorY: CGFloat) {
+        self.edge = edge
+        self.visibleFrame = visibleFrame
+        let x: CGFloat = edge == .left ? visibleFrame.minX : (edge == .right ? visibleFrame.maxX : visibleFrame.midX)
+        self.anchorPoint = CGPoint(x: x, y: anchorY)
+    }
+
+    init(edge: ShelfDockEdge, visibleFrame: CGRect, anchorPoint: CGPoint) {
+        self.edge = edge
+        self.visibleFrame = visibleFrame
+        self.anchorPoint = anchorPoint
+    }
 }
 
 enum ShelfQuickSlot: String, CaseIterable, Identifiable {
@@ -52,11 +106,18 @@ enum ShelfPhase: Equatable {
 }
 
 enum ScreenEdgeResolver {
-    static let idleEarSize = CGSize(width: 48, height: 220)
-    static let dragExpandedSize = CGSize(width: 224, height: 220)
+    static let idleEarSize = CGSize(width: 48, height: 330)
+    static let dragExpandedSize = CGSize(width: 224, height: 330)
     static let stashedWidth: CGFloat = 112
-    static let stashedMaxHeight: CGFloat = 292
-    static let stashedMinHeight: CGFloat = 176
+    static let stashedMaxHeight: CGFloat = 438
+    static let stashedMinHeight: CGFloat = 264
+
+    static let topIdleSize = CGSize(width: 300, height: 44)
+    static let topExpandedSize = CGSize(width: 450, height: 184)
+    static let topStashedHeight: CGFloat = 88
+    static let topStashedMinWidth: CGFloat = 315
+    static let topStashedMaxWidth: CGFloat = 546
+
     static let cornerRadius: CGFloat = 20
 
     static func resolve(for mouse: CGPoint, screens: [ShelfScreenBounds]) -> ShelfPlacement {
@@ -93,7 +154,61 @@ enum ScreenEdgeResolver {
             edge = distToLeft <= distToRight ? .left : .right
         }
 
-        return ShelfPlacement(edge: edge, visibleFrame: current.visibleFrame, anchorY: mouse.y)
+        let anchorX = edge == .left ? current.visibleFrame.minX : current.visibleFrame.maxX
+        return ShelfPlacement(
+            edge: edge,
+            visibleFrame: current.visibleFrame,
+            anchorPoint: CGPoint(x: anchorX, y: mouse.y)
+        )
+    }
+
+    static func resolveFromSaved(
+        _ saved: SavedShelfPosition,
+        screens: [ShelfScreenBounds]
+    ) -> ShelfPlacement {
+        let fallback = ShelfScreenBounds(
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        )
+        let savedPt = CGPoint(x: saved.x, y: saved.y)
+        let matched = screens.first(where: { $0.frame.contains(savedPt) })
+            ?? screens.min(by: { a, b in
+                hypot(a.frame.midX - savedPt.x, a.frame.midY - savedPt.y)
+                    < hypot(b.frame.midX - savedPt.x, b.frame.midY - savedPt.y)
+            })
+            ?? fallback
+
+        return ShelfPlacement(
+            edge: saved.edge,
+            visibleFrame: matched.visibleFrame,
+            anchorPoint: savedPt
+        )
+    }
+
+    @MainActor
+    static func resolveFromSaved(
+        _ saved: SavedShelfPosition,
+        nsScreens: [NSScreen] = NSScreen.screens
+    ) -> ShelfPlacement {
+        let bounds = nsScreens.map { ShelfScreenBounds(frame: $0.frame, visibleFrame: $0.visibleFrame) }
+        return resolveFromSaved(saved, screens: bounds)
+    }
+
+    static func snapToNearestEdge(
+        _ frame: CGRect,
+        in visibleFrame: CGRect
+    ) -> SavedShelfPosition {
+        let distLeft = max(0, frame.minX - visibleFrame.minX)
+        let distRight = max(0, visibleFrame.maxX - frame.maxX)
+        let distTop = max(0, visibleFrame.maxY - frame.maxY)
+
+        if distTop <= distLeft && distTop <= distRight {
+            return SavedShelfPosition(x: frame.midX, y: visibleFrame.maxY, edge: .top)
+        }
+        if distLeft <= distRight {
+            return SavedShelfPosition(x: visibleFrame.minX, y: frame.midY, edge: .left)
+        }
+        return SavedShelfPosition(x: visibleFrame.maxX, y: frame.midY, edge: .right)
     }
 
     @MainActor
@@ -102,33 +217,63 @@ enum ScreenEdgeResolver {
         return resolve(for: mouse, screens: bounds)
     }
 
-    static func targetSize(for phase: ShelfPhase, itemCount: Int) -> CGSize {
+    static func targetSize(
+        for phase: ShelfPhase,
+        edge: ShelfDockEdge = .right,
+        itemCount: Int
+    ) -> CGSize {
+        let visibleCount = min(max(itemCount, 1), 3)
+        if edge == .top {
+            switch phase {
+            case .idleEar:
+                return topIdleSize
+            case .dragExpanded:
+                return topExpandedSize
+            case .stashedStack:
+                let width = min(topStashedMaxWidth, max(topStashedMinWidth, 204 + CGFloat(visibleCount) * 105))
+                return CGSize(width: width, height: topStashedHeight)
+            }
+        }
         switch phase {
         case .idleEar:
             return idleEarSize
         case .dragExpanded:
             return dragExpandedSize
         case .stashedStack:
-            let visibleCount = min(max(itemCount, 1), 3)
-            let height = min(stashedMaxHeight, max(stashedMinHeight, 96 + CGFloat(visibleCount) * 64))
+            let height = min(stashedMaxHeight, max(stashedMinHeight, 144 + CGFloat(visibleCount) * 96))
             return CGSize(width: stashedWidth, height: height)
         }
     }
 
     static func frame(for size: CGSize, placement: ShelfPlacement, verticalMargin: CGFloat = 24) -> CGRect {
-        let x: CGFloat = placement.edge == .left
-            ? placement.visibleFrame.minX
-            : placement.visibleFrame.maxX - size.width
+        switch placement.edge {
+        case .left, .right:
+            let x: CGFloat = placement.edge == .left
+                ? placement.visibleFrame.minX
+                : placement.visibleFrame.maxX - size.width
 
-        let minY = placement.visibleFrame.minY + verticalMargin
-        let maxY = placement.visibleFrame.maxY - size.height - verticalMargin
-        let y: CGFloat
-        if maxY < minY {
-            y = placement.visibleFrame.midY - size.height / 2
-        } else {
-            y = min(max(placement.anchorY - size.height / 2, minY), maxY)
+            let minY = placement.visibleFrame.minY + verticalMargin
+            let maxY = placement.visibleFrame.maxY - size.height - verticalMargin
+            let y: CGFloat
+            if maxY < minY {
+                y = placement.visibleFrame.midY - size.height / 2
+            } else {
+                y = min(max(placement.anchorPoint.y - size.height / 2, minY), maxY)
+            }
+            return CGRect(origin: CGPoint(x: x, y: y), size: size)
+
+        case .top:
+            let y = placement.visibleFrame.maxY - size.height
+            let minX = placement.visibleFrame.minX + verticalMargin
+            let maxX = placement.visibleFrame.maxX - size.width - verticalMargin
+            let x: CGFloat
+            if maxX < minX {
+                x = placement.visibleFrame.midX - size.width / 2
+            } else {
+                x = min(max(placement.anchorPoint.x - size.width / 2, minX), maxX)
+            }
+            return CGRect(origin: CGPoint(x: x, y: y), size: size)
         }
-        return CGRect(origin: CGPoint(x: x, y: y), size: size)
     }
 }
 
@@ -141,6 +286,52 @@ struct DropPocketItem: Identifiable, Equatable {
     var textSnippet: String?
     var sourceURL: URL?
     var thumbnail: NSImage?
+}
+
+struct DragShakeDetector {
+    static let windowDuration: TimeInterval = 0.40
+    static let minSegmentDeltaX: CGFloat = 12
+    static let requiredReversals: Int = 3
+    static let cooldown: TimeInterval = 1.2
+
+    private var windowStartAt: TimeInterval?
+    private var anchorX: CGFloat = 0
+    private var lastDirection: Int = 0
+    private var reversals: Int = 0
+    private var lastTriggeredAt: TimeInterval = -100
+
+    mutating func record(x: CGFloat, at timestamp: TimeInterval) -> Bool {
+        if timestamp - lastTriggeredAt < Self.cooldown {
+            windowStartAt = nil
+            lastDirection = 0
+            reversals = 0
+            anchorX = x
+            return false
+        }
+        guard let start = windowStartAt, timestamp - start <= Self.windowDuration else {
+            windowStartAt = timestamp
+            anchorX = x
+            lastDirection = 0
+            reversals = 0
+            return false
+        }
+        let dx = x - anchorX
+        guard abs(dx) >= Self.minSegmentDeltaX else { return false }
+        let dir = dx > 0 ? 1 : -1
+        anchorX = x
+        if lastDirection != 0 && dir != lastDirection {
+            reversals += 1
+            if reversals >= Self.requiredReversals {
+                lastTriggeredAt = timestamp
+                windowStartAt = nil
+                lastDirection = 0
+                reversals = 0
+                return true
+            }
+        }
+        lastDirection = dir
+        return false
+    }
 }
 
 // MARK: - Non-Activating Dark Obsidian Panel & Drag Destination Host
@@ -266,7 +457,9 @@ private final class EdgeDropHostView: NSView {
 // MARK: - Controller
 
 @MainActor
-final class DropPocketController: ObservableObject {
+final class DropPocketController: NSObject, ObservableObject, NSWindowDelegate {
+    static let dragShakeDefaultsKey = "qmx.dropPocket.dragShakeEnabled"
+
     @Published private(set) var items: [DropPocketItem] = []
     @Published private(set) var isVisible: Bool = false
     @Published private(set) var phase: ShelfPhase = .idleEar
@@ -275,12 +468,60 @@ final class DropPocketController: ObservableObject {
     private var panel: DropShelfPanel?
     private var currentPlacement: ShelfPlacement?
     private let brainClient: BrainClient
+    private var shakeDetector = DragShakeDetector()
+    private var lastDragChangeCount: Int = -1
+    private var programmaticMoveCount: Int = 0
+    private nonisolated(unsafe) var dragShakeMonitor: Any?
+    private nonisolated(unsafe) var snapTimer: Timer?
 
     var onDeliverToQuickEntry: (([StagedAttachment], [String]) -> Void)?
     var onPendingCountChanged: ((Int) -> Void)?
 
     init(brainClient: BrainClient) {
         self.brainClient = brainClient
+        super.init()
+        if !QMXTheme.isHeadlessDump, UserDefaults.standard.bool(forKey: Self.dragShakeDefaultsKey) {
+            setDragShakeEnabled(true)
+        }
+    }
+
+    deinit {
+        snapTimer?.invalidate()
+        if let dragShakeMonitor {
+            NSEvent.removeMonitor(dragShakeMonitor)
+        }
+    }
+
+    func setDragShakeEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.dragShakeDefaultsKey)
+        if let dragShakeMonitor {
+            NSEvent.removeMonitor(dragShakeMonitor)
+            self.dragShakeMonitor = nil
+        }
+        guard enabled else { return }
+        dragShakeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDragged) { [weak self] _ in
+            let mouseX = NSEvent.mouseLocation.x
+            let uptime = ProcessInfo.processInfo.systemUptime
+            Task { @MainActor [weak self] in
+                self?.processGlobalDragSample(mouseX: mouseX, timestamp: uptime)
+            }
+        }
+    }
+
+    private func processGlobalDragSample(mouseX: CGFloat, timestamp: TimeInterval) {
+        guard !isVisible else { return }
+        let dragPB = NSPasteboard(name: .drag)
+        let currentCount = dragPB.changeCount
+        if currentCount != lastDragChangeCount {
+            lastDragChangeCount = currentCount
+            shakeDetector = DragShakeDetector()
+        }
+        let supportedTypes: [NSPasteboard.PasteboardType] = [.fileURL, .png, .tiff, .URL, .string]
+        guard dragPB.availableType(from: supportedTypes) != nil else { return }
+        if shakeDetector.record(x: mouseX, at: timestamp) {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            showAtCursorEdge()
+        }
     }
 
     var pendingCount: Int {
@@ -302,21 +543,90 @@ final class DropPocketController: ObservableObject {
     func showAtCursorEdge() {
         ensurePanel()
         guard let panel else { return }
+        snapTimer?.invalidate()
+        snapTimer = nil
 
-        let resolved = ScreenEdgeResolver.resolve(for: NSEvent.mouseLocation)
+        let resolved: ShelfPlacement
+        if let saved = SavedShelfPosition.load() {
+            resolved = ScreenEdgeResolver.resolveFromSaved(saved)
+        } else {
+            resolved = ScreenEdgeResolver.resolve(for: NSEvent.mouseLocation)
+        }
         currentPlacement = resolved
         dockEdge = resolved.edge
         phase = items.isEmpty ? .idleEar : .stashedStack
 
-        let size = ScreenEdgeResolver.targetSize(for: phase, itemCount: items.count)
+        let size = ScreenEdgeResolver.targetSize(for: phase, edge: dockEdge, itemCount: items.count)
         let targetFrame = ScreenEdgeResolver.frame(for: size, placement: resolved)
+        programmaticMoveCount += 1
         panel.setFrame(targetFrame, display: true)
+        programmaticMoveCount = max(0, programmaticMoveCount - 1)
         panel.invalidateShadow()
         panel.orderFrontRegardless()
         isVisible = true
     }
 
+    func resetCustomPosition() {
+        SavedShelfPosition.clear()
+        snapTimer?.invalidate()
+        snapTimer = nil
+        guard isVisible else { return }
+        ensurePanel()
+        guard let panel else { return }
+        let resolved = ScreenEdgeResolver.resolve(for: NSEvent.mouseLocation)
+        currentPlacement = resolved
+        dockEdge = resolved.edge
+        let size = ScreenEdgeResolver.targetSize(for: phase, edge: dockEdge, itemCount: items.count)
+        let targetFrame = ScreenEdgeResolver.frame(for: size, placement: resolved)
+        programmaticMoveCount += 1
+        panel.setFrame(targetFrame, display: true)
+        programmaticMoveCount = max(0, programmaticMoveCount - 1)
+        panel.invalidateShadow()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard programmaticMoveCount == 0, isVisible else { return }
+        scheduleSnapAfterDragRelease(delay: 0.06)
+    }
+
+    private func scheduleSnapAfterDragRelease(delay: TimeInterval) {
+        snapTimer?.invalidate()
+        snapTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isVisible else { return }
+                if NSEvent.pressedMouseButtons != 0 {
+                    self.scheduleSnapAfterDragRelease(delay: 0.04)
+                } else {
+                    self.commitSnapToNearestEdge()
+                }
+            }
+        }
+    }
+
+    private func commitSnapToNearestEdge() {
+        guard let panel, isVisible else { return }
+        let frame = panel.frame
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(center) })
+            ?? panel.screen
+            ?? NSScreen.main
+        guard let screen else { return }
+
+        let saved = ScreenEdgeResolver.snapToNearestEdge(frame, in: screen.visibleFrame)
+        saved.save()
+        dockEdge = saved.edge
+        currentPlacement = ShelfPlacement(
+            edge: saved.edge,
+            visibleFrame: screen.visibleFrame,
+            anchorPoint: CGPoint(x: saved.x, y: saved.y)
+        )
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        morph(to: phase, animated: true, duration: 0.20)
+    }
+
     func hide() {
+        snapTimer?.invalidate()
+        snapTimer = nil
         panel?.orderOut(nil)
         isVisible = false
         phase = items.isEmpty ? .idleEar : .stashedStack
@@ -395,12 +705,13 @@ final class DropPocketController: ObservableObject {
         p.isFloatingPanel = true
         p.level = .statusBar
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        p.isMovableByWindowBackground = false
+        p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = true
         p.appearance = NSAppearance(named: .darkAqua)
+        p.delegate = self
 
         let hostView = EdgeDropHostView(frame: NSRect(origin: .zero, size: initialSize))
         hostView.wantsLayer = true
@@ -445,10 +756,10 @@ final class DropPocketController: ObservableObject {
         self.panel = p
     }
 
-    private func morph(to nextPhase: ShelfPhase, animated: Bool) {
+    private func morph(to nextPhase: ShelfPhase, animated: Bool, duration: TimeInterval = 0.24) {
         phase = nextPhase
         guard let panel, let placement = currentPlacement else { return }
-        let targetSize = ScreenEdgeResolver.targetSize(for: nextPhase, itemCount: items.count)
+        let targetSize = ScreenEdgeResolver.targetSize(for: nextPhase, edge: placement.edge, itemCount: items.count)
         let nextFrame = ScreenEdgeResolver.frame(for: targetSize, placement: placement)
 
         guard abs(panel.frame.width - nextFrame.width) > 0.5
@@ -458,16 +769,21 @@ final class DropPocketController: ObservableObject {
         else { return }
 
         if !animated || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            programmaticMoveCount += 1
             panel.setFrame(nextFrame, display: true)
+            programmaticMoveCount = max(0, programmaticMoveCount - 1)
             panel.invalidateShadow()
         } else {
+            programmaticMoveCount += 1
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.24
+                ctx.duration = duration
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
                 panel.animator().setFrame(nextFrame, display: true)
             }, completionHandler: { [weak self] in
                 Task { @MainActor [weak self] in
-                    self?.panel?.invalidateShadow()
+                    guard let self else { return }
+                    self.programmaticMoveCount = max(0, self.programmaticMoveCount - 1)
+                    self.panel?.invalidateShadow()
                 }
             })
         }
@@ -733,9 +1049,14 @@ struct EdgeShelfRootView: View {
 
     private var shelfShape: AsymmetricRoundedRect {
         let r = ScreenEdgeResolver.cornerRadius
-        return controller.dockEdge == .right
-            ? AsymmetricRoundedRect(topLeading: r, bottomLeading: r, bottomTrailing: 0, topTrailing: 0)
-            : AsymmetricRoundedRect(topLeading: 0, bottomLeading: 0, bottomTrailing: r, topTrailing: r)
+        switch controller.dockEdge {
+        case .right:
+            return AsymmetricRoundedRect(topLeading: r, bottomLeading: r, bottomTrailing: 0, topTrailing: 0)
+        case .left:
+            return AsymmetricRoundedRect(topLeading: 0, bottomLeading: 0, bottomTrailing: r, topTrailing: r)
+        case .top:
+            return AsymmetricRoundedRect(topLeading: 0, bottomLeading: r, bottomTrailing: r, topTrailing: 0)
+        }
     }
 
     private var isDragActive: Bool {
@@ -789,6 +1110,12 @@ struct EdgeShelfRootView: View {
         .overlay(borderOverlay)
         .environment(\.colorScheme, .dark)
         .onHover { isHovering = $0 }
+        .contextMenu {
+            Button("重置到屏幕边缘") {
+                controller.resetCustomPosition()
+            }
+            Button("收起投喂托盘", action: onClose)
+        }
     }
 
     private var borderOverlay: some View {
@@ -802,45 +1129,83 @@ struct EdgeShelfRootView: View {
         return shelfShape.strokeBorder(strokeGradient, lineWidth: isDragActive ? 1.5 : 0.75)
     }
 
+    @ViewBuilder
     private var idleEarContent: some View {
-        ZStack {
-            // Centered morning star
-            MorningStarMark(size: 18, color: .white)
+        if controller.dockEdge == .top {
+            ZStack {
+                MorningStarMark(size: 16, color: .white)
 
-            // Docked screen-edge cyan vertical light streak
-            HStack {
-                if controller.dockEdge == .right { Spacer() }
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [.clear, cyanGlowColor.opacity(0.92), .clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: 2.5, height: 68)
-                    .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
-                if controller.dockEdge == .left { Spacer() }
-            }
-            .padding(controller.dockEdge == .right ? .trailing : .leading, 1)
-
-            if isHovering {
+                // Docked top-edge cyan horizontal light streak
                 VStack {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.68))
-                            .frame(width: 18, height: 18)
-                            .background(Color.white.opacity(0.12), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 12)
-                    .help("收起投喂托盘")
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [.clear, cyanGlowColor.opacity(0.92), .clear],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: 102, height: 2.5)
+                        .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
                     Spacer()
                 }
+                .padding(.top, 1)
+
+                if isHovering {
+                    HStack {
+                        Spacer()
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.white.opacity(0.68))
+                                .frame(width: 18, height: 18)
+                                .background(Color.white.opacity(0.12), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 12)
+                        .help("收起投喂托盘")
+                    }
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ZStack {
+                MorningStarMark(size: 18, color: .white)
+
+                HStack {
+                    if controller.dockEdge == .right { Spacer() }
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [.clear, cyanGlowColor.opacity(0.92), .clear],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 2.5, height: 102)
+                        .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
+                    if controller.dockEdge == .left { Spacer() }
+                }
+                .padding(controller.dockEdge == .right ? .trailing : .leading, 1)
+
+                if isHovering {
+                    VStack {
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.white.opacity(0.68))
+                                .frame(width: 18, height: 18)
+                                .background(Color.white.opacity(0.12), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 12)
+                        .help("收起投喂托盘")
+                        Spacer()
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func dragExpandedContent(hoveredSlot: ShelfQuickSlot?) -> some View {
@@ -916,87 +1281,135 @@ struct EdgeShelfRootView: View {
         )
     }
 
+    @ViewBuilder
     private var stashedStackContent: some View {
         let canAct = controller.items.contains { $0.attachment != nil || $0.textSnippet != nil }
 
-        return ZStack(alignment: .topTrailing) {
-            VStack(spacing: 0) {
-                VStack(spacing: 10) {
-                    ForEach(Array(controller.items.prefix(3))) { item in
-                        stashedItemTile(item)
-                    }
+        if controller.dockEdge == .top {
+            ZStack(alignment: .topTrailing) {
+                HStack(spacing: 0) {
+                    HStack(spacing: 10) {
+                        ForEach(Array(controller.items.prefix(3))) { item in
+                            stashedItemTile(item, compactHorizontal: true)
+                        }
 
-                    if controller.items.count > 3 {
-                        Text("+\(controller.items.count - 3)")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Color.white.opacity(0.65))
+                        if controller.items.count > 3 {
+                            Text("+\(controller.items.count - 3)")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.white.opacity(0.65))
+                        }
                     }
+                    .padding(.leading, 14)
+
+                    Spacer(minLength: 6)
+
+                    Rectangle()
+                        .fill(Color.white.opacity(0.12))
+                        .frame(width: 0.5, height: 44)
+                        .padding(.trailing, 10)
+
+                    HStack(spacing: 10) {
+                        stashedActionButtons(canAct: canAct)
+                    }
+                    .padding(.trailing, 14)
                 }
-                .padding(.top, 14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                Spacer(minLength: 6)
-
-                Rectangle()
-                    .fill(Color.white.opacity(0.12))
-                    .frame(height: 0.5)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 10)
-
-                HStack(spacing: 12) {
-                    Button {
-                        controller.deliverToQuickEntry()
-                    } label: {
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(Color.black)
-                            .frame(width: 34, height: 34)
-                            .background(Color.white.opacity(canAct ? 1.0 : 0.45), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canAct)
-                    .help("带入对话")
-
-                    Button {
-                        controller.summarizeStashedItems()
-                    } label: {
-                        Image(systemName: "text.bubble")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(canAct ? 0.90 : 0.40))
-                            .frame(width: 34, height: 34)
-                            .background(Color.white.opacity(0.10), in: Circle())
-                            .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canAct)
-                    .help("立即速览")
+                if isHovering {
+                    stashedClearButton
+                        .padding(.top, 6)
+                        .padding(.trailing, 6)
                 }
-                .padding(.bottom, 12)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 0) {
+                    VStack(spacing: 10) {
+                        ForEach(Array(controller.items.prefix(3))) { item in
+                            stashedItemTile(item, compactHorizontal: false)
+                        }
 
-            if isHovering {
-                Button {
-                    controller.clear()
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.70))
-                        .frame(width: 20, height: 20)
-                        .background(Color.black.opacity(0.55), in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.20), lineWidth: 0.5))
+                        if controller.items.count > 3 {
+                            Text("+\(controller.items.count - 3)")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.white.opacity(0.65))
+                        }
+                    }
+                    .padding(.top, 14)
+
+                    Spacer(minLength: 6)
+
+                    Rectangle()
+                        .fill(Color.white.opacity(0.12))
+                        .frame(height: 0.5)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
+
+                    HStack(spacing: 12) {
+                        stashedActionButtons(canAct: canAct)
+                    }
+                    .padding(.bottom, 12)
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 8)
-                .padding(.trailing, 8)
-                .help("清空全部暂存")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if isHovering {
+                    stashedClearButton
+                        .padding(.top, 8)
+                        .padding(.trailing, 8)
+                }
             }
         }
     }
 
-    private func stashedItemTile(_ item: DropPocketItem) -> some View {
+    @ViewBuilder
+    private func stashedActionButtons(canAct: Bool) -> some View {
+        Button {
+            controller.deliverToQuickEntry()
+        } label: {
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Color.black)
+                .frame(width: 34, height: 34)
+                .background(Color.white.opacity(canAct ? 1.0 : 0.45), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!canAct)
+        .help("带入对话")
+
+        Button {
+            controller.summarizeStashedItems()
+        } label: {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(canAct ? 0.90 : 0.40))
+                .frame(width: 34, height: 34)
+                .background(Color.white.opacity(0.10), in: Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canAct)
+        .help("立即速览")
+    }
+
+    private var stashedClearButton: some View {
+        Button {
+            controller.clear()
+        } label: {
+            Image(systemName: "trash")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.70))
+                .frame(width: 20, height: 20)
+                .background(Color.black.opacity(0.55), in: Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.20), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .help("清空全部暂存")
+    }
+
+    private func stashedItemTile(_ item: DropPocketItem, compactHorizontal: Bool = false) -> some View {
         let isHoveredTile = hoveredItemId == item.id
         return ZStack(alignment: .topTrailing) {
-            stashedItemPreview(item)
+            stashedItemPreview(item, compactHorizontal: compactHorizontal)
                 .overlay {
                     if item.isUploading {
                         ZStack {
@@ -1031,13 +1444,18 @@ struct EdgeShelfRootView: View {
     }
 
     @ViewBuilder
-    private func stashedItemPreview(_ item: DropPocketItem) -> some View {
+    private func stashedItemPreview(_ item: DropPocketItem, compactHorizontal: Bool = false) -> some View {
+        let imgW: CGFloat = compactHorizontal ? 56 : 72
+        let imgH: CGFloat = compactHorizontal ? 44 : 46
+        let docW: CGFloat = compactHorizontal ? 44 : 60
+        let docH: CGFloat = compactHorizontal ? 48 : 54
+
         if let thumb = item.thumbnail {
             if item.kind == "image" {
                 Image(nsImage: thumb)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 72, height: 46)
+                    .frame(width: imgW, height: imgH)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -1048,32 +1466,34 @@ struct EdgeShelfRootView: View {
                 Image(nsImage: thumb)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 60, height: 54)
+                    .frame(width: docW, height: docH)
                     .shadow(color: .black.opacity(0.38), radius: 4, y: 2)
             }
         } else {
-            textDocThumbnailCard(label: item.filename)
+            textDocThumbnailCard(label: item.filename, compactHorizontal: compactHorizontal)
                 .shadow(color: .black.opacity(0.38), radius: 4, y: 2)
         }
     }
 
-    private func textDocThumbnailCard(label: String) -> some View {
-        ZStack(alignment: .topTrailing) {
+    private func textDocThumbnailCard(label: String, compactHorizontal: Bool = false) -> some View {
+        let w: CGFloat = compactHorizontal ? 44 : 48
+        let h: CGFloat = compactHorizontal ? 48 : 54
+        return ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(label)
                     .font(.system(size: 6.5, weight: .semibold))
                     .foregroundStyle(Color.black.opacity(0.78))
                     .lineLimit(1)
-                Capsule().fill(Color.black.opacity(0.22)).frame(width: 34, height: 1.5)
-                Capsule().fill(Color.black.opacity(0.16)).frame(width: 38, height: 1.5)
-                Capsule().fill(Color.black.opacity(0.16)).frame(width: 28, height: 1.5)
-                Capsule().fill(Color.black.opacity(0.14)).frame(width: 34, height: 1.5)
+                Capsule().fill(Color.black.opacity(0.22)).frame(width: w - 14, height: 1.5)
+                Capsule().fill(Color.black.opacity(0.16)).frame(width: w - 10, height: 1.5)
+                Capsule().fill(Color.black.opacity(0.16)).frame(width: w - 20, height: 1.5)
+                Capsule().fill(Color.black.opacity(0.14)).frame(width: w - 14, height: 1.5)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 6)
             .padding(.top, 9)
             .padding(.bottom, 6)
-            .frame(width: 48, height: 54, alignment: .topLeading)
+            .frame(width: w, height: h, alignment: .topLeading)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Color(white: 0.94))
@@ -1081,13 +1501,13 @@ struct EdgeShelfRootView: View {
 
             // Subtle folded corner accent
             Path { path in
-                path.move(to: CGPoint(x: 37, y: 0))
-                path.addLine(to: CGPoint(x: 48, y: 11))
-                path.addLine(to: CGPoint(x: 37, y: 11))
+                path.move(to: CGPoint(x: w - 11, y: 0))
+                path.addLine(to: CGPoint(x: w, y: 11))
+                path.addLine(to: CGPoint(x: w - 11, y: 11))
                 path.closeSubpath()
             }
             .fill(Color(white: 0.80))
-            .frame(width: 48, height: 54)
+            .frame(width: w, height: h)
         }
     }
 }
