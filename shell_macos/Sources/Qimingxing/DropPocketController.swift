@@ -1,67 +1,37 @@
 import AppKit
 import Combine
+import QuickLookThumbnailing
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Geometry & Data Models
+// MARK: - Scheme C Geometry, Multi-Screen Resolver & State Models
 
-enum DropPocketGeometry {
-    static let width: CGFloat = 220
-    static let emptyHeight: CGFloat = 200
-    static let maxHeight: CGFloat = 280
-    static let cornerRadius: CGFloat = 18
-
-    static func panelHeight(forItemCount count: Int) -> CGFloat {
-        guard count > 0 else { return emptyHeight }
-        return min(maxHeight, 146 + CGFloat(count) * 30)
-    }
-
-    static func clampedOrigin(
-        mouseLocation: NSPoint,
-        panelSize: NSSize,
-        visibleFrame: NSRect,
-        offset: CGFloat = 24,
-        margin: CGFloat = 12
-    ) -> NSPoint {
-        let minX = visibleFrame.minX + margin
-        let maxX = visibleFrame.maxX - panelSize.width - margin
-        let x: CGFloat
-        if maxX < minX {
-            x = visibleFrame.midX - panelSize.width / 2
-        } else {
-            x = min(max(mouseLocation.x + offset, minX), maxX)
-        }
-
-        let minY = visibleFrame.minY + margin
-        let maxY = visibleFrame.maxY - panelSize.height - margin
-        let y: CGFloat
-        if maxY < minY {
-            y = visibleFrame.midY - panelSize.height / 2
-        } else {
-            y = min(max(mouseLocation.y + offset, minY), maxY)
-        }
-
-        return NSPoint(x: x, y: y)
-    }
+enum ShelfDockEdge: Equatable {
+    case left
+    case right
 }
 
-enum DropPocketQuickSlot: Int, CaseIterable, Identifiable {
-    case summary = 0
-    case extract = 1
+struct ShelfScreenBounds: Equatable {
+    let frame: CGRect
+    let visibleFrame: CGRect
+}
 
-    var id: Int { rawValue }
+struct ShelfPlacement: Equatable {
+    let edge: ShelfDockEdge
+    let visibleFrame: CGRect
+    let anchorY: CGFloat
+}
 
-    var title: String {
-        switch self {
-        case .summary: return "速览摘要"
-        case .extract: return "提取要点"
-        }
-    }
+enum ShelfQuickSlot: String, CaseIterable, Identifiable {
+    case summary = "速览"
+    case keyPoints = "提要点"
+
+    var id: String { rawValue }
 
     var symbol: String {
         switch self {
         case .summary: return "doc.text.magnifyingglass"
-        case .extract: return "list.bullet.rectangle"
+        case .keyPoints: return "list.bullet.rectangle"
         }
     }
 
@@ -69,16 +39,97 @@ enum DropPocketQuickSlot: Int, CaseIterable, Identifiable {
         switch self {
         case .summary:
             return "请对以下素材做一份简洁清晰的速览摘要，提炼核心结论与关键信息："
-        case .extract:
+        case .keyPoints:
             return "请从以下素材中结构化提取关键要点、数据或待办事项："
         }
     }
 }
 
-enum DropPocketHoverTarget: Equatable {
-    case none
-    case mainZone
-    case quickSlot(DropPocketQuickSlot)
+enum ShelfPhase: Equatable {
+    case idleEar
+    case dragExpanded(hoveredSlot: ShelfQuickSlot?)
+    case stashedStack
+}
+
+enum ScreenEdgeResolver {
+    static let idleEarSize = CGSize(width: 48, height: 136)
+    static let dragExpandedSize = CGSize(width: 216, height: 220)
+    static let stashedWidth: CGFloat = 84
+    static let stashedMaxHeight: CGFloat = 280
+    static let stashedMinHeight: CGFloat = 160
+    static let cornerRadius: CGFloat = 22
+
+    static func resolve(for mouse: CGPoint, screens: [ShelfScreenBounds]) -> ShelfPlacement {
+        let fallback = ShelfScreenBounds(
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        )
+        let current = screens.first(where: { $0.frame.contains(mouse) })
+            ?? screens.first
+            ?? fallback
+
+        var leftHasSeam = false
+        var rightHasSeam = false
+
+        for other in screens where other != current {
+            let overlapY = min(other.frame.maxY, current.frame.maxY) - max(other.frame.minY, current.frame.minY)
+            guard overlapY > 20 else { continue }
+            if abs(other.frame.maxX - current.frame.minX) <= 4 {
+                leftHasSeam = true
+            }
+            if abs(other.frame.minX - current.frame.maxX) <= 4 {
+                rightHasSeam = true
+            }
+        }
+
+        let edge: ShelfDockEdge
+        if !leftHasSeam && rightHasSeam {
+            edge = .left
+        } else if leftHasSeam && !rightHasSeam {
+            edge = .right
+        } else {
+            let distToLeft = abs(mouse.x - current.frame.minX)
+            let distToRight = abs(current.frame.maxX - mouse.x)
+            edge = distToLeft <= distToRight ? .left : .right
+        }
+
+        return ShelfPlacement(edge: edge, visibleFrame: current.visibleFrame, anchorY: mouse.y)
+    }
+
+    @MainActor
+    static func resolve(for mouse: CGPoint, nsScreens: [NSScreen] = NSScreen.screens) -> ShelfPlacement {
+        let bounds = nsScreens.map { ShelfScreenBounds(frame: $0.frame, visibleFrame: $0.visibleFrame) }
+        return resolve(for: mouse, screens: bounds)
+    }
+
+    static func targetSize(for phase: ShelfPhase, itemCount: Int) -> CGSize {
+        switch phase {
+        case .idleEar:
+            return idleEarSize
+        case .dragExpanded:
+            return dragExpandedSize
+        case .stashedStack:
+            let visibleCount = min(max(itemCount, 1), 3)
+            let height = min(stashedMaxHeight, max(stashedMinHeight, 108 + CGFloat(visibleCount) * 52))
+            return CGSize(width: stashedWidth, height: height)
+        }
+    }
+
+    static func frame(for size: CGSize, placement: ShelfPlacement, verticalMargin: CGFloat = 24) -> CGRect {
+        let x: CGFloat = placement.edge == .left
+            ? placement.visibleFrame.minX
+            : placement.visibleFrame.maxX - size.width
+
+        let minY = placement.visibleFrame.minY + verticalMargin
+        let maxY = placement.visibleFrame.maxY - size.height - verticalMargin
+        let y: CGFloat
+        if maxY < minY {
+            y = placement.visibleFrame.midY - size.height / 2
+        } else {
+            y = min(max(placement.anchorY - size.height / 2, minY), maxY)
+        }
+        return CGRect(origin: CGPoint(x: x, y: y), size: size)
+    }
 }
 
 struct DropPocketItem: Identifiable, Equatable {
@@ -89,12 +140,13 @@ struct DropPocketItem: Identifiable, Equatable {
     var attachment: StagedAttachment?
     var textSnippet: String?
     var sourceURL: URL?
+    var thumbnail: NSImage?
 }
 
-// MARK: - Non-Activating Panel & Native NSDraggingDestination Host
+// MARK: - Non-Activating Dark Obsidian Panel & Drag Destination Host
 
 @MainActor
-final class DropPocketPanel: NSPanel {
+final class DropShelfPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
@@ -109,11 +161,13 @@ private struct ExtractedDragPayload {
     }
 }
 
-private final class DropPocketHostView: NSView {
-    var onHoverChanged: ((DropPocketHoverTarget) -> Void)?
-    var onDropped: ((DropPocketHoverTarget, ExtractedDragPayload) -> Void)?
+private final class EdgeDropHostView: NSView {
+    var onDragEntered: (() -> Void)?
+    var onHoverSlotChanged: ((ShelfQuickSlot?) -> Void)?
+    var onDragExited: (() -> Void)?
+    var onDropped: ((ShelfQuickSlot?, ExtractedDragPayload) -> Void)?
 
-    private var currentHover: DropPocketHoverTarget = .none
+    private var hoveredSlot: ShelfQuickSlot?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -131,52 +185,55 @@ private final class DropPocketHostView: NSView {
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        let target = resolveHoverTarget(for: sender)
-        updateHover(target)
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        onDragEntered?()
+        updateHoveredSlot(resolveSlot(for: sender))
         return .copy
     }
 
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        let target = resolveHoverTarget(for: sender)
-        updateHover(target)
+        updateHoveredSlot(resolveSlot(for: sender))
         return .copy
     }
 
     override func draggingExited(_ sender: (any NSDraggingInfo)?) {
-        updateHover(.none)
+        hoveredSlot = nil
+        onHoverSlotChanged?(nil)
+        onDragExited?()
     }
 
     override func draggingEnded(_ sender: any NSDraggingInfo) {
-        updateHover(.none)
+        hoveredSlot = nil
+        onHoverSlotChanged?(nil)
+        onDragExited?()
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        let target = resolveHoverTarget(for: sender)
+        let slot = resolveSlot(for: sender)
         let payload = extractPayload(from: sender.draggingPasteboard)
-        updateHover(.none)
-        guard !payload.isEmpty else { return false }
+        hoveredSlot = nil
+        onHoverSlotChanged?(nil)
+        guard !payload.isEmpty else {
+            onDragExited?()
+            return false
+        }
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-        onDropped?(target, payload)
+        onDropped?(slot, payload)
         return true
     }
 
-    private func updateHover(_ next: DropPocketHoverTarget) {
-        guard next != currentHover else { return }
-        if next != .none {
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-        }
-        currentHover = next
-        onHoverChanged?(next)
+    private func updateHoveredSlot(_ next: ShelfQuickSlot?) {
+        guard next != hoveredSlot else { return }
+        hoveredSlot = next
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        onHoverSlotChanged?(next)
     }
 
-    private func resolveHoverTarget(for sender: any NSDraggingInfo) -> DropPocketHoverTarget {
+    private func resolveSlot(for sender: any NSDraggingInfo) -> ShelfQuickSlot? {
+        guard bounds.width >= 160 else { return nil }
         let pt = convert(sender.draggingLocation, from: nil)
-        // Quick-action slots sit in the bottom 54pt strip (side-by-side)
-        if pt.y <= 54 {
-            let slot: DropPocketQuickSlot = pt.x < bounds.width / 2 ? .summary : .extract
-            return .quickSlot(slot)
-        }
-        return .mainZone
+        guard pt.y <= 72 else { return nil }
+        return pt.x < bounds.width / 2 ? .summary : .keyPoints
     }
 
     private func extractPayload(from pb: NSPasteboard) -> ExtractedDragPayload {
@@ -194,9 +251,11 @@ private final class DropPocketHostView: NSView {
             }
         }
         if result.fileURLs.isEmpty && result.imageDataList.isEmpty {
-            if let urlString = pb.string(forType: .URL), !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let urlString = pb.string(forType: .URL),
+               !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.textSnippets.append(urlString.trimmingCharacters(in: .whitespacesAndNewlines))
-            } else if let str = pb.string(forType: .string), !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            } else if let str = pb.string(forType: .string),
+                      !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.textSnippets.append(str.trimmingCharacters(in: .whitespacesAndNewlines))
             }
         }
@@ -210,9 +269,11 @@ private final class DropPocketHostView: NSView {
 final class DropPocketController: ObservableObject {
     @Published private(set) var items: [DropPocketItem] = []
     @Published private(set) var isVisible: Bool = false
-    @Published var hoverTarget: DropPocketHoverTarget = .none
+    @Published private(set) var phase: ShelfPhase = .idleEar
+    @Published private(set) var dockEdge: ShelfDockEdge = .right
 
-    private var panel: DropPocketPanel?
+    private var panel: DropShelfPanel?
+    private var currentPlacement: ShelfPlacement?
     private let brainClient: BrainClient
 
     var onDeliverToQuickEntry: (([StagedAttachment], [String]) -> Void)?
@@ -231,84 +292,116 @@ final class DropPocketController: ObservableObject {
     }
 
     func toggleAtCursor() {
-        if isVisible {
-            if items.isEmpty {
-                hide()
-            } else {
-                repositionNearCursor()
-                panel?.orderFrontRegardless()
-            }
-        } else {
-            showAtCursor()
+        if isVisible && items.isEmpty {
+            hide()
+            return
         }
+        showAtCursorEdge()
     }
 
-    func showAtCursor() {
+    func showAtCursorEdge() {
         ensurePanel()
         guard let panel else { return }
-        updatePanelSize(animated: false)
-        repositionNearCursor()
+
+        let resolved = ScreenEdgeResolver.resolve(for: NSEvent.mouseLocation)
+        currentPlacement = resolved
+        dockEdge = resolved.edge
+        phase = items.isEmpty ? .idleEar : .stashedStack
+
+        let size = ScreenEdgeResolver.targetSize(for: phase, itemCount: items.count)
+        let targetFrame = ScreenEdgeResolver.frame(for: size, placement: resolved)
+        panel.setFrame(targetFrame, display: true)
+        panel.invalidateShadow()
         panel.orderFrontRegardless()
         isVisible = true
     }
 
     func hide() {
-        hoverTarget = .none
         panel?.orderOut(nil)
         isVisible = false
+        phase = items.isEmpty ? .idleEar : .stashedStack
     }
 
     func clear() {
         items.removeAll()
         onPendingCountChanged?(0)
-        updatePanelSize(animated: true)
+        if isVisible {
+            morph(to: .idleEar, animated: true)
+        } else {
+            phase = .idleEar
+        }
     }
 
     func removeItem(id: UUID) {
         items.removeAll { $0.id == id }
         onPendingCountChanged?(items.count)
-        updatePanelSize(animated: true)
+        if items.isEmpty {
+            morph(to: .idleEar, animated: true)
+        } else {
+            morph(to: .stashedStack, animated: true)
+        }
     }
 
     func deliverToQuickEntry() {
         let attachments = items.compactMap(\.attachment)
         let snippets = items.compactMap(\.textSnippet)
         guard !attachments.isEmpty || !snippets.isEmpty else { return }
-        clear()
+        items.removeAll()
+        onPendingCountChanged?(0)
         hide()
         onDeliverToQuickEntry?(attachments, snippets)
     }
 
+    func configureForPreview(edge: ShelfDockEdge, phase: ShelfPhase, items: [DropPocketItem]) {
+        self.dockEdge = edge
+        self.phase = phase
+        self.items = items
+    }
+
+    // MARK: - Private Setup & Morphing
+
     private func ensurePanel() {
         guard panel == nil else { return }
-        let size = NSSize(width: DropPocketGeometry.width, height: DropPocketGeometry.emptyHeight)
-        let p = DropPocketPanel(
-            contentRect: NSRect(origin: .zero, size: size),
+        let initialSize = ScreenEdgeResolver.idleEarSize
+        let p = DropShelfPanel(
+            contentRect: NSRect(origin: .zero, size: initialSize),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
-        p.title = "投喂口袋"
+        p.title = "投喂托盘"
         p.isFloatingPanel = true
         p.level = .statusBar
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        p.isMovableByWindowBackground = true
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        p.isMovableByWindowBackground = false
         p.hidesOnDeactivate = false
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = true
+        p.appearance = NSAppearance(named: .darkAqua)
 
-        let hostView = DropPocketHostView(frame: NSRect(origin: .zero, size: size))
+        let hostView = EdgeDropHostView(frame: NSRect(origin: .zero, size: initialSize))
         hostView.wantsLayer = true
         hostView.layer?.backgroundColor = NSColor.clear.cgColor
-        hostView.onHoverChanged = { [weak self] target in
-            self?.hoverTarget = target
+        hostView.onDragEntered = { [weak self] in
+            self?.morph(to: .dragExpanded(hoveredSlot: nil), animated: true)
         }
-        hostView.onDropped = { [weak self] target, payload in
-            self?.handleDrop(target: target, payload: payload)
+        hostView.onHoverSlotChanged = { [weak self] slot in
+            guard let self else { return }
+            if case .dragExpanded = self.phase {
+                self.phase = .dragExpanded(hoveredSlot: slot)
+            }
+        }
+        hostView.onDragExited = { [weak self] in
+            guard let self else { return }
+            let restPhase: ShelfPhase = self.items.isEmpty ? .idleEar : .stashedStack
+            self.morph(to: restPhase, animated: true)
+        }
+        hostView.onDropped = { [weak self] slot, payload in
+            self?.handleDrop(slot: slot, payload: payload)
         }
 
-        let swiftUIView = DropPocketView(
+        let swiftUIView = EdgeShelfRootView(
             controller: self,
             onClose: { [weak self] in self?.hide() }
         )
@@ -326,39 +419,30 @@ final class DropPocketController: ObservableObject {
         ])
 
         p.contentView = hostView
-        p.setContentSize(size)
+        p.setContentSize(initialSize)
         self.panel = p
     }
 
-    private func repositionNearCursor() {
-        guard let panel else { return }
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let origin = DropPocketGeometry.clampedOrigin(
-            mouseLocation: mouse,
-            panelSize: panel.frame.size,
-            visibleFrame: visible
-        )
-        panel.setFrameOrigin(origin)
-    }
+    private func morph(to nextPhase: ShelfPhase, animated: Bool) {
+        phase = nextPhase
+        guard let panel, let placement = currentPlacement else { return }
+        let targetSize = ScreenEdgeResolver.targetSize(for: nextPhase, itemCount: items.count)
+        let nextFrame = ScreenEdgeResolver.frame(for: targetSize, placement: placement)
 
-    private func updatePanelSize(animated: Bool) {
-        guard let panel else { return }
-        let targetHeight = DropPocketGeometry.panelHeight(forItemCount: items.count)
-        var frame = panel.frame
-        let topEdge = frame.maxY
-        frame.size = NSSize(width: DropPocketGeometry.width, height: targetHeight)
-        frame.origin.y = topEdge - targetHeight
+        guard abs(panel.frame.width - nextFrame.width) > 0.5
+            || abs(panel.frame.height - nextFrame.height) > 0.5
+            || abs(panel.frame.minX - nextFrame.minX) > 0.5
+            || abs(panel.frame.minY - nextFrame.minY) > 0.5
+        else { return }
 
         if !animated || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            panel.setFrame(frame, display: true)
+            panel.setFrame(nextFrame, display: true)
             panel.invalidateShadow()
         } else {
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                panel.animator().setFrame(frame, display: true)
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.24
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+                panel.animator().setFrame(nextFrame, display: true)
             }, completionHandler: { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.panel?.invalidateShadow()
@@ -367,11 +451,12 @@ final class DropPocketController: ObservableObject {
         }
     }
 
-    private func handleDrop(target: DropPocketHoverTarget, payload: ExtractedDragPayload) {
-        switch target {
-        case .quickSlot(let slot):
+    // MARK: - Drag Ingestion, QuickLook Thumbnails & Quick Slots
+
+    private func handleDrop(slot: ShelfQuickSlot?, payload: ExtractedDragPayload) {
+        if let slot {
             executeQuickSlot(slot, payload: payload)
-        case .mainZone, .none:
+        } else {
             ingestDropped(payload: payload)
         }
     }
@@ -381,17 +466,21 @@ final class DropPocketController: ObservableObject {
             let itemId = UUID()
             let ext = url.pathExtension.lowercased()
             let kind = inferKind(ext: ext)
+            let fallbackIcon = NSWorkspace.shared.icon(forFile: url.path)
             items.append(
                 DropPocketItem(
                     id: itemId,
                     filename: url.lastPathComponent,
                     kind: kind,
                     isUploading: true,
-                    sourceURL: url
+                    sourceURL: url,
+                    thumbnail: kind == "image" ? NSImage(contentsOf: url) ?? fallbackIcon : fallbackIcon
                 )
             )
             onPendingCountChanged?(items.count)
-            updatePanelSize(animated: true)
+            morph(to: .stashedStack, animated: true)
+            loadThumbnail(for: url, itemId: itemId)
+
             Task { [weak self] in
                 guard let self else { return }
                 let uploaded = await self.brainClient.uploadArtifact(fileURL: url)
@@ -401,7 +490,8 @@ final class DropPocketController: ObservableObject {
                     if uploaded == nil {
                         self.items.remove(at: idx)
                         self.onPendingCountChanged?(self.items.count)
-                        self.updatePanelSize(animated: true)
+                        let nextPhase: ShelfPhase = self.items.isEmpty ? .idleEar : .stashedStack
+                        self.morph(to: nextPhase, animated: true)
                     }
                 }
             }
@@ -415,11 +505,13 @@ final class DropPocketController: ObservableObject {
                     id: itemId,
                     filename: name,
                     kind: "image",
-                    isUploading: true
+                    isUploading: true,
+                    thumbnail: NSImage(data: png)
                 )
             )
             onPendingCountChanged?(items.count)
-            updatePanelSize(animated: true)
+            morph(to: .stashedStack, animated: true)
+
             Task { [weak self] in
                 guard let self else { return }
                 let tmp = FileManager.default.temporaryDirectory
@@ -433,7 +525,8 @@ final class DropPocketController: ObservableObject {
                     if uploaded == nil {
                         self.items.remove(at: idx)
                         self.onPendingCountChanged?(self.items.count)
-                        self.updatePanelSize(animated: true)
+                        let nextPhase: ShelfPhase = self.items.isEmpty ? .idleEar : .stashedStack
+                        self.morph(to: nextPhase, animated: true)
                     }
                 }
             }
@@ -452,14 +545,41 @@ final class DropPocketController: ObservableObject {
                 )
             )
             onPendingCountChanged?(items.count)
-            updatePanelSize(animated: true)
+            morph(to: .stashedStack, animated: true)
         }
     }
 
-    private func executeQuickSlot(_ slot: DropPocketQuickSlot, payload: ExtractedDragPayload) {
+    private func loadThumbnail(for url: URL, itemId: UUID) {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: 120, height: 100),
+            scale: scale,
+            representationTypes: .thumbnail
+        )
+        let path = url.path
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] rep, _ in
+            let cgImage = rep?.cgImage
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let idx = self.items.firstIndex(where: { $0.id == itemId }) else { return }
+                if let cgImage {
+                    self.items[idx].thumbnail = NSImage(
+                        cgImage: cgImage,
+                        size: NSSize(width: cgImage.width, height: cgImage.height)
+                    )
+                } else if self.items[idx].thumbnail == nil {
+                    self.items[idx].thumbnail = NSWorkspace.shared.icon(forFile: path)
+                }
+            }
+        }
+    }
+
+    private func executeQuickSlot(_ slot: ShelfQuickSlot, payload: ExtractedDragPayload) {
         let existingAttachments = items.compactMap(\.attachment)
         let existingSnippets = items.compactMap(\.textSnippet)
-        clear()
+        items.removeAll()
+        onPendingCountChanged?(0)
         hide()
 
         Task { [weak self] in
@@ -489,7 +609,7 @@ final class DropPocketController: ObservableObject {
             }
             self.brainClient.sendText(prompt, attachments: uploadedAttachments, includeScreen: false)
             TaskToastController.shared.show(
-                title: "已派发 · \(slot.title)",
+                title: "已派发 · \(slot.rawValue)",
                 message: "正在后台处理素材，完成后将在工作区与通知提示",
                 isError: false
             ) {
@@ -509,198 +629,321 @@ final class DropPocketController: ObservableObject {
     }
 }
 
-// MARK: - SwiftUI View
+// MARK: - Asymmetric Corner Shape (macOS 13+)
 
-struct DropPocketView: View {
+struct AsymmetricRoundedRect: InsettableShape {
+    var topLeading: CGFloat = 0
+    var bottomLeading: CGFloat = 0
+    var bottomTrailing: CGFloat = 0
+    var topTrailing: CGFloat = 0
+    var insetAmount: CGFloat = 0
+
+    func inset(by amount: CGFloat) -> Self {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        guard r.width > 0, r.height > 0 else { return Path() }
+
+        let maxR = min(r.width, r.height) / 2
+        let tl = min(max(0, topLeading - insetAmount), maxR)
+        let tr = min(max(0, topTrailing - insetAmount), maxR)
+        let br = min(max(0, bottomTrailing - insetAmount), maxR)
+        let bl = min(max(0, bottomLeading - insetAmount), maxR)
+
+        var path = Path()
+        path.move(to: CGPoint(x: r.minX + tl, y: r.minY))
+        path.addLine(to: CGPoint(x: r.maxX - tr, y: r.minY))
+        if tr > 0 {
+            path.addArc(
+                center: CGPoint(x: r.maxX - tr, y: r.minY + tr),
+                radius: tr,
+                startAngle: .degrees(-90),
+                endAngle: .degrees(0),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: r.maxX, y: r.maxY - br))
+        if br > 0 {
+            path.addArc(
+                center: CGPoint(x: r.maxX - br, y: r.maxY - br),
+                radius: br,
+                startAngle: .degrees(0),
+                endAngle: .degrees(90),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: r.minX + bl, y: r.maxY))
+        if bl > 0 {
+            path.addArc(
+                center: CGPoint(x: r.minX + bl, y: r.maxY - bl),
+                radius: bl,
+                startAngle: .degrees(90),
+                endAngle: .degrees(180),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: r.minX, y: r.minY + tl))
+        if tl > 0 {
+            path.addArc(
+                center: CGPoint(x: r.minX + tl, y: r.minY + tl),
+                radius: tl,
+                startAngle: .degrees(180),
+                endAngle: .degrees(270),
+                clockwise: false
+            )
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+// MARK: - SwiftUI View (Dark Obsidian Edge Shelf)
+
+struct EdgeShelfRootView: View {
     @ObservedObject var controller: DropPocketController
     let onClose: () -> Void
+    @State private var isHovering = false
+    @State private var hoveredItemId: UUID?
+
+    private var shelfShape: AsymmetricRoundedRect {
+        let r = ScreenEdgeResolver.cornerRadius
+        return controller.dockEdge == .right
+            ? AsymmetricRoundedRect(topLeading: r, bottomLeading: r, bottomTrailing: 0, topTrailing: 0)
+            : AsymmetricRoundedRect(topLeading: 0, bottomLeading: 0, bottomTrailing: r, topTrailing: r)
+    }
+
+    private var isDragActive: Bool {
+        if case .dragExpanded = controller.phase { return true }
+        return false
+    }
 
     var body: some View {
         ZStack {
-            VisualEffectBlur(
-                material: .popover,
-                blendingMode: .behindWindow,
-                cornerRadius: DropPocketGeometry.cornerRadius
+            if !QMXTheme.isHeadlessDump {
+                VisualEffectBlur(
+                    material: .hudWindow,
+                    blendingMode: .behindWindow,
+                    state: .active,
+                    cornerRadius: 0
+                )
+            }
+            // Dark obsidian frosted glass layer regardless of system theme
+            Color(red: 0.067, green: 0.078, blue: 0.102)
+                .opacity(QMXTheme.isHeadlessDump ? 0.94 : 0.84)
+
+            Group {
+                switch controller.phase {
+                case .idleEar:
+                    idleEarContent
+                case .dragExpanded(let hoveredSlot):
+                    dragExpandedContent(hoveredSlot: hoveredSlot)
+                case .stashedStack:
+                    stashedStackContent
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipShape(shelfShape)
+        .overlay(
+            shelfShape.strokeBorder(
+                LinearGradient(
+                    colors: [
+                        isDragActive ? Color.cyan.opacity(0.82) : Color.white.opacity(0.28),
+                        isDragActive ? QMXTheme.accent.opacity(0.42) : Color.white.opacity(0.05),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: isDragActive ? 1.5 : 0.75
+            )
+        )
+        .environment(\.colorScheme, .dark)
+        .onHover { isHovering = $0 }
+    }
+
+    private var idleEarContent: some View {
+        ZStack(alignment: .top) {
+            VStack(spacing: 14) {
+                MorningStarMark(size: 16, color: .white.opacity(0.92))
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.45), .white.opacity(0.04)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: 2, height: 32)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if isHovering {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .frame(width: 18, height: 18)
+                        .background(.white.opacity(0.10), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 10)
+                .help("收起投喂托盘")
+            }
+        }
+    }
+
+    private func dragExpandedContent(hoveredSlot: ShelfQuickSlot?) -> some View {
+        let dropZoneAlpha = hoveredSlot == nil ? 0.10 : 0.04
+        let iconAlpha = hoveredSlot == nil ? 0.90 : 0.55
+        let textAlpha = hoveredSlot == nil ? 0.88 : 0.58
+
+        return VStack(spacing: 10) {
+            VStack(spacing: 7) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 20, weight: .regular))
+                    .foregroundStyle(Color.white.opacity(iconAlpha))
+                Text("拖入素材")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(textAlpha))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(dropZoneAlpha))
             )
 
-            VStack(spacing: 8) {
-                header
-                mainZone
-                quickSlotsRow
-            }
-            .padding(10)
-        }
-        .frame(width: DropPocketGeometry.width)
-        .frame(maxHeight: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: DropPocketGeometry.cornerRadius, style: .continuous))
-        .overlay(HairlineBorderOverlay(cornerRadius: DropPocketGeometry.cornerRadius))
-    }
-
-    private var header: some View {
-        HStack(spacing: 6) {
-            MorningStarMark(size: 13, color: QMXTheme.textSecondary)
-            Text("投喂口袋")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(QMXTheme.textPrimary)
-            if controller.pendingCount > 0 {
-                Text("\(controller.pendingCount)")
-                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(QMXTheme.accent)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(QMXTheme.accentSoft))
-            }
-            Spacer(minLength: 0)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .foregroundStyle(QMXTheme.textTertiary)
-                    .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("收起投喂口袋 (⌥D)")
-        }
-        .padding(.horizontal, 2)
-    }
-
-    private var mainZone: some View {
-        let isHovered = controller.hoverTarget == .mainZone
-        return VStack(spacing: 6) {
-            if controller.items.isEmpty {
-                Spacer(minLength: 0)
-                Image(systemName: "tray.and.arrow.down")
-                    .font(.system(size: 20, weight: .light))
-                    .foregroundStyle(isHovered ? QMXTheme.accent : QMXTheme.textTertiary)
-                Text("拖入文件、图片或文本")
-                    .font(.system(size: 11))
-                    .foregroundStyle(isHovered ? QMXTheme.textPrimary : QMXTheme.textSecondary)
-                KeyCapBadge("⌥D")
-                Spacer(minLength: 0)
-            } else {
-                ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(controller.items) { item in
-                            itemRow(item)
-                        }
-                    }
-                }
-                .scrollIndicators(.hidden)
-
-                HStack(spacing: 6) {
-                    Button("清空") {
-                        controller.clear()
-                    }
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(QMXTheme.textSecondary)
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .background(Capsule().fill(QMXTheme.surfaceMuted.opacity(0.6)))
-
-                    Spacer(minLength: 0)
-
-                    Button {
-                        controller.deliverToQuickEntry()
-                    } label: {
-                        Text("带入对话")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(QMXTheme.primaryText)
-                            .padding(.horizontal, 10)
-                            .frame(height: 24)
-                            .background(Capsule().fill(QMXTheme.primaryFill))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(controller.isUploadingAny)
+            HStack(spacing: 8) {
+                ForEach(ShelfQuickSlot.allCases) { slot in
+                    quickSlotCard(slot, active: hoveredSlot == slot)
                 }
             }
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(12)
+    }
+
+    private func quickSlotCard(_ slot: ShelfQuickSlot, active: Bool) -> some View {
+        let fgColor: Color = active ? .white : Color.white.opacity(0.75)
+        let bgColor: Color = active ? Color.accentColor.opacity(0.45) : Color.white.opacity(0.06)
+        let strokeColor: Color = active ? Color.white.opacity(0.35) : Color.white.opacity(0.06)
+
+        return VStack(spacing: 4) {
+            Image(systemName: slot.symbol)
+                .font(.system(size: 13, weight: .medium))
+            Text(slot.rawValue)
+                .font(.system(size: 11, weight: .medium))
+        }
+        .foregroundStyle(fgColor)
+        .frame(maxWidth: .infinity)
+        .frame(height: 52)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(QMXTheme.surfaceMuted.opacity(isHovered ? 0.45 : 0.25))
+                .fill(bgColor)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(
-                    isHovered ? QMXTheme.accent : QMXTheme.hairline,
-                    lineWidth: isHovered ? 1.5 : 0.5
-                )
+                .strokeBorder(strokeColor, lineWidth: active ? 1 : 0.5)
         )
     }
 
-    private func itemRow(_ item: DropPocketItem) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol(for: item.kind))
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(QMXTheme.accent)
-                .frame(width: 14)
+    private var stashedStackContent: some View {
+        VStack(spacing: 7) {
+            ForEach(Array(controller.items.prefix(3))) { item in
+                stashedItemTile(item)
+            }
 
-            Text(item.filename)
-                .font(.system(size: 10.5))
-                .foregroundStyle(QMXTheme.textPrimary)
-                .lineLimit(1)
+            if controller.items.count > 3 {
+                Text("+\(controller.items.count - 3)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.68))
+            }
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 2)
 
-            if item.isUploading {
-                ProgressView()
-                    .controlSize(.mini)
-                    .scaleEffect(0.6)
-                    .frame(width: 12, height: 12)
-            } else {
+            let canDeliver = controller.items.contains { $0.attachment != nil || $0.textSnippet != nil }
+            Button {
+                controller.deliverToQuickEntry()
+            } label: {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.black)
+                    .frame(width: 34, height: 34)
+                    .background(.white.opacity(canDeliver ? 1.0 : 0.45), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canDeliver)
+            .help("带入对话")
+
+            Button {
+                controller.clear()
+            } label: {
+                Text("清空")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(isHovering ? 0.68 : 0.44))
+            }
+            .buttonStyle(.plain)
+            .help("清空全部暂存")
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 10)
+    }
+
+    private func stashedItemTile(_ item: DropPocketItem) -> some View {
+        let isHoveredTile = hoveredItemId == item.id
+        return ZStack(alignment: .topTrailing) {
+            Group {
+                if let thumb = item.thumbnail {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        Color.white.opacity(0.10)
+                        Image(systemName: item.kind == "text" ? "text.alignleft" : "doc.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+                }
+            }
+            .frame(width: 56, height: 42)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
+            )
+            .overlay {
+                if item.isUploading {
+                    ZStack {
+                        Color.black.opacity(0.45)
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+            }
+
+            if isHoveredTile {
                 Button {
                     controller.removeItem(id: item.id)
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(QMXTheme.textTertiary)
-                        .frame(width: 14, height: 14)
-                        .contentShape(Rectangle())
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 15, height: 15)
+                        .background(.black.opacity(0.78), in: Circle())
+                        .overlay(Circle().strokeBorder(.white.opacity(0.28), lineWidth: 0.5))
                 }
                 .buttonStyle(.plain)
+                .offset(x: 4, y: -4)
+                .help("移除 \(item.filename)")
             }
         }
-        .padding(.horizontal, 7)
-        .frame(height: 24)
-        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(QMXTheme.surfaceRaised.opacity(0.7)))
-    }
-
-    private var quickSlotsRow: some View {
-        HStack(spacing: 6) {
-            ForEach(DropPocketQuickSlot.allCases) { slot in
-                let isHovered = controller.hoverTarget == .quickSlot(slot)
-                VStack(spacing: 2) {
-                    Image(systemName: slot.symbol)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(isHovered ? QMXTheme.accent : QMXTheme.textSecondary)
-                    Text(slot.title)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(isHovered ? QMXTheme.textPrimary : QMXTheme.textSecondary)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(isHovered ? QMXTheme.accentSoft : QMXTheme.surfaceRaised.opacity(0.85))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(isHovered ? QMXTheme.accent : QMXTheme.hairline, lineWidth: isHovered ? 1.5 : 0.5)
-                )
-            }
+        .onHover { hovering in
+            hoveredItemId = hovering ? item.id : (hoveredItemId == item.id ? nil : hoveredItemId)
         }
-    }
-
-    private func symbol(for kind: String) -> String {
-        switch kind {
-        case "image": return "photo"
-        case "audio": return "waveform"
-        case "video": return "film"
-        case "pdf": return "doc.richtext"
-        case "text": return "text.quote"
-        default: return "doc"
-        }
+        .help(item.filename)
     }
 }

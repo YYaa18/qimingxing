@@ -382,10 +382,63 @@ enum UIPreviewDumper {
         ) { _, _, _ in }
         render(aprView, size: CGSize(width: 440, height: 372), to: outputDir.appendingPathComponent("approval_modal.png"))
 
-        // 5a. Drop Pocket (Scheme B)
+        // 5a. Drop Shelf (Scheme C: 3 states)
         let pocketController = DropPocketController(brainClient: client)
-        let pocketView = DropPocketView(controller: pocketController, onClose: {})
-        render(pocketView, size: CGSize(width: DropPocketGeometry.width, height: DropPocketGeometry.emptyHeight), to: outputDir.appendingPathComponent("drop_pocket_empty.png"))
+        let shelfEmpty = EdgeShelfRootView(controller: pocketController, onClose: {})
+        render(
+            shelfEmpty,
+            size: ScreenEdgeResolver.targetSize(for: .idleEar, itemCount: 0),
+            to: outputDir.appendingPathComponent("drop_pocket_empty.png")
+        )
+
+        let expandedController = DropPocketController(brainClient: client)
+        expandedController.configureForPreview(edge: .right, phase: .dragExpanded(hoveredSlot: .summary), items: [])
+        render(
+            EdgeShelfRootView(controller: expandedController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: .summary), itemCount: 0),
+            to: outputDir.appendingPathComponent("drop_pocket_expanded.png")
+        )
+
+        let stashedController = DropPocketController(brainClient: client)
+        let sampleImage = NSImage(contentsOfFile: repoPath + "/body_godot/assets/sprites/happy.png")
+        let stashedDemoItems = [
+            DropPocketItem(
+                id: UUID(),
+                filename: "happy.png",
+                kind: "image",
+                isUploading: false,
+                attachment: StagedAttachment(artifactId: "a1", filename: "happy.png", kind: "image"),
+                thumbnail: sampleImage
+            ),
+            DropPocketItem(
+                id: UUID(),
+                filename: "架构方案.pdf",
+                kind: "pdf",
+                isUploading: false,
+                attachment: StagedAttachment(artifactId: "a2", filename: "架构方案.pdf", kind: "pdf"),
+                thumbnail: NSWorkspace.shared.icon(forFile: "/tmp/sample.pdf")
+            ),
+            DropPocketItem(
+                id: UUID(),
+                filename: "接口调试日志片段",
+                kind: "text",
+                isUploading: false,
+                textSnippet: "curl -s http://127.0.0.1:18790/health"
+            ),
+            DropPocketItem(
+                id: UUID(),
+                filename: "extra.md",
+                kind: "file",
+                isUploading: false,
+                textSnippet: "more"
+            ),
+        ]
+        stashedController.configureForPreview(edge: .right, phase: .stashedStack, items: stashedDemoItems)
+        render(
+            EdgeShelfRootView(controller: stashedController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: stashedDemoItems.count),
+            to: outputDir.appendingPathComponent("drop_pocket_stashed.png")
+        )
 
         // 5b. Detached media viewer with a virtual markdown table
         let tableView = MediaViewerContent(model: MediaViewerModel.shared, mode: .detached)
@@ -784,43 +837,63 @@ enum Phase1Verifier {
     }
 
     private static func verifyDropPocketGeometry() {
-        let visible = NSRect(x: 1920, y: 0, width: 1440, height: 900) // secondary display
-        let size = NSSize(width: DropPocketGeometry.width, height: DropPocketGeometry.emptyHeight)
-
-        // Center placement: +24pt offset
-        let centerOrigin = DropPocketGeometry.clampedOrigin(
-            mouseLocation: NSPoint(x: 2400, y: 400),
-            panelSize: size,
-            visibleFrame: visible
+        let primary = ShelfScreenBounds(
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 36, width: 1440, height: 839)
         )
-        check(centerOrigin.x == 2424 && centerOrigin.y == 424, "center offset should be +24pt")
-
-        // Top-right corner: clamped inside secondary display
-        let topRight = DropPocketGeometry.clampedOrigin(
-            mouseLocation: NSPoint(x: 3355, y: 895),
-            panelSize: size,
-            visibleFrame: visible
+        let secondary = ShelfScreenBounds(
+            frame: CGRect(x: 1440, y: 0, width: 1920, height: 1080),
+            visibleFrame: CGRect(x: 1440, y: 0, width: 1920, height: 1055)
         )
-        check(topRight.x + size.width <= visible.maxX - 12 + 0.5, "right edge must clamp within visibleFrame")
-        check(topRight.y + size.height <= visible.maxY - 12 + 0.5, "top edge must clamp within visibleFrame")
 
-        // Bottom-left corner: clamped inside secondary display
-        let bottomLeft = DropPocketGeometry.clampedOrigin(
-            mouseLocation: NSPoint(x: 1900, y: -10),
-            panelSize: size,
-            visibleFrame: visible
-        )
-        check(bottomLeft.x >= visible.minX + 12 - 0.5, "left edge must clamp within visibleFrame")
-        check(bottomLeft.y >= visible.minY + 12 - 0.5, "bottom edge must clamp within visibleFrame")
+        // 1. Single screen: cursor near left docks .left, cursor near right docks .right
+        let leftPlace = ScreenEdgeResolver.resolve(for: CGPoint(x: 200, y: 400), screens: [primary])
+        check(leftPlace.edge == .left, "single screen left cursor should dock left")
+        let leftIdleFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: leftPlace)
+        check(abs(leftIdleFrame.minX - primary.visibleFrame.minX) < 0.5, "left dock must sit flush at minX")
+        check(leftIdleFrame.size == CGSize(width: 48, height: 136), "idle ear size must be 48x136")
 
-        // Non-activating panel check
-        let pocketPanel = DropPocketPanel(
-            contentRect: NSRect(origin: .zero, size: size),
+        let rightPlace = ScreenEdgeResolver.resolve(for: CGPoint(x: 1300, y: 500), screens: [primary])
+        check(rightPlace.edge == .right, "single screen right cursor should dock right")
+
+        // 2. Dual screen seam avoidance: cursor near inner seam on left monitor avoids seam and docks .left
+        let dualLeftInner = ScreenEdgeResolver.resolve(for: CGPoint(x: 1410, y: 450), screens: [primary, secondary])
+        check(dualLeftInner.edge == .left, "left screen with seam on right must dock to outer left edge")
+
+        // Cursor near inner seam on right monitor avoids seam and docks .right
+        let dualRightInner = ScreenEdgeResolver.resolve(for: CGPoint(x: 1460, y: 450), screens: [primary, secondary])
+        check(dualRightInner.edge == .right, "right screen with seam on left must dock to outer right edge")
+
+        // 3. Vertical clamping with 24pt top/bottom margin
+        let topNear = ScreenEdgeResolver.resolve(for: CGPoint(x: 3300, y: 1075), screens: [primary, secondary])
+        let topFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.dragExpandedSize, placement: topNear)
+        check(topFrame.maxY <= secondary.visibleFrame.maxY - 24 + 0.5, "expanded shelf must clamp top edge by 24pt")
+        check(abs(topFrame.maxX - secondary.visibleFrame.maxX) < 0.5, "right expanded shelf must stay anchored flush on right edge")
+
+        let botNear = ScreenEdgeResolver.resolve(for: CGPoint(x: 3300, y: 5), screens: [primary, secondary])
+        let botFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.dragExpandedSize, placement: botNear)
+        check(botFrame.minY >= secondary.visibleFrame.minY + 24 - 0.5, "expanded shelf must clamp bottom edge by 24pt")
+
+        // 4. Target sizes across all 3 phases + edge-anchored resize invariant
+        let expSize = ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: .summary), itemCount: 0)
+        check(expSize == CGSize(width: 216, height: 220), "dragExpanded size must be 216x220")
+        let stashed1 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 1)
+        let stashed3 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 5)
+        check(stashed1.width == 84 && stashed1.height >= 160, "stashed 1-item size mismatch")
+        check(stashed3 == CGSize(width: 84, height: 264), "stashed 3+-item size mismatch: \(stashed3)")
+
+        let earRightFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: rightPlace)
+        let expRightFrame = ScreenEdgeResolver.frame(for: expSize, placement: rightPlace)
+        check(abs(earRightFrame.maxX - expRightFrame.maxX) < 0.5, "right-docked expansion must keep right edge fixed")
+
+        // 5. Non-activating panel check
+        let shelfPanel = DropShelfPanel(
+            contentRect: NSRect(origin: .zero, size: ScreenEdgeResolver.idleEarSize),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
-        check(!pocketPanel.canBecomeKey && !pocketPanel.canBecomeMain, "DropPocketPanel must never steal key/main focus")
+        check(!shelfPanel.canBecomeKey && !shelfPanel.canBecomeMain, "DropShelfPanel must never steal key/main focus")
     }
 
     private static func verifyHoldToApproveAndQueue() {
