@@ -947,6 +947,38 @@ enum Phase1Verifier {
             defer: false
         )
         check(!shelfPanel.canBecomeKey && !shelfPanel.canBecomeMain, "DropShelfPanel must never steal key/main focus")
+
+        // 6. Custom dragged position classification & multi-monitor saved fallback
+        let leftSnap = ScreenEdgeResolver.classifyDraggedFrame(
+            CGRect(x: 10, y: 400, width: 48, height: 220),
+            in: primary.visibleFrame
+        )
+        check(leftSnap.mode == .left && leftSnap.x == primary.visibleFrame.minX, "drag near left edge must snap .left")
+
+        let rightSnap = ScreenEdgeResolver.classifyDraggedFrame(
+            CGRect(x: 1380, y: 400, width: 48, height: 220),
+            in: primary.visibleFrame
+        )
+        check(rightSnap.mode == .right && rightSnap.x == primary.visibleFrame.maxX, "drag near right edge must snap .right")
+
+        let floatSnap = ScreenEdgeResolver.classifyDraggedFrame(
+            CGRect(x: 600, y: 380, width: 48, height: 220),
+            in: primary.visibleFrame
+        )
+        check(floatSnap.mode == .floating && abs(floatSnap.x - 624) < 0.5 && abs(floatSnap.y - 490) < 0.5, "mid-screen drag must stay floating at center")
+
+        let restoredFloat = ScreenEdgeResolver.resolveFromSaved(floatSnap, screens: [primary, secondary])
+        check(restoredFloat.mode == .floating, "saved floating mode must restore")
+        let restoredFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: restoredFloat)
+        check(abs(restoredFrame.midX - floatSnap.x) < 0.5 && abs(restoredFrame.midY - floatSnap.y) < 0.5, "floating shelf must restore centered at saved coordinates")
+
+        // Disconnected monitor fallback: saved position on secondary falls back cleanly onto primary
+        let offlineFallback = ScreenEdgeResolver.resolveFromSaved(
+            SavedShelfPosition(x: 2400, y: 500, mode: .floating),
+            screens: [primary]
+        )
+        let offlineFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: offlineFallback)
+        check(primary.visibleFrame.contains(offlineFrame), "disconnected monitor saved coords must clamp onto active screen")
     }
 
     private static func verifyHoldToApproveAndQueue() {

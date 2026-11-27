@@ -11,15 +11,74 @@ enum ShelfDockEdge: Equatable {
     case right
 }
 
+enum ShelfDockMode: String, Equatable {
+    case left
+    case right
+    case floating
+
+    var edge: ShelfDockEdge {
+        self == .left ? .left : .right
+    }
+}
+
+struct SavedShelfPosition: Equatable {
+    static let hasKey = "qmx.dropPocket.hasSavedPosition"
+    static let xKey = "qmx.dropPocket.savedX"
+    static let yKey = "qmx.dropPocket.savedY"
+    static let modeKey = "qmx.dropPocket.savedMode"
+
+    let x: CGFloat
+    let y: CGFloat
+    let mode: ShelfDockMode
+
+    static func load(defaults: UserDefaults = .standard) -> SavedShelfPosition? {
+        guard defaults.bool(forKey: hasKey) else { return nil }
+        let x = CGFloat(defaults.double(forKey: xKey))
+        let y = CGFloat(defaults.double(forKey: yKey))
+        let rawMode = defaults.string(forKey: modeKey) ?? ShelfDockMode.right.rawValue
+        let mode = ShelfDockMode(rawValue: rawMode) ?? .right
+        return SavedShelfPosition(x: x, y: y, mode: mode)
+    }
+
+    func save(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: Self.hasKey)
+        defaults.set(Double(x), forKey: Self.xKey)
+        defaults.set(Double(y), forKey: Self.yKey)
+        defaults.set(mode.rawValue, forKey: Self.modeKey)
+    }
+
+    static func clear(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: hasKey)
+        defaults.removeObject(forKey: xKey)
+        defaults.removeObject(forKey: yKey)
+        defaults.removeObject(forKey: modeKey)
+    }
+}
+
 struct ShelfScreenBounds: Equatable {
     let frame: CGRect
     let visibleFrame: CGRect
 }
 
 struct ShelfPlacement: Equatable {
-    let edge: ShelfDockEdge
+    let mode: ShelfDockMode
     let visibleFrame: CGRect
-    let anchorY: CGFloat
+    let anchorPoint: CGPoint
+
+    var edge: ShelfDockEdge { mode.edge }
+    var anchorY: CGFloat { anchorPoint.y }
+
+    init(edge: ShelfDockEdge, visibleFrame: CGRect, anchorY: CGFloat) {
+        self.mode = edge == .left ? .left : .right
+        self.visibleFrame = visibleFrame
+        self.anchorPoint = CGPoint(x: edge == .left ? visibleFrame.minX : visibleFrame.maxX, y: anchorY)
+    }
+
+    init(mode: ShelfDockMode, visibleFrame: CGRect, anchorPoint: CGPoint) {
+        self.mode = mode
+        self.visibleFrame = visibleFrame
+        self.anchorPoint = anchorPoint
+    }
 }
 
 enum ShelfQuickSlot: String, CaseIterable, Identifiable {
@@ -93,7 +152,59 @@ enum ScreenEdgeResolver {
             edge = distToLeft <= distToRight ? .left : .right
         }
 
-        return ShelfPlacement(edge: edge, visibleFrame: current.visibleFrame, anchorY: mouse.y)
+        let mode: ShelfDockMode = edge == .left ? .left : .right
+        let anchorX = mode == .left ? current.visibleFrame.minX : current.visibleFrame.maxX
+        return ShelfPlacement(
+            mode: mode,
+            visibleFrame: current.visibleFrame,
+            anchorPoint: CGPoint(x: anchorX, y: mouse.y)
+        )
+    }
+
+    static func resolveFromSaved(
+        _ saved: SavedShelfPosition,
+        screens: [ShelfScreenBounds]
+    ) -> ShelfPlacement {
+        let fallback = ShelfScreenBounds(
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900)
+        )
+        let savedPt = CGPoint(x: saved.x, y: saved.y)
+        let matched = screens.first(where: { $0.frame.contains(savedPt) })
+            ?? screens.min(by: { a, b in
+                hypot(a.frame.midX - savedPt.x, a.frame.midY - savedPt.y)
+                    < hypot(b.frame.midX - savedPt.x, b.frame.midY - savedPt.y)
+            })
+            ?? fallback
+
+        return ShelfPlacement(
+            mode: saved.mode,
+            visibleFrame: matched.visibleFrame,
+            anchorPoint: savedPt
+        )
+    }
+
+    @MainActor
+    static func resolveFromSaved(
+        _ saved: SavedShelfPosition,
+        nsScreens: [NSScreen] = NSScreen.screens
+    ) -> ShelfPlacement {
+        let bounds = nsScreens.map { ShelfScreenBounds(frame: $0.frame, visibleFrame: $0.visibleFrame) }
+        return resolveFromSaved(saved, screens: bounds)
+    }
+
+    static func classifyDraggedFrame(
+        _ frame: CGRect,
+        in visibleFrame: CGRect,
+        snapThreshold: CGFloat = 24
+    ) -> SavedShelfPosition {
+        if abs(frame.minX - visibleFrame.minX) <= snapThreshold {
+            return SavedShelfPosition(x: visibleFrame.minX, y: frame.midY, mode: .left)
+        }
+        if abs(visibleFrame.maxX - frame.maxX) <= snapThreshold {
+            return SavedShelfPosition(x: visibleFrame.maxX, y: frame.midY, mode: .right)
+        }
+        return SavedShelfPosition(x: frame.midX, y: frame.midY, mode: .floating)
     }
 
     @MainActor
@@ -116,19 +227,35 @@ enum ScreenEdgeResolver {
     }
 
     static func frame(for size: CGSize, placement: ShelfPlacement, verticalMargin: CGFloat = 24) -> CGRect {
-        let x: CGFloat = placement.edge == .left
-            ? placement.visibleFrame.minX
-            : placement.visibleFrame.maxX - size.width
+        switch placement.mode {
+        case .left, .right:
+            let x: CGFloat = placement.mode == .left
+                ? placement.visibleFrame.minX
+                : placement.visibleFrame.maxX - size.width
 
-        let minY = placement.visibleFrame.minY + verticalMargin
-        let maxY = placement.visibleFrame.maxY - size.height - verticalMargin
-        let y: CGFloat
-        if maxY < minY {
-            y = placement.visibleFrame.midY - size.height / 2
-        } else {
-            y = min(max(placement.anchorY - size.height / 2, minY), maxY)
+            let minY = placement.visibleFrame.minY + verticalMargin
+            let maxY = placement.visibleFrame.maxY - size.height - verticalMargin
+            let y: CGFloat
+            if maxY < minY {
+                y = placement.visibleFrame.midY - size.height / 2
+            } else {
+                y = min(max(placement.anchorPoint.y - size.height / 2, minY), maxY)
+            }
+            return CGRect(origin: CGPoint(x: x, y: y), size: size)
+
+        case .floating:
+            let margin: CGFloat = 12
+            let minX = placement.visibleFrame.minX + margin
+            let maxX = max(minX, placement.visibleFrame.maxX - size.width - margin)
+            let minY = placement.visibleFrame.minY + margin
+            let maxY = max(minY, placement.visibleFrame.maxY - size.height - margin)
+
+            let rawX = placement.anchorPoint.x - size.width / 2
+            let rawY = placement.anchorPoint.y - size.height / 2
+            let x = min(max(rawX, minX), maxX)
+            let y = min(max(rawY, minY), maxY)
+            return CGRect(origin: CGPoint(x: x, y: y), size: size)
         }
-        return CGRect(origin: CGPoint(x: x, y: y), size: size)
     }
 }
 
@@ -312,19 +439,21 @@ private final class EdgeDropHostView: NSView {
 // MARK: - Controller
 
 @MainActor
-final class DropPocketController: ObservableObject {
+final class DropPocketController: NSObject, ObservableObject, NSWindowDelegate {
     static let dragShakeDefaultsKey = "qmx.dropPocket.dragShakeEnabled"
 
     @Published private(set) var items: [DropPocketItem] = []
     @Published private(set) var isVisible: Bool = false
     @Published private(set) var phase: ShelfPhase = .idleEar
     @Published private(set) var dockEdge: ShelfDockEdge = .right
+    @Published private(set) var dockMode: ShelfDockMode = .right
 
     private var panel: DropShelfPanel?
     private var currentPlacement: ShelfPlacement?
     private let brainClient: BrainClient
     private var shakeDetector = DragShakeDetector()
     private var lastDragChangeCount: Int = -1
+    private var programmaticMoveCount: Int = 0
     private nonisolated(unsafe) var dragShakeMonitor: Any?
 
     var onDeliverToQuickEntry: (([StagedAttachment], [String]) -> Void)?
@@ -332,6 +461,7 @@ final class DropPocketController: ObservableObject {
 
     init(brainClient: BrainClient) {
         self.brainClient = brainClient
+        super.init()
         if !QMXTheme.isHeadlessDump, UserDefaults.standard.bool(forKey: Self.dragShakeDefaultsKey) {
             setDragShakeEnabled(true)
         }
@@ -395,17 +525,62 @@ final class DropPocketController: ObservableObject {
         ensurePanel()
         guard let panel else { return }
 
-        let resolved = ScreenEdgeResolver.resolve(for: NSEvent.mouseLocation)
+        let resolved: ShelfPlacement
+        if let saved = SavedShelfPosition.load() {
+            resolved = ScreenEdgeResolver.resolveFromSaved(saved)
+        } else {
+            resolved = ScreenEdgeResolver.resolve(for: NSEvent.mouseLocation)
+        }
         currentPlacement = resolved
+        dockMode = resolved.mode
         dockEdge = resolved.edge
         phase = items.isEmpty ? .idleEar : .stashedStack
 
         let size = ScreenEdgeResolver.targetSize(for: phase, itemCount: items.count)
         let targetFrame = ScreenEdgeResolver.frame(for: size, placement: resolved)
+        programmaticMoveCount += 1
         panel.setFrame(targetFrame, display: true)
+        programmaticMoveCount = max(0, programmaticMoveCount - 1)
         panel.invalidateShadow()
         panel.orderFrontRegardless()
         isVisible = true
+    }
+
+    func resetCustomPosition() {
+        SavedShelfPosition.clear()
+        guard isVisible else { return }
+        ensurePanel()
+        guard let panel else { return }
+        let resolved = ScreenEdgeResolver.resolve(for: NSEvent.mouseLocation)
+        currentPlacement = resolved
+        dockMode = resolved.mode
+        dockEdge = resolved.edge
+        let size = ScreenEdgeResolver.targetSize(for: phase, itemCount: items.count)
+        let targetFrame = ScreenEdgeResolver.frame(for: size, placement: resolved)
+        programmaticMoveCount += 1
+        panel.setFrame(targetFrame, display: true)
+        programmaticMoveCount = max(0, programmaticMoveCount - 1)
+        panel.invalidateShadow()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard programmaticMoveCount == 0, isVisible, let panel else { return }
+        let frame = panel.frame
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(center) })
+            ?? panel.screen
+            ?? NSScreen.main
+        guard let screen else { return }
+
+        let saved = ScreenEdgeResolver.classifyDraggedFrame(frame, in: screen.visibleFrame)
+        saved.save()
+        dockMode = saved.mode
+        dockEdge = saved.mode.edge
+        currentPlacement = ShelfPlacement(
+            mode: saved.mode,
+            visibleFrame: screen.visibleFrame,
+            anchorPoint: CGPoint(x: saved.x, y: saved.y)
+        )
     }
 
     func hide() {
@@ -467,6 +642,7 @@ final class DropPocketController: ObservableObject {
     }
 
     func configureForPreview(edge: ShelfDockEdge, phase: ShelfPhase, items: [DropPocketItem]) {
+        self.dockMode = edge == .left ? .left : .right
         self.dockEdge = edge
         self.phase = phase
         self.items = items
@@ -487,12 +663,13 @@ final class DropPocketController: ObservableObject {
         p.isFloatingPanel = true
         p.level = .statusBar
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        p.isMovableByWindowBackground = false
+        p.isMovableByWindowBackground = true
         p.hidesOnDeactivate = false
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = true
         p.appearance = NSAppearance(named: .darkAqua)
+        p.delegate = self
 
         let hostView = EdgeDropHostView(frame: NSRect(origin: .zero, size: initialSize))
         hostView.wantsLayer = true
@@ -550,16 +727,21 @@ final class DropPocketController: ObservableObject {
         else { return }
 
         if !animated || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            programmaticMoveCount += 1
             panel.setFrame(nextFrame, display: true)
+            programmaticMoveCount = max(0, programmaticMoveCount - 1)
             panel.invalidateShadow()
         } else {
+            programmaticMoveCount += 1
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.24
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
                 panel.animator().setFrame(nextFrame, display: true)
             }, completionHandler: { [weak self] in
                 Task { @MainActor [weak self] in
-                    self?.panel?.invalidateShadow()
+                    guard let self else { return }
+                    self.programmaticMoveCount = max(0, self.programmaticMoveCount - 1)
+                    self.panel?.invalidateShadow()
                 }
             })
         }
@@ -825,9 +1007,14 @@ struct EdgeShelfRootView: View {
 
     private var shelfShape: AsymmetricRoundedRect {
         let r = ScreenEdgeResolver.cornerRadius
-        return controller.dockEdge == .right
-            ? AsymmetricRoundedRect(topLeading: r, bottomLeading: r, bottomTrailing: 0, topTrailing: 0)
-            : AsymmetricRoundedRect(topLeading: 0, bottomLeading: 0, bottomTrailing: r, topTrailing: r)
+        switch controller.dockMode {
+        case .right:
+            return AsymmetricRoundedRect(topLeading: r, bottomLeading: r, bottomTrailing: 0, topTrailing: 0)
+        case .left:
+            return AsymmetricRoundedRect(topLeading: 0, bottomLeading: 0, bottomTrailing: r, topTrailing: r)
+        case .floating:
+            return AsymmetricRoundedRect(topLeading: r, bottomLeading: r, bottomTrailing: r, topTrailing: r)
+        }
     }
 
     private var isDragActive: Bool {
@@ -881,6 +1068,12 @@ struct EdgeShelfRootView: View {
         .overlay(borderOverlay)
         .environment(\.colorScheme, .dark)
         .onHover { isHovering = $0 }
+        .contextMenu {
+            Button("重置到屏幕边缘") {
+                controller.resetCustomPosition()
+            }
+            Button("收起投喂托盘", action: onClose)
+        }
     }
 
     private var borderOverlay: some View {
@@ -896,25 +1089,33 @@ struct EdgeShelfRootView: View {
 
     private var idleEarContent: some View {
         ZStack {
-            // Centered morning star
+            // Centered morning star (with subtle centered cyan halo when free-floating)
+            if controller.dockMode == .floating {
+                Circle()
+                    .fill(cyanGlowColor.opacity(0.24))
+                    .frame(width: 28, height: 28)
+                    .blur(radius: 6)
+            }
             MorningStarMark(size: 18, color: .white)
 
-            // Docked screen-edge cyan vertical light streak
-            HStack {
-                if controller.dockEdge == .right { Spacer() }
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [.clear, cyanGlowColor.opacity(0.92), .clear],
-                            startPoint: .top,
-                            endPoint: .bottom
+            // Docked screen-edge cyan vertical light streak (hidden when floating)
+            if controller.dockMode != .floating {
+                HStack {
+                    if controller.dockEdge == .right { Spacer() }
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [.clear, cyanGlowColor.opacity(0.92), .clear],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
                         )
-                    )
-                    .frame(width: 2.5, height: 68)
-                    .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
-                if controller.dockEdge == .left { Spacer() }
+                        .frame(width: 2.5, height: 68)
+                        .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
+                    if controller.dockEdge == .left { Spacer() }
+                }
+                .padding(controller.dockEdge == .right ? .trailing : .leading, 1)
             }
-            .padding(controller.dockEdge == .right ? .trailing : .leading, 1)
 
             if isHovering {
                 VStack {
