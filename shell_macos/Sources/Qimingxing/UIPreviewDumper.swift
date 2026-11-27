@@ -509,6 +509,60 @@ enum UIPreviewDumper {
             to: outputDir.appendingPathComponent("pinned_note.png")
         )
 
+        // 5b-2. Liquid Glass Toast Banner previews over wallpaper-like gradient
+        let toastSuccessBackdrop = ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.94, green: 0.25, blue: 0.42),
+                    Color(red: 0.98, green: 0.54, blue: 0.28),
+                    Color(red: 0.22, green: 0.56, blue: 0.89),
+                    Color(red: 0.10, green: 0.26, blue: 0.56),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            TaskToastBannerView(
+                title: "已原位替换",
+                message: "内容已写回目标应用选区",
+                style: .success,
+                actionTitle: "查看结果",
+                onOpen: {},
+                onClose: {}
+            )
+        }
+        render(toastSuccessBackdrop, size: CGSize(width: 560, height: 220), to: outputDir.appendingPathComponent("task_toast_success.png"))
+
+        let toastErrorBackdrop = ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.14, green: 0.17, blue: 0.26),
+                    Color(red: 0.24, green: 0.20, blue: 0.34),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            TaskToastBannerView(
+                title: "需要屏幕录制权限",
+                message: "请在系统设置 → 隐私与安全性 → 录屏与系统录音 中授权启明星",
+                style: .error,
+                actionTitle: "打开设置",
+                onOpen: {},
+                onClose: {}
+            )
+        }
+        render(toastErrorBackdrop, size: CGSize(width: 560, height: 220), to: outputDir.appendingPathComponent("task_toast_error.png"))
+
+        render(
+            PermissionGuideCardView(
+                kind: .accessibility,
+                isGranted: false,
+                onOpenSettings: {},
+                onClose: {}
+            ),
+            size: PermissionGuideController.cardSize,
+            to: outputDir.appendingPathComponent("permission_guide.png")
+        )
+
         // 5c. Detached media viewer with a virtual markdown table
         let tableView = MediaViewerContent(model: MediaViewerModel.shared, mode: .detached)
         render(tableView, size: CGSize(width: 860, height: 620), to: outputDir.appendingPathComponent("media_viewer_table.png"))
@@ -1182,6 +1236,8 @@ enum Phase3Verifier {
         verifyCapturedSelectionAndPrompt()
         verifyPasteboardSnapshotRoundTrip()
         verifyDragShakeDetector()
+        verifyNotificationRoutesAndToast()
+        verifyPermissionGuide()
         print("PHASE3_VERIFY PASS")
     }
 
@@ -1241,5 +1297,46 @@ enum Phase3Verifier {
         check(!slow.record(x: 524, at: 5.20), "slow right")
         check(!slow.record(x: 496, at: 5.45), "window expired -> reset")
         check(!slow.record(x: 530, at: 5.65), "only reversal 1 after reset")
+    }
+
+    private static func verifyNotificationRoutesAndToast() {
+        let routes: [NotificationRoute] = [
+            .quickEntry,
+            .workspace(taskId: "task_123"),
+            .settings(tab: "general"),
+            .systemURL("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+            .none,
+        ]
+        for route in routes {
+            let info = route.toUserInfo()
+            let parsed = NotificationRoute.from(userInfo: info)
+            check(parsed == route, "NotificationRoute round-trip mismatch for \(route)")
+        }
+        check(
+            NotificationRoute.from(userInfo: ["task_id": "legacy_42"]) == .workspace(taskId: "legacy_42"),
+            "legacy task_id fallback must map to .workspace"
+        )
+        check(
+            NotificationRoute.quickEntry.categoryIdentifier == DesktopActions.notificationCategoryResult,
+            "quickEntry category mismatch"
+        )
+        check(
+            NotificationRoute.settings(tab: nil).categoryIdentifier == DesktopActions.notificationCategorySettings,
+            "settings category mismatch"
+        )
+        check(TaskToastController.bannerSize == NSSize(width: 436, height: 106), "TaskToast banner size mismatch")
+    }
+
+    private static func verifyPermissionGuide() {
+        let dragKinds = SystemPermissionKind.allCases.filter(\.supportsDragDrop)
+        check(dragKinds == [.accessibility, .screenRecording], "only accessibility & screenRecording support TCC drag-drop")
+        for kind in SystemPermissionKind.allCases {
+            check(URL(string: kind.settingsURLString) != nil, "invalid settings URL for \(kind)")
+        }
+        let bundleURL = PermissionGuideHelper.resolvedAppBundleURL()
+        check(bundleURL.isFileURL, "resolved app bundle URL must be a file URL")
+        let iconView = DraggableAppBundleIconView(iconSize: 46)
+        check(iconView.acceptsFirstMouse(for: nil), "drag icon must accept first mouse click while Settings is frontmost")
+        check(DraggableAppBundleIconView.supportedDragMask == [.copy, .link], "drag mask mismatch")
     }
 }

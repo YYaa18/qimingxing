@@ -143,14 +143,15 @@ enum GhostWriteEngine {
             guard AXIsProcessTrusted() else {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(clean, forType: .string)
+                let prefsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                 TaskToastController.shared.show(
                     title: "已复制到剪贴板",
-                    message: "开启「辅助功能」权限后可直接原位覆盖写回目标应用",
-                    isError: false
+                    message: "拖放图标到系统「辅助功能」即可直接原位覆盖写回",
+                    style: .info,
+                    actionTitle: "去拖放授权",
+                    route: .systemURL(prefsURL)
                 ) {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    PermissionGuideController.shared.show(for: .accessibility, openSettings: true)
                 }
                 onComplete(false)
                 return

@@ -96,7 +96,10 @@ final class WalkieTalkieVoiceController: ObservableObject {
                 TaskToastController.shared.show(
                     title: "未识别到语音内容",
                     message: "请检查麦克风输入后重试",
-                    isError: false
+                    style: .warning,
+                    actionTitle: nil,
+                    route: .none,
+                    mirrorToSystem: false
                 ) {}
             } else {
                 self.onTranscriptReady?(final)
@@ -154,12 +157,15 @@ final class WalkieTalkieVoiceController: ObservableObject {
             micGranted = await AVCaptureDevice.requestAccess(for: .audio)
         }
         guard micGranted else {
+            let prefsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
             TaskToastController.shared.show(
                 title: "需要麦克风权限",
                 message: "请在系统设置 → 隐私与安全性 → 麦克风 中允许启明星",
-                isError: true
+                style: .error,
+                actionTitle: "打开设置",
+                route: .systemURL(prefsURL)
             ) {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                if let url = URL(string: prefsURL) {
                     NSWorkspace.shared.open(url)
                 }
             }
@@ -177,12 +183,15 @@ final class WalkieTalkieVoiceController: ObservableObject {
             speechGranted = (status == .authorized)
         }
         guard speechGranted else {
+            let prefsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
             TaskToastController.shared.show(
                 title: "需要语音识别权限",
                 message: "请在系统设置 → 隐私与安全性 → 语音识别 中允许启明星",
-                isError: true
+                style: .error,
+                actionTitle: "打开设置",
+                route: .systemURL(prefsURL)
             ) {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition") {
+                if let url = URL(string: prefsURL) {
                     NSWorkspace.shared.open(url)
                 }
             }

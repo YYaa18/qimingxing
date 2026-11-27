@@ -592,9 +592,7 @@ class LLMRouter:
                         finish_reason = str(candidate["finishReason"])
                     grounding = candidate.get("groundingMetadata") or {}
                     if isinstance(grounding, dict):
-                        for source in gemini_grounding_sources(grounding):
-                            if source not in sources and len(sources) < 6:
-                                sources.append(source)
+                        self._merge_gemini_sources(sources, gemini_grounding_sources(grounding))
                     parts = ((candidate.get("content") or {}).get("parts") or [])
                     for part in parts:
                         if not isinstance(part, dict):
@@ -608,7 +606,7 @@ class LLMRouter:
         if not emitted:
             yield self._gemini_empty_note(finish_reason, block_reason)
         self.last_annotations = [
-            {"type": "url_citation", "url_citation": {"url": source["url"], "title": source["title"]}}
+            self._source_to_url_citation(source)
             for source in sources
         ]
 
@@ -684,9 +682,7 @@ class LLMRouter:
                         finish_message = str(candidate["finishMessage"])
                     grounding = candidate.get("groundingMetadata") or {}
                     if isinstance(grounding, dict):
-                        for source in gemini_grounding_sources(grounding):
-                            if source not in sources and len(sources) < 6:
-                                sources.append(source)
+                        self._merge_gemini_sources(sources, gemini_grounding_sources(grounding))
                     parts = ((candidate.get("content") or {}).get("parts") or [])
                     for part in parts:
                         if not isinstance(part, dict) or part.get("thought"):
@@ -737,10 +733,48 @@ class LLMRouter:
             tool_calls=calls,
             finish_reason=self._gemini_finish_reason(finish_reason),
             usage=usage,
-            annotations=[{"type": "url_citation", "url_citation": {"url": s["url"], "title": s["title"]}} for s in sources],
+            annotations=[self._source_to_url_citation(s) for s in sources],
             title="",
             refusal="",
         )
+
+    @staticmethod
+    def _merge_gemini_sources(
+        sources: List[Dict[str, str]],
+        incoming: List[Dict[str, str]],
+        limit: int = 6,
+    ) -> None:
+        by_url: Dict[str, Dict[str, str]] = {s["url"]: s for s in sources if s.get("url")}
+        for source in incoming:
+            url = str(source.get("url") or "").strip()
+            if not url:
+                continue
+            existing = by_url.get(url)
+            if existing is not None:
+                snippet = str(source.get("snippet") or "").strip()
+                if snippet and snippet not in str(existing.get("snippet") or ""):
+                    prev = str(existing.get("snippet") or "").strip()
+                    existing["snippet"] = (f"{prev} / {snippet}" if prev else snippet)[:160]
+                title = str(source.get("title") or "").strip()
+                if title and len(title) > len(str(existing.get("title") or "")):
+                    existing["title"] = title
+                continue
+            if len(sources) >= limit:
+                continue
+            copy = dict(source)
+            sources.append(copy)
+            by_url[url] = copy
+
+    @staticmethod
+    def _source_to_url_citation(source: Dict[str, str]) -> Dict[str, Any]:
+        citation: Dict[str, str] = {
+            "url": source["url"],
+            "title": source["title"],
+        }
+        snippet = str(source.get("snippet") or "").strip()
+        if snippet:
+            citation["snippet"] = snippet
+        return {"type": "url_citation", "url_citation": citation}
 
     @staticmethod
     def _gemini_finish_reason(reason: str) -> str:

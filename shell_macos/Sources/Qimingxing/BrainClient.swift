@@ -439,22 +439,20 @@ final class BrainClient: ObservableObject {
                 terminalTaskStatuses[taskId] = item.status
                 if ["completed", "failed"].contains(item.status), previous != item.status {
                     let message = friendlyTaskMessage(item)
-                    let toastTitle = item.status == "completed"
-                        ? "任务完成 · \(item.title)"
-                        : "任务失败 · \(item.title)"
+                    let isFailure = (item.status == "failed")
+                    let toastTitle = isFailure
+                        ? "任务失败 · \(item.title)"
+                        : "任务完成 · \(item.title)"
                     TaskToastController.shared.show(
                         title: toastTitle,
                         message: message,
-                        isError: item.status == "failed"
+                        style: isFailure ? .error : .success,
+                        actionTitle: "查看结果",
+                        route: .workspace(taskId: item.taskId),
+                        mirrorToSystem: true
                     ) {
                         NotificationCenter.default.post(name: .qmxOpenWorkspace, object: nil)
                     }
-                    desktopActions.showProactiveNotification(
-                        title: toastTitle,
-                        body: message,
-                        taskId: item.taskId,
-                        announce: false
-                    )
                 }
                 synthesizeTaskResultIfNeeded(taskId: taskId)
             }

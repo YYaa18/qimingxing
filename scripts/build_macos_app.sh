@@ -11,33 +11,56 @@ else
 fi
 BUNDLE_ID="com.qimingxing.desktop"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
-DMG_PATH="${DIST_DIR}/${APP_NAME}-${APP_VERSION}-arm64.dmg"
 INSTALL_PATH="/Applications/${APP_NAME}.app"
+TARGET_ARCH="${QMX_ARCH:-$(uname -m)}"
 
 DO_INSTALL=0
 DO_DMG=0
 WITH_GODOT=0
-for arg in "$@"; do
-  case "$arg" in
+while (( $# > 0 )); do
+  case "$1" in
     --install) DO_INSTALL=1 ;;
     --dmg) DO_DMG=1 ;;
     --with-godot) WITH_GODOT=1 ;;
+    --arch)
+      if (( $# < 2 )); then
+        echo "❌ --arch 需要指定架构 (arm64 或 x86_64)" >&2
+        exit 1
+      fi
+      TARGET_ARCH="$2"
+      shift
+      ;;
+    --arch=*)
+      TARGET_ARCH="${1#--arch=}"
+      ;;
     -h|--help)
       cat <<'EOF'
-Usage: scripts/build_macos_app.sh [--install] [--dmg] [--with-godot]
+Usage: scripts/build_macos_app.sh [--install] [--dmg] [--with-godot] [--arch arm64|x86_64]
   --install     Install built Qimingxing.app to /Applications/Qimingxing.app
   --dmg         Create distributable drag-and-drop DMG in dist/
   --with-godot  Optionally bundle Godot.app & body_godot/ (disabled by default in v1.0.1)
+  --arch        Target macOS architecture: arm64 or x86_64 (default: current machine via uname -m, or QMX_ARCH)
   Env QMX_CODESIGN_IDENTITY  Optional codesign identity (default: "Qimingxing Local Code Signing" if trusted, else ad-hoc)
 EOF
       exit 0
       ;;
     *)
-      echo "Unknown option: $arg" >&2
+      echo "Unknown option: $1" >&2
       exit 1
       ;;
   esac
+  shift
 done
+
+case "${TARGET_ARCH}" in
+  arm64|x86_64) ;;
+  *)
+    echo "❌ 不支持的架构: ${TARGET_ARCH}（仅支持 arm64 或 x86_64）" >&2
+    exit 1
+    ;;
+esac
+
+DMG_PATH="${DIST_DIR}/${APP_NAME}-${APP_VERSION}-${TARGET_ARCH}.dmg"
 
 VENV_PY="${ROOT_DIR}/.venv/bin/python"
 if [[ ! -x "${VENV_PY}" ]]; then
@@ -51,6 +74,13 @@ SITE_SRC="${ROOT_DIR}/.venv/lib/python3.12/site-packages"
 
 if [[ ! -d "${PY_HOME}" || ! -d "${SITE_SRC}" ]]; then
   echo "❌ 未找到可用的 Python 运行时或 site-packages: ${PY_HOME} | ${SITE_SRC}" >&2
+  exit 1
+fi
+
+PY_ARCHS="$(lipo -archs "${REAL_PY}" 2>/dev/null || true)"
+if [[ -n "${PY_ARCHS}" ]] && ! grep -qw "${TARGET_ARCH}" <<< "${PY_ARCHS}"; then
+  echo "❌ 虚拟环境 Python 架构 (${PY_ARCHS}) 与目标架构 (${TARGET_ARCH}) 不匹配。" >&2
+  echo "   请在 ${TARGET_ARCH} macOS 环境中准备对应的 .venv 后再构建。" >&2
   exit 1
 fi
 
@@ -74,13 +104,14 @@ if (( WITH_GODOT == 1 )); then
 fi
 
 echo "📦 开始构建 ${APP_NAME}.app (v${APP_VERSION})"
+echo "   Arch:       ${TARGET_ARCH}"
 echo "   Source:     ${ROOT_DIR}"
 echo "   Python:     ${PY_HOME}"
 echo "   Godot:      ${GODOT_APP_SRC:-disabled (native shell standalone)}"
 
-echo "🔨 编译 Swift 原生 macOS 壳 (shell_macos)..."
-(cd "${ROOT_DIR}/shell_macos" && swift build -c release --arch arm64)
-SWIFT_BIN="$(cd "${ROOT_DIR}/shell_macos" && swift build -c release --arch arm64 --show-bin-path)/Qimingxing"
+echo "🔨 编译 Swift 原生 macOS 壳 (shell_macos, ${TARGET_ARCH})..."
+(cd "${ROOT_DIR}/shell_macos" && swift build -c release --arch "${TARGET_ARCH}")
+SWIFT_BIN="$(cd "${ROOT_DIR}/shell_macos" && swift build -c release --arch "${TARGET_ARCH}" --show-bin-path)/Qimingxing"
 if [[ ! -x "${SWIFT_BIN}" ]]; then
   echo "❌ 未找到编译后的 Swift 可执行文件: ${SWIFT_BIN}" >&2
   exit 1
