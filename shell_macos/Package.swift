@@ -13,6 +13,12 @@ let package = Package(
         .executableTarget(
             name: "Qimingxing",
             path: "Sources/Qimingxing",
+            swiftSettings: [
+                .unsafeFlags([
+                    "-Xfrontend", "-disable-dynamic-actor-isolation",
+                    "-Xfrontend", "-disable-actor-data-race-checks",
+                ])
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
