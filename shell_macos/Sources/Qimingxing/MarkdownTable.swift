@@ -244,6 +244,47 @@ extension MediaItem {
     }
 }
 
+/// Removes leaked card markers. Valid card blocks are consumed by the brain
+/// parser, so anything left in stored text is a malformed fragment; dropping
+/// only the marker tokens keeps the inline text visible.
+enum QMXCardMarkers {
+    static func strip(_ raw: String) -> String {
+        guard raw.contains("<<<") else { return raw }
+        return raw
+            .replacingOccurrences(
+                of: #"<<<CARD[^>\n]*>>>"#,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            .replacingOccurrences(
+                of: "<<<END_CARD>>>",
+                with: "",
+                options: .caseInsensitive
+            )
+    }
+}
+
+/// Stable signature for a table, used to drop the md-table media twin when the
+/// same table is already visible inline or inside a card. Only the header and
+/// the first three rows are compared so brain-side truncation (15x100) and the
+/// card's full markdown still match.
+enum QMXTableDedupe {
+    static func signature(columns: [String], rows: [[String]]) -> String {
+        func norm(_ value: String) -> String {
+            value.trimmingCharacters(in: .whitespaces)
+        }
+        let header = columns.map(norm).joined(separator: "\u{1F}")
+        let sample = rows.prefix(3).map { $0.map(norm).joined(separator: "\u{1F}") }
+        return ([header] + sample).joined(separator: "\u{1E}")
+    }
+}
+
+extension QMXMarkdownTable {
+    var dedupeSignature: String {
+        QMXTableDedupe.signature(columns: columns, rows: rows)
+    }
+}
+
 func qmxTableTSV(columns: [String], rows: [[String]]) -> String {
     func clean(_ value: String) -> String {
         value.replacingOccurrences(of: "\t", with: " ")
@@ -591,13 +632,25 @@ struct InlineMarkdownTableView: View {
 }
 
 /// Tables render as an inline single-line entry inside the answer body, so
-/// the media strip should not repeat the same virtual table card. If the
-/// answer has no inline table block (e.g. the table came from a card event),
-/// keep the media card as the only entry point.
-func qmxMediaWithoutInlineTables(_ media: [MediaItem], answer: String) -> [MediaItem] {
+/// the media strip should not repeat the same virtual table card. Card bodies
+/// are included because the brain also emits card tables as `turn.media`.
+func qmxMediaWithoutInlineTables(
+    _ media: [MediaItem],
+    answer: String,
+    cards: [OutputCardItem] = []
+) -> [MediaItem] {
     guard !media.isEmpty else { return media }
-    let hasTable = !QMXMarkdownTables.scan(answer).isEmpty
-        || StreamingBlockParser.parse(answer, turnId: "", isFinished: false).hasAnyTable
-    guard hasTable else { return media }
-    return media.filter { !$0.isMarkdownTable }
+    var signatures = Set(QMXMarkdownTables.scan(answer).map(\.dedupeSignature))
+    for card in cards {
+        signatures.formUnion(QMXMarkdownTables.scan(card.contentMarkdown).map(\.dedupeSignature))
+    }
+    guard !signatures.isEmpty else { return media }
+    return media.filter { item in
+        guard item.isMarkdownTable else { return true }
+        let signature = QMXTableDedupe.signature(
+            columns: item.previewColumns,
+            rows: item.previewRows
+        )
+        return !signatures.contains(signature)
+    }
 }

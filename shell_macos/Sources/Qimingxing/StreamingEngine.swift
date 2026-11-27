@@ -600,11 +600,16 @@ enum StreamingBlockParser {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             let isActiveLastLine = !isFinished && !hasTrailingNewline && index == lines.count - 1
 
-            // Skip card markers (same as QMXMarkdownTables)
+            // Skip card markers (same validity rule as the brain parser:
+            // `<<<CARD` must be followed by whitespace or `>>>`). A malformed
+            // tag stays visible instead of swallowing the rest of the answer.
             let upper = trimmed.uppercased()
-            if upper.hasPrefix("<<<CARD") {
-                inCard = true
-                continue
+            if let cardRange = upper.range(of: "<<<CARD") {
+                let rest = upper[cardRange.upperBound...]
+                if let first = rest.first, first.isWhitespace || first == ">" {
+                    inCard = true
+                    continue
+                }
             }
             if upper.contains("<<<END_CARD>>>") {
                 inCard = false

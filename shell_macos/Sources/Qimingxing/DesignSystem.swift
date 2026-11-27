@@ -712,7 +712,7 @@ struct MarkdownMessageView: View {
     let text: String
 
     var body: some View {
-        let blocks = Self.parseBlocks(text)
+        let blocks = Self.parseBlocks(QMXCardMarkers.strip(text))
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
