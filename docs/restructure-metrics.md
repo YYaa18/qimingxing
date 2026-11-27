@@ -208,6 +208,22 @@ swift test --build-path /tmp/qmx-noflags2             # 90 passed，无并发诊
 - `Package.swift` 已删除 `-disable-dynamic-actor-isolation` / `-disable-actor-data-race-checks`。
 - 未做：`UIPreviewDumper` 移出生产 target（需要 library + public API，顺延到 Phase 6）；`GhostWriteEngine`/`ProcessSupervisor` 测试（缺少注入点）。
 
+### 3.7 Phase 5 证据（路由层 + rich_content）
+
+```bash
+.venv/bin/python -m pytest -q   # 296 passed
+wc -l brain/main.py brain/rich_content.py brain/rich/*.py brain/app/routes/*.py
+```
+
+| 文件 | 前 | 后 |
+|---|---:|---:|
+| `brain/main.py` | 1,161 | **502**（app 装配 + `/ws`） |
+| `brain/rich_content.py` | 713 | **31**（兼容 facade） |
+| `brain/app/routes/` | 0 | 10 模块（1,113 行，含 `_deps.py`） |
+| `brain/rich/` | 0 | `sources 425` / `tables 213` / `media 86` |
+
+`RouteDeps` 显式传递共享对象；`brain.rich_content` 的公共 import 全部保持可用（hub、task_runner、browser tools、tests 未改）。
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
