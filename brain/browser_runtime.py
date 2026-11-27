@@ -8,11 +8,14 @@ import os
 import re
 import socket
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright
-from playwright.async_api import async_playwright
+# Playwright is loaded on the first browser action, not at Brain startup.
+# Importing it eagerly costs ~130ms cold (~37ms warm) on every launch even for
+# users who never touch browser automation.
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from playwright.async_api import Browser, BrowserContext, Page, Playwright
 
 _ALLOWED_SCHEMES = {"http", "https"}
 _METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal"}
@@ -248,6 +251,8 @@ class BrowserRuntime:
             await self._start_isolated()
 
     async def _start_isolated(self) -> None:
+        from playwright.async_api import async_playwright
+
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(self.profile_dir, 0o700)
@@ -281,6 +286,8 @@ class BrowserRuntime:
         self._wire_page(self._page)
 
     async def _start_live(self) -> None:
+        from playwright.async_api import async_playwright
+
         if not self.allowed_domains:
             raise ValueError("live 模式必须在 mandate.allowed_domains 中明确授权域名")
         self.media_dir.mkdir(parents=True, exist_ok=True)

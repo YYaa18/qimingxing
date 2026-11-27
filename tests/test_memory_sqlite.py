@@ -209,3 +209,30 @@ def test_cross_restart_continuity_and_clear_history_preserves_long_term_facts(tm
         assert dbg_after["active_session"]["session_id"] != dbg["active_session"]["session_id"]
         assert dbg_after["active_session"]["recent_message_count"] == 0
         assert dbg_after["active_facts_count"] == 1
+
+
+async def test_bulk_lookup_helpers_cover_facts_episodes_messages(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "bulk.db")
+    await store.initialize()
+    sess = await store.get_or_create_active_session()
+    fact = await store.add_fact(
+        MemoryFact(fact_id=new_fact_id(), category="fact", content="批量查询事实")
+    )
+    episode = await store.add_episode(
+        MemoryEpisode(episode_id=new_episode_id(), kind="conversation", summary="批量查询情景")
+    )
+    message = await store.append_message(
+        session_id=sess.session_id,
+        turn_id="t-bulk",
+        role="user",
+        content="批量查询消息",
+    )
+
+    facts = await store.get_facts_by_ids([fact.fact_id, "missing"])
+    episodes = await store.get_episodes_by_ids([episode.episode_id, "missing"])
+    messages = await store.get_messages_by_ids([message.msg_id, 999999])
+
+    assert set(facts) == {fact.fact_id}
+    assert set(episodes) == {episode.episode_id}
+    assert set(messages) == {message.msg_id}
+    await store.close()

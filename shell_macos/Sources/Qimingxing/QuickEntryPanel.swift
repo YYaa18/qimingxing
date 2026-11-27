@@ -408,7 +408,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             : chatHeight
     }
 
-    private func applyPanelHeight(_ height: CGFloat, to panel: FloatingQuickEntryPanel) {
+    private func applyPanelHeight(_ height: CGFloat, to panel: FloatingQuickEntryPanel, display: Bool = true) {
         let scale = max(1.0, panel.backingScaleFactor)
         let snapped = (height * scale).rounded() / scale
         var frame = panel.frame
@@ -428,7 +428,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         }
         frame.size = nextSize
         frame.origin.y = nextOriginY
-        panel.setFrame(frame, display: true)
+        panel.setFrame(frame, display: display)
     }
 
     private func startHeightDriverIfNeeded() {
@@ -438,11 +438,13 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             let omega: CGFloat = 20.0
             var lastTime = ProcessInfo.processInfo.systemUptime
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 16_000_000)
+                // 30Hz is plenty for a smoothed height follow; 60Hz setFrame
+                // forced a full NSHostingView layout twice as often.
+                try? await Task.sleep(nanoseconds: 33_000_000)
                 guard !Task.isCancelled, let self, let panel = self.panel, panel.isVisible else { break }
 
                 let now = ProcessInfo.processInfo.systemUptime
-                let dt = CGFloat(min(max(now - lastTime, 0.004), 0.033))
+                let dt = CGFloat(min(max(now - lastTime, 0.004), 0.05))
                 lastTime = now
 
                 let target = self.resolvedPanelHeight(forChatHeight: self.targetChatHeight)
@@ -461,7 +463,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
                 self.currentAnimatedHeight = nextHeight
                 self.heightVelocity = nextVelocity
-                self.applyPanelHeight(nextHeight, to: panel)
+                self.applyPanelHeight(nextHeight, to: panel, display: false)
             }
             self?.heightVelocity = 0
             self?.heightDriverTask = nil
@@ -581,6 +583,7 @@ struct QuickEntryRootView: View {
     @State private var copiedAnswer = false
     @State private var answerRating: String?
     @State private var isDropTargeted = false
+    @State private var cachedLatestTurn: LiveTurn?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -664,6 +667,7 @@ struct QuickEntryRootView: View {
         .scaleEffect(appeared ? 1.0 : 0.96)
         .opacity(appeared ? 1.0 : 0.0)
         .onAppear {
+            cachedLatestTurn = Self.makeLatestTurn(from: brainClient.messages)
             if reduceMotion {
                 appeared = true
             } else {
@@ -675,6 +679,9 @@ struct QuickEntryRootView: View {
                 answerRevealFinished = true
             }
             onDesiredHeightChange(chatHeight)
+        }
+        .onReceive(brainClient.$messages) { messages in
+            cachedLatestTurn = Self.makeLatestTurn(from: messages)
         }
         .onChange(of: chatHeight) { height in
             onDesiredHeightChange(height)
@@ -1230,24 +1237,38 @@ struct QuickEntryRootView: View {
         onDesiredHeightChange(chatHeight)
     }
 
+    /// Cached derived state: recomputed once per messages publish (and only for
+    /// the last turn) instead of on every body evaluation. The live panel is
+    /// 60Hz; recomputing this from the whole history per frame was the main
+    /// streaming jank source in long sessions.
     private var latestTurn: LiveTurn? {
-        var order: [String] = []
-        var map: [String: LiveTurn] = [:]
-        for message in brainClient.messages {
-            if map[message.turnId] == nil {
-                order.append(message.turnId)
-                map[message.turnId] = LiveTurn(id: message.turnId)
-            }
+        if let cachedLatestTurn {
+            return cachedLatestTurn
+        }
+        // Headless snapshot hosts never run onReceive/onAppear; derive directly.
+        if QMXTheme.isHeadlessDump {
+            return Self.makeLatestTurn(from: brainClient.messages)
+        }
+        return nil
+    }
+
+    private static func makeLatestTurn(from messages: [ChatEntry]) -> LiveTurn? {
+        guard let last = messages.last else { return nil }
+        let turnId = last.turnId
+        var turn = LiveTurn(id: turnId)
+        // Do not assume a turn's entries are contiguous: mirrored or reordered
+        // messages can interleave. Scan by turnId, still only for the last turn.
+        for message in messages where message.turnId == turnId {
             if message.isUser {
-                map[message.turnId]?.prompt = message.text
+                turn.prompt = message.text
             } else {
-                map[message.turnId]?.answer = qmxCleanAssistantText(message.text)
-                map[message.turnId]?.isStreaming = message.isStreaming
-                map[message.turnId]?.sources = message.sources
-                map[message.turnId]?.media = message.media
+                turn.answer = qmxCleanAssistantText(message.text)
+                turn.isStreaming = message.isStreaming
+                turn.sources = message.sources
+                turn.media = message.media
             }
         }
-        return order.last.flatMap { map[$0] }
+        return turn
     }
 
     private var hasAnswer: Bool {
@@ -1333,6 +1354,21 @@ struct QuickEntryRootView: View {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else {
             return
         }
+        // The send button honors canSend, but Enter must too: without a
+        // connected Brain / configured model the turn would be rejected and
+        // leave the panel in a generating state.
+        guard brainClient.phase == .connected else {
+            brainClient.errorBannerText = "Brain 尚未连接，请稍候或检查后端日志。"
+            return
+        }
+        guard !brainClient.profiles.isEmpty else {
+            brainClient.errorBannerText = "还没有配置可用模型，请先打开设置完成配置。"
+            return
+        }
+        guard inputState.uploadingNames.isEmpty else {
+            brainClient.errorBannerText = "附件还在上传，请稍候再发送。"
+            return
+        }
         inputState.forceExpanded = true
         inputState.text = ""
         inputState.stagedAttachments = []
@@ -1407,6 +1443,7 @@ private struct AnswerScrollView: View {
     var tableMedia: [MediaItem] = []
     var onOpenTable: (Int) -> Void = { _ in }
     var onFinish: () -> Void = {}
+    @State private var lastAutoScrollAt = Date.distantPast
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -1417,13 +1454,26 @@ private struct AnswerScrollView: View {
                         fontSize: fontSize,
                         turnID: turnID,
                         tableMedia: tableMedia,
+                        allowsSelection: !shouldAutoScroll,
                         onOpenTable: onOpenTable,
                         onTick: {
+                            guard shouldAutoScroll else { return }
+                            // The reveal runs at 60Hz; scrolling the whole
+                            // ScrollView at that rate is pure layout churn.
+                            let now = Date()
+                            guard now.timeIntervalSince(lastAutoScrollAt) >= 0.033 else { return }
+                            lastAutoScrollAt = now
+                            proxy.scrollTo("answerBottom", anchor: .bottom)
+                        },
+                        onFinish: {
+                            // Ensure the last content lands at the bottom even
+                            // if the 30Hz throttle or reduce-motion path
+                            // skipped the final onTick.
                             if shouldAutoScroll {
                                 proxy.scrollTo("answerBottom", anchor: .bottom)
                             }
-                        },
-                        onFinish: onFinish
+                            onFinish()
+                        }
                     )
                     .id(turnID)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1455,10 +1505,6 @@ private struct AnswerScrollView: View {
                     proxy.scrollTo("answerBottom", anchor: .bottom)
                 }
             }
-            .onChange(of: text) { _ in
-                guard shouldAutoScroll else { return }
-                proxy.scrollTo("answerBottom", anchor: .bottom)
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -1469,6 +1515,7 @@ private struct TypewriterText: View {
     let fontSize: CGFloat
     let turnID: String
     var tableMedia: [MediaItem] = []
+    var allowsSelection: Bool = true
     var onOpenTable: (Int) -> Void = { _ in }
     var onTick: () -> Void = {}
     var onFinish: () -> Void = {}
@@ -1476,13 +1523,18 @@ private struct TypewriterText: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visibleCount = 0
     @State private var revealTask: Task<Void, Never>?
-    @State private var blocks: [StageBlock]
+    @State private var blocks: [StageBlock] = []
+    @State private var pendingParseText = ""
+    @State private var parsedText = ""
+    @State private var parseTask: Task<Void, Never>?
+    @State private var lastParseAt = Date.distantPast
 
     init(
         text: String,
         fontSize: CGFloat,
         turnID: String,
         tableMedia: [MediaItem] = [],
+        allowsSelection: Bool = true,
         onOpenTable: @escaping (Int) -> Void = { _ in },
         onTick: @escaping () -> Void = {},
         onFinish: @escaping () -> Void = {}
@@ -1491,13 +1543,20 @@ private struct TypewriterText: View {
         self.fontSize = fontSize
         self.turnID = turnID
         self.tableMedia = tableMedia
+        self.allowsSelection = allowsSelection
         self.onOpenTable = onOpenTable
         self.onTick = onTick
         self.onFinish = onFinish
-        let parsed = Self.parse(text)
-        _blocks = State(initialValue: parsed)
-        let total = parsed.reduce(0) { $0 + $1.text.count }
-        _visibleCount = State(initialValue: QMXTheme.isHeadlessDump ? total : 0)
+        // Parsing in init would run on every parent body evaluation, even when
+        // State discards the value. Parse lazily in onAppear/onChange instead.
+        // Headless snapshots never run onAppear, so seed synchronously there.
+        if QMXTheme.isHeadlessDump {
+            let parsed = Self.parse(text)
+            _blocks = State(initialValue: parsed)
+            _visibleCount = State(initialValue: parsed.reduce(0) { $0 + $1.text.count })
+            _pendingParseText = State(initialValue: text)
+            _parsedText = State(initialValue: text)
+        }
     }
 
     var body: some View {
@@ -1510,22 +1569,65 @@ private struct TypewriterText: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { start() }
-        .onChange(of: text) { newText in
-            blocks = Self.parse(newText)
+        .onAppear {
+            rebuildBlocks(text, force: true)
             start()
+        }
+        .onChange(of: text) { newText in
+            scheduleParse(newText)
         }
         .onChange(of: turnID) { _ in
             revealTask?.cancel()
             revealTask = nil
-            blocks = Self.parse(text)
+            parseTask?.cancel()
+            parseTask = nil
+            rebuildBlocks(text, force: true)
             visibleCount = (reduceMotion || QMXTheme.isHeadlessDump) ? totalCount : 0
             start()
         }
         .onDisappear {
             revealTask?.cancel()
             revealTask = nil
+            parseTask?.cancel()
+            parseTask = nil
         }
+    }
+
+    /// Parse at most every 80ms during a stream. Continuous deltas used to
+    /// re-split and re-scan the entire answer for every chunk.
+    private func scheduleParse(_ newText: String) {
+        pendingParseText = newText
+        if reduceMotion || QMXTheme.isHeadlessDump {
+            parseTask?.cancel()
+            parseTask = nil
+            rebuildBlocks(newText, force: true)
+            start()
+            return
+        }
+        let wait = 0.08 - Date().timeIntervalSince(lastParseAt)
+        if wait <= 0 {
+            parseTask?.cancel()
+            parseTask = nil
+            rebuildBlocks(newText, force: true)
+            start()
+            return
+        }
+        guard parseTask == nil else { return }
+        parseTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(max(0.01, wait) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            parseTask = nil
+            rebuildBlocks(pendingParseText, force: true)
+            start()
+        }
+    }
+
+    private func rebuildBlocks(_ raw: String, force: Bool) {
+        guard force else { return }
+        lastParseAt = Date()
+        pendingParseText = raw
+        parsedText = raw
+        blocks = Self.parse(raw)
     }
 
     private var codeFontSize: CGFloat {
@@ -1545,7 +1647,7 @@ private struct TypewriterText: View {
             Text(visible)
                 .font(.system(size: codeFontSize, design: .monospaced))
                 .lineSpacing(2)
-                .textSelection(.enabled)
+                .modifier(QMXTextSelectable(enabled: allowsSelection))
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
@@ -1558,7 +1660,12 @@ private struct TypewriterText: View {
                         .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
                 )
         } else {
-            InlineMarkdownText(text: visible, fontSize: fontSize, lineSpacing: 3)
+            InlineMarkdownText(
+                text: visible,
+                fontSize: fontSize,
+                lineSpacing: 3,
+                selectable: allowsSelection
+            )
                 .foregroundStyle(QMXTheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1569,19 +1676,28 @@ private struct TypewriterText: View {
         blocks.reduce(0) { $0 + $1.text.count }
     }
 
+    private func finishRevealIfCaughtUp() {
+        // If a throttled parse is still pending, the visible blocks are stale;
+        // ending the reveal now would mark the answer complete before the last
+        // delta is actually rendered. Compare the two @State values: `text` is
+        // a captured struct property and may be older than the latest delta.
+        guard parseTask == nil, parsedText == pendingParseText else { return }
+        onFinish()
+    }
+
     private func start() {
         if reduceMotion || QMXTheme.isHeadlessDump {
             revealTask?.cancel()
             revealTask = nil
             visibleCount = totalCount
-            onFinish()
+            finishRevealIfCaughtUp()
             return
         }
         if visibleCount > totalCount {
             visibleCount = 0
         }
         if visibleCount >= totalCount {
-            onFinish()
+            finishRevealIfCaughtUp()
             return
         }
         guard revealTask == nil else { return }
@@ -1600,7 +1716,7 @@ private struct TypewriterText: View {
                 onTick()
             }
             revealTask = nil
-            onFinish()
+            finishRevealIfCaughtUp()
         }
     }
 

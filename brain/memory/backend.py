@@ -111,6 +111,17 @@ class MemoryBackend(ABC):
     async def get_message(self, msg_id: int) -> Optional[MessageRecord]:
         """Retrieve a hot message record by ID."""
 
+    async def get_messages_by_ids(
+        self, msg_ids: List[int]
+    ) -> Dict[int, MessageRecord]:
+        """Bulk variant used by retrieval; backends may override with one query."""
+        out: Dict[int, MessageRecord] = {}
+        for msg_id in msg_ids:
+            record = await self.get_message(int(msg_id))
+            if record is not None:
+                out[int(msg_id)] = record
+        return out
+
     @abstractmethod
     async def count_messages(self) -> Tuple[int, int]:
         """Return (hot_messages_count, archived_messages_count)."""
@@ -148,6 +159,15 @@ class MemoryBackend(ABC):
     async def get_fact(self, fact_id: str) -> Optional[MemoryFact]:
         """Retrieve a fact by ID."""
 
+    async def get_facts_by_ids(self, fact_ids: List[str]) -> Dict[str, MemoryFact]:
+        """Bulk variant used by retrieval; backends may override with one query."""
+        out: Dict[str, MemoryFact] = {}
+        for fact_id in fact_ids:
+            record = await self.get_fact(str(fact_id))
+            if record is not None:
+                out[str(fact_id)] = record
+        return out
+
     @abstractmethod
     async def list_facts(
         self,
@@ -183,6 +203,17 @@ class MemoryBackend(ABC):
     @abstractmethod
     async def get_episode(self, episode_id: str) -> Optional[MemoryEpisode]:
         """Retrieve an episode by ID."""
+
+    async def get_episodes_by_ids(
+        self, episode_ids: List[str]
+    ) -> Dict[str, MemoryEpisode]:
+        """Bulk variant used by retrieval; backends may override with one query."""
+        out: Dict[str, MemoryEpisode] = {}
+        for episode_id in episode_ids:
+            record = await self.get_episode(str(episode_id))
+            if record is not None:
+                out[str(episode_id)] = record
+        return out
 
     @abstractmethod
     async def list_episodes(

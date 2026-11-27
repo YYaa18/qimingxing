@@ -9,7 +9,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from pypdf import PdfReader, PdfWriter
+# pypdf is imported lazily inside the PDF paths: importing it at Brain startup
+# costs ~170ms cold / ~43ms warm even when the user never opens a PDF.
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xlsm", ".csv", ".docx", ".md", ".markdown", ".txt"}
 SPREADSHEET_EXTENSIONS = {".xlsx", ".xlsm", ".csv"}
@@ -179,6 +180,8 @@ def _pdf_tables(path: Path, pages: List[int]) -> List[Dict[str, Any]]:
 
 
 def _inspect_pdf(path: Path, page_range: str) -> Dict[str, Any]:
+    from pypdf import PdfReader
+
     reader = PdfReader(str(path))
     total = len(reader.pages)
     pages = _parse_page_range(page_range, total)
@@ -501,6 +504,8 @@ def file_media_summary(path: str | Path) -> Dict[str, Any]:
     }
     try:
         if ext == ".pdf":
+            from pypdf import PdfReader
+
             reader = PdfReader(str(target))
             summary["summary_badge"] = f"{len(reader.pages)} 页 · {_human_size(size)}"
         elif ext in (".xlsx", ".xlsm"):
@@ -996,6 +1001,8 @@ def pdf_ops(
     output_path: str,
     page_range: str = "",
 ) -> Dict[str, Any]:
+    from pypdf import PdfReader, PdfWriter
+
     op = str(operation or "merge").lower()
     paths = [validate_input_path(raw) for raw in inputs]
     if not paths:

@@ -115,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager.unregisterAll()
+        workspaceStore?.flushOnTerminate()
         audioPlayer?.stop()
         brainClient?.stop()
         supervisor?.terminateAll()

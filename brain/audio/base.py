@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
+from brain.http_client import PooledHTTPClientMixin as _PooledHTTPClientMixin
+
 
 @dataclass
 class ASRResult:
@@ -54,6 +56,10 @@ class ASRProvider(ABC):
     ) -> ASRResult:
         """Transcribe raw signed 16-bit little-endian PCM audio to text."""
 
+    async def aclose(self) -> None:
+        """Release pooled HTTP connections (no-op for local providers)."""
+        return None
+
 
 class TTSProvider(ABC):
     """Abstract streaming Text-to-Speech provider emitting 16-bit signed PCM chunks."""
@@ -68,3 +74,7 @@ class TTSProvider(ABC):
         """Yield even-byte-aligned signed 16-bit mono PCM chunks for `text`."""
         if False:  # pragma: no cover - async generator signature helper
             yield b""
+
+    async def aclose(self) -> None:
+        """Release pooled HTTP connections (no-op for local providers)."""
+        return None

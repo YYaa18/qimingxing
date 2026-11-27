@@ -574,6 +574,21 @@ class SQLiteMemoryStore(MemoryBackend):
             ).fetchone()
             return _row_to_message(row) if row else None
 
+    async def get_messages_by_ids(
+        self, msg_ids: List[int]
+    ) -> Dict[int, MessageRecord]:
+        ids = sorted({int(mid) for mid in msg_ids})
+        if not ids:
+            return {}
+        async with self._lock:
+            conn = self._ensure_conn()
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT * FROM messages WHERE msg_id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+            return {int(row["msg_id"]): _row_to_message(row) for row in rows}
+
     async def count_messages(self) -> Tuple[int, int]:
         async with self._lock:
             conn = self._ensure_conn()
@@ -755,6 +770,19 @@ class SQLiteMemoryStore(MemoryBackend):
             ).fetchone()
             return _row_to_fact(row) if row else None
 
+    async def get_facts_by_ids(self, fact_ids: List[str]) -> Dict[str, MemoryFact]:
+        ids = sorted({str(fid) for fid in fact_ids if str(fid)})
+        if not ids:
+            return {}
+        async with self._lock:
+            conn = self._ensure_conn()
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT * FROM memory_facts WHERE fact_id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+            return {str(row["fact_id"]): _row_to_fact(row) for row in rows}
+
     async def list_facts(
         self,
         *,
@@ -864,6 +892,21 @@ class SQLiteMemoryStore(MemoryBackend):
                 "SELECT * FROM memory_episodes WHERE episode_id = ?", (episode_id,)
             ).fetchone()
             return _row_to_episode(row) if row else None
+
+    async def get_episodes_by_ids(
+        self, episode_ids: List[str]
+    ) -> Dict[str, MemoryEpisode]:
+        ids = sorted({str(eid) for eid in episode_ids if str(eid)})
+        if not ids:
+            return {}
+        async with self._lock:
+            conn = self._ensure_conn()
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT * FROM memory_episodes WHERE episode_id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+            return {str(row["episode_id"]): _row_to_episode(row) for row in rows}
 
     async def list_episodes(
         self,

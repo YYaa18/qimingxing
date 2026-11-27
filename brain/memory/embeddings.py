@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import struct
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 import httpx
 
@@ -54,6 +54,10 @@ class EmbeddingProvider(ABC):
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """Generate embedding vectors for a batch of texts."""
 
+    async def aclose(self) -> None:
+        """Release pooled HTTP connections (no-op for local providers)."""
+        return None
+
 
 class NullEmbeddingProvider(EmbeddingProvider):
     """Default zero-latency no-op embedding provider (pure local FTS5 mode)."""
@@ -85,6 +89,7 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         self._model = model
         self._api_key = api_key
         self._timeout_sec = max(0.05, timeout_ms / 1000.0)
+        self._client: Optional[httpx.AsyncClient] = None
 
     @property
     def enabled(self) -> bool:
@@ -103,17 +108,34 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         timeout = httpx.Timeout(self._timeout_sec, connect=min(self._timeout_sec, 0.5))
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                url,
-                headers=headers,
-                json={"model": self._model, "input": texts},
+        client = self._client
+        if client is None or getattr(client, "is_closed", False):
+            client = httpx.AsyncClient(
+                timeout=timeout,
+                limits=httpx.Limits(
+                    max_keepalive_connections=4,
+                    keepalive_expiry=300.0,
+                ),
             )
-            resp.raise_for_status()
-            payload = resp.json()
+            self._client = client
+        resp = await client.post(
+            url,
+            headers=headers,
+            json={"model": self._model, "input": texts},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
 
         data = sorted(payload.get("data", []), key=lambda item: int(item.get("index", 0)))
         return [[float(v) for v in item.get("embedding", [])] for item in data]
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None and not getattr(client, "is_closed", False):
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                await close()
 
 
 def create_embedding_provider(cfg: EmbeddingConfig) -> EmbeddingProvider:

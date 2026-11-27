@@ -9,6 +9,7 @@ from brain.audio.base import (
     ASRProvider,
     ASRResult,
     TTSProvider,
+    _PooledHTTPClientMixin,
     estimate_asr_cost_cny,
     pcm16_to_wav,
 )
@@ -17,7 +18,7 @@ from brain.config import AudioASRConfig, AudioTTSConfig
 logger = logging.getLogger("qimingxing.audio.deepseek")
 
 
-class DeepSeekASRProvider(ASRProvider):
+class DeepSeekASRProvider(_PooledHTTPClientMixin, ASRProvider):
     """DeepSeek Speech-to-Text (`POST /v1/tools/asr`) adapter."""
 
     def __init__(
@@ -45,18 +46,16 @@ class DeepSeekASRProvider(ASRProvider):
         url = f"{self.config.base_url.rstrip('/')}/tools/asr"
         headers = {"Authorization": f"Bearer {self.config.api_key}"}
 
-        client_kwargs: dict = {"timeout": max(2.0, float(self.config.timeout_sec))}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
-
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.post(
-                url,
-                headers=headers,
-                files={"file": ("speech.wav", wav_bytes, "audio/wav")},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        timeout = httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        client = self._pooled_client(timeout)
+        resp = await client.post(
+            url,
+            headers=headers,
+            files={"file": ("speech.wav", wav_bytes, "audio/wav")},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         text = str(data.get("text") or "").strip()
         duration_ms = int(
@@ -71,7 +70,7 @@ class DeepSeekASRProvider(ASRProvider):
         )
 
 
-class DeepSeekTTSProvider(TTSProvider):
+class DeepSeekTTSProvider(_PooledHTTPClientMixin, TTSProvider):
     """DeepSeek Text-to-Speech (`POST /v1/tools/tts`) streaming PCM adapter."""
 
     def __init__(
@@ -104,20 +103,19 @@ class DeepSeekTTSProvider(TTSProvider):
             "filter_markdown": bool(self.config.filter_markdown),
         }
 
-        client_kwargs: dict = {"timeout": max(2.0, float(self.config.timeout_sec))}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
-
+        timeout = httpx.Timeout(max(2.0, float(self.config.timeout_sec)))
+        client = self._pooled_client(timeout)
         carry = b""
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                resp.raise_for_status()
-                async for raw_chunk in resp.aiter_bytes(chunk_size=4800):
-                    if not raw_chunk:
-                        continue
-                    buf = carry + raw_chunk
-                    even_len = len(buf) & ~1
-                    if even_len > 0:
-                        yield buf[:even_len]
-                    carry = buf[even_len:]
+        async with client.stream(
+            "POST", url, headers=headers, json=payload, timeout=timeout
+        ) as resp:
+            resp.raise_for_status()
+            async for raw_chunk in resp.aiter_bytes(chunk_size=4800):
+                if not raw_chunk:
+                    continue
+                buf = carry + raw_chunk
+                even_len = len(buf) & ~1
+                if even_len > 0:
+                    yield buf[:even_len]
+                carry = buf[even_len:]
         # Drop any dangling single byte on EOF so downstream s16le decoders stay aligned.

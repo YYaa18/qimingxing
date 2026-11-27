@@ -36,6 +36,7 @@ from brain.hub import SERVER_VERSION, Hub
 from brain.intent_detector import ScreenIntentDetector
 from brain.llm_router import LLMRouter, probe_provider_connectivity
 from brain.memory import MemoryBackend, create_memory_backend
+from brain.memory.threaded import ThreadedMemoryBackend
 from brain.memory.embeddings import EmbeddingProvider, create_embedding_provider
 from brain.memory.extractor import MemoryExtractor
 from brain.memory.models import FeedbackRecord
@@ -130,6 +131,11 @@ def create_app(
     router = llm_router or LLMRouter(cfg)
     artifacts = artifact_store or ArtifactStore()
     backend = memory_backend or create_memory_backend(cfg.memory)
+    if memory_backend is None:
+        # Production SQLite backend runs on its own loop thread so synchronous
+        # queries never block streaming/TTS/approvals. Injected test backends
+        # stay direct (tests often inspect them synchronously).
+        backend = ThreadedMemoryBackend(backend)
     emb_provider = embedding_provider or create_embedding_provider(cfg.memory.embedding)
     retriever = MemoryRetriever(
         backend,
@@ -179,6 +185,9 @@ def create_app(
             active_mcp.oauth_coordinator = active_oauth
     else:
         active_mcp = MCPClientManager(cfg, oauth_coordinator=active_oauth)
+    # Injected managers are test/harness objects: their startup must stay
+    # synchronous so existing tests can assert connection state immediately.
+    mcp_injected = mcp_manager is not None
     active_scheduler = scheduler or TaskScheduler(
         backend,
         router,
@@ -203,13 +212,41 @@ def create_app(
     )
     hub.task_runner = task_runner
 
+    mcp_state = {"starting": False}
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await backend.initialize()
         await task_runner.initialize()
         await task_runner.start_watchdog()
-        await active_mcp.start_all(hub.tool_registry)
+
+        mcp_start_task: Optional[asyncio.Task[None]] = None
+
+        async def _start_mcp_background() -> None:
+            try:
+                await active_mcp.start_all(hub.tool_registry)
+            except Exception as exc:  # never let optional MCP kill readiness
+                logger.warning(
+                    "MCP background startup failed (tools stay unavailable): %s",
+                    cfg.redact_secrets(f"{type(exc).__name__}: {exc}"),
+                )
+
+        if mcp_injected:
+            # Preserve synchronous semantics for injected test/harness managers.
+            await active_mcp.start_all(hub.tool_registry)
+        else:
+            # Optional capability: a slow/hanging MCP server must never delay
+            # /health, the WS handshake or the first turn.
+            mcp_state["starting"] = True
+            mcp_start_task = asyncio.create_task(_start_mcp_background())
+            mcp_start_task.add_done_callback(lambda _t: mcp_state.__setitem__("starting", False))
+
         await active_scheduler.start()
+
+        warm_task: Optional[asyncio.Task[None]] = None
+        if not _config_injected:
+            # Move the first-turn TCP+TLS handshake off the critical path.
+            warm_task = asyncio.create_task(router.warm_connection())
 
         async def _ttl_reaper() -> None:
             while True:
@@ -222,6 +259,18 @@ def create_app(
         finally:
             await task_runner.shutdown()
             await active_scheduler.stop()
+            if mcp_start_task is not None and not mcp_start_task.done():
+                mcp_start_task.cancel()
+                try:
+                    await mcp_start_task
+                except asyncio.CancelledError:
+                    pass
+            if warm_task is not None and not warm_task.done():
+                warm_task.cancel()
+                try:
+                    await warm_task
+                except asyncio.CancelledError:
+                    pass
             await active_mcp.stop_all(hub.tool_registry)
             reaper_task.cancel()
             try:
@@ -231,6 +280,36 @@ def create_app(
             extractor.cancel_idle_timers()
             await extractor.wait_for_idle()
             await skill_manager.wait_for_idle()
+            try:
+                await router.aclose()
+            except Exception:
+                logger.debug("Failed closing shared LLM HTTP client", exc_info=True)
+            try:
+                await emb_provider.aclose()
+            except Exception:
+                logger.debug("Failed closing embedding HTTP client", exc_info=True)
+            for provider in (hub.asr_provider, hub.tts_provider):
+                close = getattr(provider, "aclose", None)
+                if close is None:
+                    continue
+                try:
+                    await close()
+                except Exception:
+                    logger.debug("Failed closing audio HTTP client", exc_info=True)
+            screen_close = getattr(hub.screen_router, "aclose", None)
+            if screen_close is not None:
+                try:
+                    await screen_close()
+                except Exception:
+                    logger.debug("Failed closing screen router HTTP client", exc_info=True)
+            for tool in hub.tool_registry.list_tools():
+                close = getattr(tool, "aclose", None)
+                if close is None:
+                    continue
+                try:
+                    await close()
+                except Exception:
+                    logger.debug("Failed closing tool HTTP client", exc_info=True)
             await backend.close()
             artifacts.cleanup_all()
 
@@ -260,6 +339,7 @@ def create_app(
                 "memory_backend": cfg.memory.backend,
                 "embedding_enabled": emb_provider.enabled,
                 "model_store_mode": model_store_mode,
+                "mcp_starting": mcp_state["starting"],
             }
         )
 
@@ -975,17 +1055,40 @@ def create_app(
     return app
 
 
-app = create_app()
+_app: Optional[FastAPI] = None
+
+
+def get_app() -> FastAPI:
+    """Build the production app once, on first use.
+
+    Keeping this out of module import means `import brain.main` (tests, CLI,
+    tooling) no longer constructs the Hub, opens models.db or creates artifact
+    temp dirs. `uvicorn brain.main:app` still works via module __getattr__.
+    """
+    global _app
+    if _app is None:
+        _app = create_app()
+    return _app
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main() -> None:
     import os
-    cfg = load_config()
+
+    app = get_app()
+    cfg = app.state.config
     host = os.environ.get("QIMINGXING_HOST") or cfg.server.host
     port_env = os.environ.get("QIMINGXING_PORT")
     port = int(port_env) if port_env else cfg.server.port
+    # Pass the object (not "brain.main:app") so `python -m brain.main` does not
+    # import and execute this module a second time.
     uvicorn.run(
-        "brain.main:app",
+        app,
         host=host,
         port=port,
         reload=False,

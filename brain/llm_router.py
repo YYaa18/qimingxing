@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
@@ -285,6 +286,36 @@ class LLMRouter:
         self.last_usage: Optional[LLMUsage] = None
         self.last_annotations: List[Dict[str, Any]] = []
         self._transport = transport
+        self._client: Optional[httpx.AsyncClient] = None
+
+    def _http_client(self, timeout: httpx.Timeout) -> httpx.AsyncClient:
+        """One keep-alive client per router: avoids a fresh TCP+TLS handshake
+        on every turn, tool step and retry."""
+        client = self._client
+        if client is None or client.is_closed:
+            # Requests always pass their own timeout; keep a conservative
+            # client default so a future caller without one cannot inherit the
+            # short warm-up timeout.
+            client = httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, connect=10.0),
+                transport=self._transport,
+                limits=httpx.Limits(
+                    max_keepalive_connections=8,
+                    keepalive_expiry=300.0,
+                ),
+            )
+            self._client = client
+        return client
+
+    @asynccontextmanager
+    async def _client_ctx(self, timeout: httpx.Timeout):
+        # Shared client: closing the context must not close the pool.
+        yield self._http_client(timeout)
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None and not client.is_closed:
+            await client.aclose()
 
     @property
     def active_profile(self) -> str:
@@ -325,6 +356,26 @@ class LLMRouter:
 
     def list_public_profiles(self) -> List[ProfileInfo]:
         return self._config.list_public_profiles()
+
+    async def warm_connection(self) -> None:
+        """Open the keep-alive connection before the first user turn.
+
+        The request is allowed to fail (401/404/no network); we only want the
+        TCP+TLS handshake out of the first-token critical path.
+        """
+        try:
+            profile = self.get_profile()
+        except Exception:
+            return
+        base_url = (profile.base_url or "").strip()
+        if not base_url:
+            return
+        timeout = httpx.Timeout(5.0, connect=3.0)
+        try:
+            client = self._http_client(timeout)
+            await client.head(base_url, timeout=timeout)
+        except Exception:
+            return
 
     async def stream_chat(
         self,
@@ -413,15 +464,12 @@ class LLMRouter:
         self.last_usage = None
 
         timeout = httpx.Timeout(adapter.timeout_seconds(profile), connect=10.0)
-        client_kwargs: Dict[str, Any] = {"timeout": timeout}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
         logged_reasoning = False
         finish_reason = "stop"
         refusal = ""
         emitted_content = False
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as resp:
+        async with self._client_ctx(timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as resp:
                 if resp.status_code >= 400:
                     raw_err = (await resp.aread()).decode("utf-8", errors="replace")
                     raise LLMError(
@@ -500,16 +548,13 @@ class LLMRouter:
         headers = request.headers
         body = request.body
         timeout = httpx.Timeout(adapter.timeout_seconds(profile), connect=10.0)
-        client_kwargs: Dict[str, Any] = {"timeout": timeout}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
         self.last_usage = None
         sources: List[Dict[str, str]] = []
         emitted = False
         finish_reason = "STOP"
         block_reason = ""
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as resp:
+        async with self._client_ctx(timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as resp:
                 if resp.status_code >= 400:
                     raw_err = (await resp.aread()).decode("utf-8", errors="replace")
                     raise LLMError(
@@ -586,9 +631,6 @@ class LLMRouter:
         headers = request.headers
         body = request.body
         timeout = httpx.Timeout(adapter.timeout_seconds(profile), connect=10.0)
-        client_kwargs: Dict[str, Any] = {"timeout": timeout}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
         usage = LLMUsage(
             model=profile.model,
             profile=profile.name,
@@ -603,8 +645,8 @@ class LLMRouter:
         finish_message = ""
         call_index = 0
         seen_call_ids: set[str] = set()
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as resp:
+        async with self._client_ctx(timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as resp:
                 if resp.status_code >= 400:
                     raw_err = (await resp.aread()).decode("utf-8", errors="replace")
                     raise LLMError(
@@ -797,8 +839,8 @@ class LLMRouter:
         body = request.body
         timeout = httpx.Timeout(adapter.timeout_seconds(profile), connect=10.0)
         self.last_usage = None
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as resp:
+        async with self._client_ctx(timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as resp:
                 if resp.status_code >= 400:
                     raw_err = (await resp.aread()).decode("utf-8", errors="replace")
                     safe_err = self._config.redact_secrets(raw_err[:300])
@@ -1026,9 +1068,6 @@ class LLMRouter:
         headers = request.headers
         body = request.body
         timeout = httpx.Timeout(adapter.timeout_seconds(profile), connect=10.0)
-        client_kwargs: Dict[str, Any] = {"timeout": timeout}
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
         content_parts: List[str] = []
         reasoning_parts: List[str] = []
         annotations: List[Dict[str, Any]] = []
@@ -1044,8 +1083,8 @@ class LLMRouter:
             slot=profile.slot or "chat",
         )
 
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as resp:
+        async with self._client_ctx(timeout) as client:
+            async with client.stream("POST", url, headers=headers, json=body, timeout=timeout) as resp:
                 if resp.status_code >= 400:
                     raw_err = (await resp.aread()).decode("utf-8", errors="replace")
                     raise LLMError(

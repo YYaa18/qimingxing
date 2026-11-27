@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from brain.config import WebSearchToolConfig
+from brain.http_client import PooledHTTPClientMixin
 from brain.tools.base import Tool, ToolExecutionContext, ToolResult, truncate_head_tail
 from protocol.models import RiskLevel
 
@@ -42,7 +43,7 @@ class SearchProvider(ABC):
         """Fetch clean Markdown/text content for `url`."""
 
 
-class DeepSeekSearchProvider(SearchProvider):
+class DeepSeekSearchProvider(PooledHTTPClientMixin, SearchProvider):
     """Official DeepSeek Search & Fetch API provider (`/v1/tools/search` and `/v1/tools/fetch`)."""
 
     def __init__(
@@ -65,10 +66,12 @@ class DeepSeekSearchProvider(SearchProvider):
             raise RuntimeError("WebSearchTool 缺少 DeepSeek API Key。")
         url = f"{self.config.base_url}/tools/search"
         timeout = httpx.Timeout(self.config.timeout_seconds, connect=8.0)
-        async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
-            resp = await client.post(url, headers=self._headers(), json={"query": query})
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._pooled_client(timeout)
+        resp = await client.post(
+            url, headers=self._headers(), json={"query": query}, timeout=timeout
+        )
+        resp.raise_for_status()
+        data = resp.json()
         raw_results = data.get("results") or []
         hits: List[SearchHit] = []
         for item in raw_results[: max(1, max_results)]:
@@ -88,10 +91,12 @@ class DeepSeekSearchProvider(SearchProvider):
             raise RuntimeError("WebFetchTool 缺少 DeepSeek API Key。")
         endpoint = f"{self.config.base_url}/tools/fetch"
         timeout = httpx.Timeout(self.config.timeout_seconds, connect=8.0)
-        async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
-            resp = await client.post(endpoint, headers=self._headers(), json={"url": url})
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._pooled_client(timeout)
+        resp = await client.post(
+            endpoint, headers=self._headers(), json={"url": url}, timeout=timeout
+        )
+        resp.raise_for_status()
+        data = resp.json()
         return FetchPageResult(
             url=url,
             title=str(data.get("title") or url),
@@ -126,6 +131,11 @@ class WebSearchTool(Tool):
     def __init__(self, config: WebSearchToolConfig, provider: Optional[SearchProvider] = None) -> None:
         self.config = config
         self.provider = provider or DeepSeekSearchProvider(config)
+
+    async def aclose(self) -> None:
+        close = getattr(self.provider, "aclose", None)
+        if close is not None:
+            await close()
 
     def format_status_label(self, arguments: Dict[str, Any]) -> str:
         q = str(arguments.get("query") or "")[:24]
@@ -194,6 +204,11 @@ class WebFetchTool(Tool):
     def __init__(self, config: WebSearchToolConfig, provider: Optional[SearchProvider] = None) -> None:
         self.config = config
         self.provider = provider or DeepSeekSearchProvider(config)
+
+    async def aclose(self) -> None:
+        close = getattr(self.provider, "aclose", None)
+        if close is not None:
+            await close()
 
     def format_status_label(self, arguments: Dict[str, Any]) -> str:
         return "正在读取网页正文…"

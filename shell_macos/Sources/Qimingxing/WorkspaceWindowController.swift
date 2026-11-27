@@ -26,7 +26,7 @@ enum WorkspaceKind: String, Codable, CaseIterable {
     }
 }
 
-struct WorkspaceItem: Identifiable, Codable, Equatable {
+struct WorkspaceItem: Identifiable, Codable, Equatable, Sendable {
     var id: String
     var kind: WorkspaceKind
     var title: String
@@ -52,6 +52,11 @@ final class WorkspaceStore: ObservableObject {
     private let fileURL: URL?
     private var cancellables = Set<AnyCancellable>()
     private var persistTask: Task<Void, Never>?
+    private var messageSignatures: [String: MessageSignature] = [:]
+    private let persistQueue = DispatchQueue(
+        label: "com.qimingxing.workspace.persist",
+        qos: .utility
+    )
 
     init(brainClient: BrainClient) {
         self.brainClient = brainClient
@@ -91,10 +96,43 @@ final class WorkspaceStore: ObservableObject {
         var media: [MediaItem] = []
     }
 
+    private struct MessageSignature: Equatable {
+        let textCount: Int
+        let streaming: Bool
+        let sources: [SourceItem]
+        let media: [MediaItem]
+
+        init(_ message: ChatEntry) {
+            textCount = message.text.count
+            streaming = message.isStreaming
+            sources = message.sources
+            media = message.media
+        }
+    }
+
     private func ingestMessages(_ messages: [ChatEntry]) {
+        guard !messages.isEmpty else {
+            messageSignatures = [:]
+            return
+        }
+        // Turn 1 may finish while Turn 2 is already streaming, so "last turn"
+        // is not enough: detect every message whose text/status/media changed.
+        var dirtyTurnIds: Set<String> = []
+        var nextSignatures: [String: MessageSignature] = [:]
+        nextSignatures.reserveCapacity(messages.count)
+        for message in messages {
+            let signature = MessageSignature(message)
+            nextSignatures[message.id] = signature
+            if messageSignatures[message.id] != signature {
+                dirtyTurnIds.insert(message.turnId)
+            }
+        }
+        messageSignatures = nextSignatures
+        guard !dirtyTurnIds.isEmpty else { return }
+
         var order: [String] = []
         var map: [String: TurnSnapshot] = [:]
-        for message in messages {
+        for message in messages where dirtyTurnIds.contains(message.turnId) {
             if map[message.turnId] == nil {
                 order.append(message.turnId)
                 map[message.turnId] = TurnSnapshot(id: message.turnId)
@@ -242,12 +280,36 @@ final class WorkspaceStore: ObservableObject {
 
     private func persistNow() {
         guard let fileURL else { return }
+        let snapshot = items
+        // Encoding ~500 items (hundreds of KB) on the main actor caused a
+        // visible hitch at the end of long turns; a serial queue keeps writes
+        // ordered without blocking UI.
+        persistQueue.async {
+            Self.write(snapshot, to: fileURL)
+        }
+    }
+
+    /// Flush pending debounced/queued writes before the app terminates.
+    func flushOnTerminate() {
+        guard let fileURL else { return }
+        persistTask?.cancel()
+        persistTask = nil
+        let snapshot = items
+        persistQueue.sync {
+            Self.write(snapshot, to: fileURL)
+        }
+    }
+
+    nonisolated private static func write(_ snapshot: [WorkspaceItem], to fileURL: URL) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(items) else { return }
+        guard let data = try? encoder.encode(snapshot) else { return }
         try? data.write(to: fileURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
     }
 
     private func load() {

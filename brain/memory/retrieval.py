@@ -5,7 +5,7 @@ import logging
 import math
 import re
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from brain.memory.backend import MemoryBackend
 from brain.memory.embeddings import (
@@ -26,6 +26,23 @@ _CHITCHAT_RECALL_RE = re.compile(
 
 def is_chitchat_recall_query(query: str) -> bool:
     return bool(query and _CHITCHAT_RECALL_RE.search(query))
+
+
+def _score_embeddings(
+    query_vec: List[float],
+    embedded: List[Tuple[str, str, bytes]],
+    excluded: Set[str],
+) -> List[Tuple[str, str, float]]:
+    """Pure-Python vector scan; runs in a worker thread, not the event loop."""
+    scored: List[Tuple[str, str, float]] = []
+    for item_id, item_type, blob in embedded:
+        if item_type == "fact" and item_id in excluded:
+            continue
+        sim = cosine_similarity(query_vec, unpack_embedding(blob))
+        if sim > 0.1:
+            scored.append((item_id, item_type, sim))
+    scored.sort(key=lambda x: x[2], reverse=True)
+    return scored
 
 
 class MemoryRetriever:
@@ -64,12 +81,16 @@ class MemoryRetriever:
         candidate_meta: Dict[Tuple[str, str], RetrievedMemory] = {}
         fts_ranks: Dict[Tuple[str, str], int] = {}
 
+        # One bulk fetch per type instead of up to 40 sequential get_* queries.
+        fts_keys = [(str(item_type), str(item_id)) for item_id, item_type, _ in fts_hits]
+        fts_records = await self._prefetch_records(fts_keys, excluded)
         for rank_idx, (item_id, item_type, fts_norm) in enumerate(fts_hits, start=1):
+            key = (item_type, item_id)
             if item_type == "fact" and item_id in excluded:
                 continue
-            mem = await self._load_active_item(
-                item_id,
-                item_type,
+            mem = self._score_active_item(
+                key,
+                fts_records.get(key),
                 fts_norm=fts_norm,
                 now=now,
                 categories=categories,
@@ -77,7 +98,6 @@ class MemoryRetriever:
             )
             if mem is None:
                 continue
-            key = (item_type, item_id)
             candidate_meta[key] = mem
             fts_ranks[key] = rank_idx
 
@@ -94,23 +114,26 @@ class MemoryRetriever:
                     embedded = await self.backend.list_embedded_items(
                         self.embedding_provider.model_name
                     )
-                    scored_vecs: List[Tuple[str, str, float]] = []
-                    for item_id, item_type, blob in embedded:
-                        if item_type == "fact" and item_id in excluded:
-                            continue
-                        sim = cosine_similarity(query_vec, unpack_embedding(blob))
-                        if sim > 0.1:
-                            scored_vecs.append((item_id, item_type, sim))
-                    scored_vecs.sort(key=lambda x: x[2], reverse=True)
+                    scored_vecs = await asyncio.to_thread(
+                        _score_embeddings, query_vec, embedded, excluded
+                    )
+                    missing_keys = [
+                        (str(item_type), str(item_id))
+                        for item_id, item_type, _sim in scored_vecs[:30]
+                        if (item_type, item_id) not in candidate_meta
+                    ]
+                    extra_records = await self._prefetch_records(
+                        missing_keys, excluded
+                    )
                     for rank_idx, (item_id, item_type, _sim) in enumerate(
                         scored_vecs[:30], start=1
                     ):
                         key = (item_type, item_id)
                         vector_ranks[key] = rank_idx
                         if key not in candidate_meta:
-                            mem = await self._load_active_item(
-                                item_id,
-                                item_type,
+                            mem = self._score_active_item(
+                                key,
+                                extra_records.get(key) or fts_records.get(key),
                                 fts_norm=0.0,
                                 now=now,
                                 categories=categories,
@@ -174,19 +197,75 @@ class MemoryRetriever:
             weight = max(weight, 1.05)
         return weight, decay
 
-    async def _load_active_item(
+    async def _bulk_records(
+        self, bulk_name: str, fallback_name: str, ids: List[Any]
+    ) -> Dict[Any, Any]:
+        if not ids:
+            return {}
+        bulk = getattr(self.backend, bulk_name, None)
+        if callable(bulk):
+            return await bulk(ids)
+        out: Dict[Any, Any] = {}
+        for item_id in ids:
+            record = await getattr(self.backend, fallback_name)(item_id)
+            if record is not None:
+                out[item_id] = record
+        return out
+
+    async def _prefetch_records(
         self,
-        item_id: str,
-        item_type: str,
+        keys: List[Tuple[str, str]],
+        excluded: Set[str],
+    ) -> Dict[Tuple[str, str], Any]:
+        fact_ids: List[str] = []
+        episode_ids: List[str] = []
+        message_ids: List[int] = []
+        for item_type, item_id in keys:
+            if item_type == "fact":
+                if item_id in excluded:
+                    continue
+                fact_ids.append(item_id)
+            elif item_type == "episode":
+                episode_ids.append(item_id)
+            elif item_type == "message":
+                try:
+                    message_ids.append(int(item_id))
+                except (TypeError, ValueError):
+                    continue
+
+        facts = await self._bulk_records("get_facts_by_ids", "get_fact", fact_ids)
+        episodes = await self._bulk_records(
+            "get_episodes_by_ids", "get_episode", episode_ids
+        )
+        messages = await self._bulk_records(
+            "get_messages_by_ids", "get_message", message_ids
+        )
+
+        out: Dict[Tuple[str, str], Any] = {}
+        for fact_id, record in facts.items():
+            out[("fact", str(fact_id))] = record
+        for episode_id, record in episodes.items():
+            out[("episode", str(episode_id))] = record
+        for msg_id, record in messages.items():
+            out[("message", str(msg_id))] = record
+        return out
+
+    def _score_active_item(
+        self,
+        key: Tuple[str, str],
+        record: Any,
         *,
         fts_norm: float,
         now: float,
         categories: Dict[str, MemoryCategory],
         recall_chitchat: bool,
     ) -> Optional[RetrievedMemory]:
+        item_type, item_id = key
+        if record is None:
+            return None
         if item_type == "fact":
-            fact = await self.backend.get_fact(item_id)
-            if fact is None or fact.status != "active":
+            fact = record
+            if fact.status != "active":
                 return None
             weight, decay = self._category_params(
                 fact.category, categories, recall_chitchat=recall_chitchat
@@ -205,8 +284,8 @@ class MemoryRetriever:
             )
 
         if item_type == "episode":
-            ep = await self.backend.get_episode(item_id)
-            if ep is None or ep.status != "active":
+            ep = record
+            if ep.status != "active":
                 return None
             cat_key = "chitchat" if ep.kind == "chitchat" else "work_log"
             weight, decay = self._category_params(
@@ -226,9 +305,7 @@ class MemoryRetriever:
             )
 
         if item_type == "message":
-            msg = await self.backend.get_message(int(item_id))
-            if msg is None:
-                return None
+            msg = record
             weight, decay = self._category_params(
                 "chitchat", categories, recall_chitchat=recall_chitchat
             )

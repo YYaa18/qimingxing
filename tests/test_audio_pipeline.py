@@ -102,6 +102,16 @@ async def test_deepseek_asr_and_tts_providers_mock_transport() -> None:
     assert seen_tts["json"]["voice_id"] == "stella"
     assert seen_tts["json"]["format"] == "pcm"
 
+    # Providers keep one HTTP client instead of a fresh TLS handshake per call.
+    asr_client = asr._client
+    await asr.transcribe_pcm(pcm_in, sample_rate=16000, channels=1)
+    assert asr._client is asr_client
+    tts_client = tts._client
+    _ = [c async for c in tts.synthesize_pcm_stream("第二句") ]
+    assert tts._client is tts_client
+    await asr.aclose()
+    await tts.aclose()
+
 
 class _FakeASR(ASRProvider):
     def __init__(self, reply_text: str = "今天北京天气怎么样？") -> None:
@@ -284,6 +294,12 @@ def test_hub_voice_loop_barge_in_usage_ledger_and_godot_capture_hide(tmp_path: P
             msg_types = [m["type"] for m in turn1_msgs]
             assert "audio.output_start" in msg_types
             assert "audio.output_chunk" in msg_types
+            if "audio.output_end" not in msg_types:
+                # turn_end is sent before waiting for TTS so the shell unlocks
+                # immediately; audio may finish afterwards.
+                _, audio_msgs = _recv_until(body_ws, "audio.output_end")
+                msg_types.extend(m["type"] for m in audio_msgs)
+                assert audio_msgs[-1]["type"] == "audio.output_end"
             assert "audio.output_end" in msg_types
             assert len(tts.sentences) >= 2
             assert asr.calls == 1
@@ -320,10 +336,16 @@ def test_hub_voice_loop_barge_in_usage_ledger_and_godot_capture_hide(tmp_path: P
                     }
                 )
             )
-            cancel_turn_end, cancel_msgs = _recv_until(body_ws, "output.turn_end")
-            assert cancel_turn_end["payload"]["finish_reason"] == "cancelled"
-            audio_ends = [m for m in cancel_msgs if m["type"] == "audio.output_end"]
-            assert audio_ends and audio_ends[-1]["payload"]["finish_reason"] == "cancelled"
+            # turn_end is sent before TTS finishes, so the text turn may already
+            # be complete when barge-in arrives; cancellation then applies to
+            # the remaining audio. No second (cancelled) turn_end may be emitted
+            # for a turn that already completed.
+            cancel_audio_end, cancel_msgs = _recv_until(body_ws, "audio.output_end")
+            assert cancel_audio_end["payload"]["finish_reason"] == "cancelled"
+            turn_ends = [m for m in cancel_msgs if m["type"] == "output.turn_end"]
+            assert all(
+                m["payload"]["finish_reason"] == "completed" for m in turn_ends
+            )
 
             # 5. Godot auto-hide handshake during screen capture
             body_ws.send_text(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import httpx
+
 from brain.config import AppConfig, ProfileConfig
+from brain.llm_router import LLMRouter
 from brain.providers import (
     AnthropicAdapter,
     DeepSeekAdapter,
@@ -101,3 +104,35 @@ def test_anthropic_adapter_request_shape_and_cache_normalization() -> None:
     assert normalize_cached_input_tokens({"prompt_tokens": 100, "cache_read_input_tokens": 60}, 100) == 60
     assert normalize_cached_input_tokens({"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 40}}, 100) == 40
     assert normalize_cached_input_tokens({"prompt_tokens": 100, "prompt_cache_hit_tokens": 999}, 100) == 100
+
+
+async def test_router_warm_connection_opens_keepalive_client() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(401)
+
+    profile = _profile(
+        "openai_compatible", "deepseek", "deepseek-flash", "https://api.deepseek.com/v1"
+    )
+    cfg = AppConfig(profiles={profile.name: profile}, default_profile=profile.name)
+    router = LLMRouter(cfg, transport=httpx.MockTransport(handler))
+    await router.warm_connection()
+    assert len(seen) == 1
+    assert seen[0].method == "HEAD"
+    assert str(seen[0].url).startswith("https://api.deepseek.com/v1")
+    await router.aclose()
+
+
+async def test_router_warm_connection_swallows_network_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    profile = _profile(
+        "openai_compatible", "deepseek", "deepseek-flash", "https://api.deepseek.com/v1"
+    )
+    cfg = AppConfig(profiles={profile.name: profile}, default_profile=profile.name)
+    router = LLMRouter(cfg, transport=httpx.MockTransport(handler))
+    await router.warm_connection()  # must not raise
+    await router.aclose()

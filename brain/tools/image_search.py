@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from brain.config import ImageSearchToolConfig
+from brain.http_client import PooledHTTPClientMixin
 from brain.media_cache import MediaCache, MediaDownloadError
 from brain.tools.base import Tool, ToolExecutionContext, ToolResult
 from protocol.models import RiskLevel
@@ -27,7 +28,7 @@ class ImageHit:
     thumbnail_url: str = ""
 
 
-class TavilyImageSearchProvider:
+class TavilyImageSearchProvider(PooledHTTPClientMixin):
     """Tavily /search with include_images; Tavily has no dedicated image endpoint."""
 
     def __init__(
@@ -58,20 +59,18 @@ class TavilyImageSearchProvider:
             "safe_search": bool(safe_search),
         }
         timeout = httpx.Timeout(self.config.timeout_seconds, connect=8.0)
-        kwargs: Dict[str, Any] = {"timeout": timeout}
-        if self._transport is not None:
-            kwargs["transport"] = self._transport
-        async with httpx.AsyncClient(**kwargs) as client:
-            resp = await client.post(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._pooled_client(timeout)
+        resp = await client.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         hits: List[ImageHit] = []
         seen: set[str] = set()
@@ -186,8 +185,10 @@ class ImageSearchTool(Tool):
             max_bytes=config.max_bytes,
             timeout_seconds=min(8.0, config.timeout_seconds),
         )
+        self._retired: List[Any] = []
 
     def update_config(self, config: ImageSearchToolConfig) -> None:
+        old_provider, old_cache = self.provider, self.cache
         self.config = config
         self.provider = TavilyImageSearchProvider(config)
         self.cache = MediaCache(
@@ -195,6 +196,17 @@ class ImageSearchTool(Tool):
             max_bytes=config.max_bytes,
             timeout_seconds=min(8.0, config.timeout_seconds),
         )
+        # Do not close while a search/download may still be in flight; close on
+        # shutdown (or when the tool is unregistered, which now awaits aclose).
+        self._retired.extend([old_provider, old_cache])
+
+    async def aclose(self) -> None:
+        current = [self.provider, self.cache]
+        retired, self._retired = self._retired, []
+        for obj in current + retired:
+            close = getattr(obj, "aclose", None)
+            if close is not None:
+                await close()
 
     def format_status_label(self, arguments: Dict[str, Any]) -> str:
         query = str(arguments.get("query") or "")[:28]

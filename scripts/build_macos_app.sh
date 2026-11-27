@@ -268,6 +268,13 @@ rsync -a \
   --exclude '__editable__*' \
   --exclude 'qimingxing*.dist-info' \
   --exclude 'qimingxing.egg-info' \
+  --exclude 'PyObjCTest*' \
+  --exclude 'pip' \
+  --exclude 'pip-*' \
+  --exclude 'setuptools' \
+  --exclude 'setuptools-*' \
+  --exclude '_distutils_hack' \
+  --exclude 'distutils-precedence.pth' \
   "${SITE_SRC}/" "${PY_DEST}/lib/python3.12/site-packages/"
 
 # 6. Optional Godot runtime
@@ -276,10 +283,26 @@ if (( WITH_GODOT == 1 )) && [[ -n "${GODOT_APP_SRC}" ]]; then
   cp -R "${GODOT_APP_SRC}" "${APP_BUNDLE}/Contents/Resources/Godot.app"
 fi
 
-# 7. Strip quarantine/resource forks and sign
-echo "🧹 清理 Python 字节码缓存（避免首次运行破坏签名）..."
+# 7. Precompile bytecode, strip quarantine/resource forks and sign
+echo "🧹 清理旧字节码缓存..."
 find "${APP_BUNDLE}" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "${APP_BUNDLE}" -name "*.pyc" -type f -delete 2>/dev/null || true
+
+# Ship .pyc inside the signed bundle so every launch reads bytecode instead of
+# recompiling ~3.7k modules. unchecked-hash keeps the cache valid after rsync
+# copies (mtime differs), and the shell still sets PYTHONDONTWRITEBYTECODE=1
+# so Python never writes into Resources and invalidates the signature.
+echo "⚡ 预编译 Python 字节码..."
+PY_RUNTIME="${PY_DEST}/bin/python3.12"
+if [[ -x "${PY_RUNTIME}" ]]; then
+  env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX \
+    "${PY_RUNTIME}" -m compileall -q -j 0 --invalidation-mode unchecked-hash \
+    "${APP_RES}" "${PY_DEST}/lib/python3.12" \
+    || echo "   ⚠️ 部分模块预编译失败（运行时会按需编译，仅影响启动速度）"
+  echo "   .pyc 文件数: $(find "${APP_BUNDLE}" -name '*.pyc' -type f | wc -l | tr -d ' ')"
+else
+  echo "   ⚠️ 未找到打包 Python 运行时，跳过预编译"
+fi
 
 echo "🔏 清理扩展属性并执行本地签名..."
 xattr -cr "${APP_BUNDLE}" || true

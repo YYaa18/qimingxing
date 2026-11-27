@@ -266,14 +266,23 @@ class MCPClientManager:
 
     async def start_all(self, registry: Any) -> List[MCPServerStatus]:
         """Connect all enabled MCP servers cleanly; failed servers stay isolated and offline."""
+        async with self._reload_lock:
+            return await self._start_all_locked(registry)
+
+    async def _start_all_locked(self, registry: Any) -> List[MCPServerStatus]:
         self._registry = registry
         self._sync_server_tables()
-        for srv in self.config.mcp_servers:
-            if not srv.enabled:
-                continue
+
+        async def _connect(srv: MCPServerConfig) -> None:
             runtime = self._runtimes[srv.name]
             async with runtime.lock:
                 await self._connect_server_locked(runtime, registry)
+
+        enabled = [srv for srv in self.config.mcp_servers if srv.enabled]
+        if enabled:
+            # Startup time was the sum of every server's handshake; run them
+            # concurrently (each server already has its own lock/state).
+            await asyncio.gather(*(_connect(srv) for srv in enabled))
         return self.list_statuses()
 
     async def _connect_server_locked(
@@ -345,7 +354,7 @@ class MCPClientManager:
                 ", ".join(tools_registered),
             )
             return True
-        except Exception as exc:
+        except BaseException as exc:
             safe_err = self.config.redact_secrets(_format_exc_summary(exc))
             runtime.stack = None
             runtime.session = None
@@ -364,15 +373,20 @@ class MCPClientManager:
             st.tools = []
             st.error = safe_err[:240]
             st.has_oauth_token = self._has_oauth_token(srv)
-            logger.warning(
-                "MCP server '%s' failed to start (isolated cleanly): %s",
-                srv.name,
-                st.error,
-            )
+            if isinstance(exc, asyncio.CancelledError):
+                logger.debug("MCP server '%s' startup cancelled", srv.name)
+            else:
+                logger.warning(
+                    "MCP server '%s' failed to start (isolated cleanly): %s",
+                    srv.name,
+                    st.error,
+                )
             try:
                 await stack.aclose()
-            except Exception:
+            except BaseException:
                 pass
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return False
 
     async def _open_session(
@@ -618,7 +632,7 @@ class MCPClientManager:
             await self.stop_all(registry)
             if servers is not None:
                 self.config.mcp_servers = list(servers)
-            return await self.start_all(registry)
+            return await self._start_all_locked(registry)
 
     async def start_oauth_authorization(
         self,
