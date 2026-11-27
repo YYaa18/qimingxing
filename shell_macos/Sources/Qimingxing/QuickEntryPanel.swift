@@ -280,11 +280,13 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     }
 
     private var idleContentHeight: CGFloat {
-        QuickEntryLayout.idleHeight
+        let errorH: CGFloat = brainClient.errorBannerText.isEmpty ? 0 : 40
+        return QuickEntryLayout.idleHeight
             + QuickEntryLayout.attachmentBarHeight(
                 stagedCount: inputState.stagedAttachments.count,
                 uploadingCount: inputState.uploadingNames.count
             )
+            + errorH
             + QuickEntryLayout.inputExtraHeight(for: inputState.text)
     }
 
@@ -859,6 +861,9 @@ struct QuickEntryRootView: View {
         .onChange(of: inputState.uploadingNames.count) { _ in
             onDesiredHeightChange(chatHeight)
         }
+        .onChange(of: brainClient.errorBannerText) { _ in
+            onDesiredHeightChange(chatHeight)
+        }
         .onChange(of: latestTurn?.media.map(\.mediaId)) { _ in
             guard !MediaViewerWindowController.shared.isVisible else { return }
             guard inputState.isWorkspaceWingOpen else { return }
@@ -875,6 +880,11 @@ struct QuickEntryRootView: View {
 
             if attachmentBarHeight > 0 {
                 attachmentBar
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if errorBannerHeight > 0 {
+                errorBanner
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
@@ -988,6 +998,55 @@ struct QuickEntryRootView: View {
         .frame(height: attachmentBarHeight)
     }
 
+    private var errorBanner: some View {
+        let msg = brainClient.errorBannerText
+        let needsRouting = msg.contains("VISION")
+            || msg.contains("模型")
+            || msg.contains("400")
+            || msg.contains("API")
+            || msg.contains("视觉")
+        return HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(QMXTheme.warning)
+            Text(msg)
+                .font(.system(size: 11.5))
+                .foregroundStyle(QMXTheme.textPrimary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            if needsRouting {
+                Button("模型设置") {
+                    NotificationCenter.default.post(name: .qmxOpenSettings, object: "routing")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(QMXTheme.accent)
+                .buttonStyle(.plain)
+            }
+            Button {
+                brainClient.errorBannerText = ""
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(QMXTheme.textTertiary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(QMXTheme.warning.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(QMXTheme.warning.opacity(0.32), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 20)
+        .frame(height: errorBannerHeight)
+    }
+
     private func attachmentSymbol(_ kind: String) -> String {
         switch kind.lowercased() {
         case "image": return "photo"
@@ -1060,6 +1119,17 @@ struct QuickEntryRootView: View {
                         .transition(reduceMotion ? .identity : .opacity)
                 }
                 workspaceLink
+            } else if !brainClient.errorBannerText.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(QMXTheme.warning)
+                    Text(brainClient.errorBannerText)
+                        .font(.system(size: 13))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
             } else {
                 Text("…")
                     .font(.system(size: 22))
@@ -1330,6 +1400,10 @@ struct QuickEntryRootView: View {
         )
     }
 
+    private var errorBannerHeight: CGFloat {
+        brainClient.errorBannerText.isEmpty ? 0 : 40
+    }
+
     /// Let the composer grow up to eight extra lines so a pasted multi-line
     /// instruction stays readable instead of hiding behind a one-line frame.
     private var inputExtraHeight: CGFloat {
@@ -1360,7 +1434,7 @@ struct QuickEntryRootView: View {
             160,
             visibleHeight - 24 - QuickEntryLayout.panelChrome - inputExtraHeight - 40 - prompt - promptSpacing
                 - foldedStatusHeight - 26 - 10
-                - sourceBarHeight - sourceGap - mediaBarHeight - mediaGap - attachmentBarHeight
+                - sourceBarHeight - sourceGap - mediaBarHeight - mediaGap - attachmentBarHeight - errorBannerHeight
         )
         return min(CGFloat(answerMaxLines) * answerLineHeight, screenCap)
     }
@@ -1368,7 +1442,7 @@ struct QuickEntryRootView: View {
     private var naturalAnswerChatHeight: CGFloat {
         let thinkingBase = QuickEntryLayout.compactThinkingHeight(
             promptHeight: promptBlockHeight,
-            attachmentBarHeight: attachmentBarHeight,
+            attachmentBarHeight: attachmentBarHeight + errorBannerHeight,
             inputExtraHeight: inputExtraHeight
         )
         let measured = answerContentHeight
@@ -1382,7 +1456,7 @@ struct QuickEntryRootView: View {
         let capped = min(measured, maxLinesContentHeight)
         let stage = 40 + promptBlock + promptSpacing + foldedStatusHeight + capped
             + sourceBarHeight + sourceGap + mediaBarHeight + mediaGap
-            + attachmentBarHeight + 26 + 10
+            + attachmentBarHeight + errorBannerHeight + 26 + 10
         return max(
             thinkingBase,
             QuickEntryLayout.panelChrome + inputExtraHeight + stage
@@ -1394,11 +1468,11 @@ struct QuickEntryRootView: View {
     /// under the user's cursor. Resets only on collapse / New Chat.
     private var chatHeight: CGFloat {
         if !inputState.isExpanded {
-            return QuickEntryLayout.idleHeight + attachmentBarHeight + inputExtraHeight
+            return QuickEntryLayout.idleHeight + attachmentBarHeight + errorBannerHeight + inputExtraHeight
         }
         let thinkingBase = QuickEntryLayout.compactThinkingHeight(
             promptHeight: promptBlockHeight,
-            attachmentBarHeight: attachmentBarHeight,
+            attachmentBarHeight: attachmentBarHeight + errorBannerHeight,
             inputExtraHeight: inputExtraHeight
         )
         if isThinking || latestTurn?.answer.isEmpty != false {
