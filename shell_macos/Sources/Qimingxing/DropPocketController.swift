@@ -106,17 +106,17 @@ enum ShelfPhase: Equatable {
 }
 
 enum ScreenEdgeResolver {
-    static let idleEarSize = CGSize(width: 48, height: 220)
-    static let dragExpandedSize = CGSize(width: 224, height: 220)
+    static let idleEarSize = CGSize(width: 48, height: 330)
+    static let dragExpandedSize = CGSize(width: 224, height: 330)
     static let stashedWidth: CGFloat = 112
-    static let stashedMaxHeight: CGFloat = 292
-    static let stashedMinHeight: CGFloat = 176
+    static let stashedMaxHeight: CGFloat = 438
+    static let stashedMinHeight: CGFloat = 264
 
-    static let topIdleSize = CGSize(width: 200, height: 44)
-    static let topExpandedSize = CGSize(width: 300, height: 184)
+    static let topIdleSize = CGSize(width: 300, height: 44)
+    static let topExpandedSize = CGSize(width: 450, height: 184)
     static let topStashedHeight: CGFloat = 88
-    static let topStashedMinWidth: CGFloat = 210
-    static let topStashedMaxWidth: CGFloat = 364
+    static let topStashedMinWidth: CGFloat = 315
+    static let topStashedMaxWidth: CGFloat = 546
 
     static let cornerRadius: CGFloat = 20
 
@@ -230,7 +230,7 @@ enum ScreenEdgeResolver {
             case .dragExpanded:
                 return topExpandedSize
             case .stashedStack:
-                let width = min(topStashedMaxWidth, max(topStashedMinWidth, 136 + CGFloat(visibleCount) * 70))
+                let width = min(topStashedMaxWidth, max(topStashedMinWidth, 204 + CGFloat(visibleCount) * 105))
                 return CGSize(width: width, height: topStashedHeight)
             }
         }
@@ -240,7 +240,7 @@ enum ScreenEdgeResolver {
         case .dragExpanded:
             return dragExpandedSize
         case .stashedStack:
-            let height = min(stashedMaxHeight, max(stashedMinHeight, 96 + CGFloat(visibleCount) * 64))
+            let height = min(stashedMaxHeight, max(stashedMinHeight, 144 + CGFloat(visibleCount) * 96))
             return CGSize(width: stashedWidth, height: height)
         }
     }
@@ -1145,7 +1145,7 @@ struct EdgeShelfRootView: View {
                                 endPoint: .trailing
                             )
                         )
-                        .frame(width: 68, height: 2.5)
+                        .frame(width: 102, height: 2.5)
                         .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
                     Spacer()
                 }
@@ -1182,7 +1182,7 @@ struct EdgeShelfRootView: View {
                                 endPoint: .bottom
                             )
                         )
-                        .frame(width: 2.5, height: 68)
+                        .frame(width: 2.5, height: 102)
                         .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
                     if controller.dockEdge == .left { Spacer() }
                 }
