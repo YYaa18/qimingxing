@@ -458,8 +458,24 @@ enum UIPreviewDumper {
         stashedController.configureForPreview(edge: .right, phase: .stashedStack, items: stashedDemoItems)
         render(
             EdgeShelfRootView(controller: stashedController, onClose: {}),
-            size: ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: stashedDemoItems.count),
+            size: ScreenEdgeResolver.targetSize(for: .stashedStack, edge: .right, itemCount: stashedDemoItems.count),
             to: outputDir.appendingPathComponent("drop_pocket_stashed.png")
+        )
+
+        let topEmptyController = DropPocketController(brainClient: client)
+        topEmptyController.configureForPreview(edge: .top, phase: .idleEar, items: [])
+        render(
+            EdgeShelfRootView(controller: topEmptyController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .idleEar, edge: .top, itemCount: 0),
+            to: outputDir.appendingPathComponent("drop_pocket_top_empty.png")
+        )
+
+        let topStashedController = DropPocketController(brainClient: client)
+        topStashedController.configureForPreview(edge: .top, phase: .stashedStack, items: stashedDemoItems)
+        render(
+            EdgeShelfRootView(controller: topStashedController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .stashedStack, edge: .top, itemCount: stashedDemoItems.count),
+            to: outputDir.appendingPathComponent("drop_pocket_top_stashed.png")
         )
 
         // 5b. Phase 2: Walkie-Talkie Capsule, Spatial Lasso Popover & Pinned Note
@@ -948,33 +964,39 @@ enum Phase1Verifier {
         )
         check(!shelfPanel.canBecomeKey && !shelfPanel.canBecomeMain, "DropShelfPanel must never steal key/main focus")
 
-        // 6. Custom dragged position classification & multi-monitor saved fallback
-        let leftSnap = ScreenEdgeResolver.classifyDraggedFrame(
-            CGRect(x: 10, y: 400, width: 48, height: 220),
+        // 6. 3-Edge magnetic snap classification, top horizontal layout & multi-monitor fallback
+        let leftSnap = ScreenEdgeResolver.snapToNearestEdge(
+            CGRect(x: 40, y: 400, width: 48, height: 220),
             in: primary.visibleFrame
         )
-        check(leftSnap.mode == .left && leftSnap.x == primary.visibleFrame.minX, "drag near left edge must snap .left")
+        check(leftSnap.edge == .left && leftSnap.x == primary.visibleFrame.minX, "drag near left edge must snap .left")
 
-        let rightSnap = ScreenEdgeResolver.classifyDraggedFrame(
-            CGRect(x: 1380, y: 400, width: 48, height: 220),
+        let rightSnap = ScreenEdgeResolver.snapToNearestEdge(
+            CGRect(x: 1360, y: 400, width: 48, height: 220),
             in: primary.visibleFrame
         )
-        check(rightSnap.mode == .right && rightSnap.x == primary.visibleFrame.maxX, "drag near right edge must snap .right")
+        check(rightSnap.edge == .right && rightSnap.x == primary.visibleFrame.maxX, "drag near right edge must snap .right")
 
-        let floatSnap = ScreenEdgeResolver.classifyDraggedFrame(
-            CGRect(x: 600, y: 380, width: 48, height: 220),
+        let topSnap = ScreenEdgeResolver.snapToNearestEdge(
+            CGRect(x: 620, y: 810, width: 200, height: 44),
             in: primary.visibleFrame
         )
-        check(floatSnap.mode == .floating && abs(floatSnap.x - 624) < 0.5 && abs(floatSnap.y - 490) < 0.5, "mid-screen drag must stay floating at center")
+        check(topSnap.edge == .top && topSnap.y == primary.visibleFrame.maxY && abs(topSnap.x - 720) < 0.5, "drag near top edge must snap .top")
 
-        let restoredFloat = ScreenEdgeResolver.resolveFromSaved(floatSnap, screens: [primary, secondary])
-        check(restoredFloat.mode == .floating, "saved floating mode must restore")
-        let restoredFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: restoredFloat)
-        check(abs(restoredFrame.midX - floatSnap.x) < 0.5 && abs(restoredFrame.midY - floatSnap.y) < 0.5, "floating shelf must restore centered at saved coordinates")
+        let topIdle = ScreenEdgeResolver.targetSize(for: .idleEar, edge: .top, itemCount: 0)
+        let topExp = ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: nil), edge: .top, itemCount: 0)
+        let topStash = ScreenEdgeResolver.targetSize(for: .stashedStack, edge: .top, itemCount: 4)
+        check(topIdle == CGSize(width: 200, height: 44), "top idle size must be 200x44")
+        check(topExp == CGSize(width: 300, height: 184), "top expanded size must be 300x184")
+        check(topStash == CGSize(width: 346, height: 88), "top stashed 3+ size mismatch: \(topStash)")
+
+        let restoredTop = ScreenEdgeResolver.resolveFromSaved(topSnap, screens: [primary, secondary])
+        let topDockFrame = ScreenEdgeResolver.frame(for: topIdle, placement: restoredTop)
+        check(abs(topDockFrame.maxY - primary.visibleFrame.maxY) < 0.5 && abs(topDockFrame.midX - topSnap.x) < 0.5, "top dock must sit flush at top visibleFrame and keep horizontal anchor")
 
         // Disconnected monitor fallback: saved position on secondary falls back cleanly onto primary
         let offlineFallback = ScreenEdgeResolver.resolveFromSaved(
-            SavedShelfPosition(x: 2400, y: 500, mode: .floating),
+            SavedShelfPosition(x: 2400, y: 800, edge: .right),
             screens: [primary]
         )
         let offlineFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: offlineFallback)
