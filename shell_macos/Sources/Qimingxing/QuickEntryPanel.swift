@@ -715,6 +715,7 @@ struct QuickEntryRootView: View {
     @AppStorage("qmx.answerMaxLines") private var answerMaxLines: Int = 30
     @State private var appeared = QMXTheme.isHeadlessDump
     @State private var answerContentHeight: CGFloat = 0
+    @State private var cardsContentHeight: CGFloat = 0
     @State private var turnPeakHeight: CGFloat = 0
     @State private var answerRevealFinished = QMXTheme.isHeadlessDump
     @State private var caughtUpAnswerCount = -1
@@ -887,6 +888,7 @@ struct QuickEntryRootView: View {
         }
         .onChange(of: latestTurn?.id) { _ in
             answerContentHeight = 0
+            cardsContentHeight = 0
             turnPeakHeight = 0
             answerRevealFinished = reduceMotion || QMXTheme.isHeadlessDump
             caughtUpAnswerCount = -1
@@ -900,6 +902,7 @@ struct QuickEntryRootView: View {
         }
         .onChange(of: answerFontSize) { _ in
             answerContentHeight = 0
+            cardsContentHeight = 0
             turnPeakHeight = 0
         }
         .onChange(of: inputState.text) { _ in
@@ -1189,25 +1192,35 @@ struct QuickEntryRootView: View {
 
                 answerView(turn)
 
+                if !turn.cards.isEmpty {
+                    cardsView(turn)
+                }
+
                 if !turn.sources.isEmpty {
                     SourceChipsView(sources: turn.sources)
                         .transition(reduceMotion ? .identity : .opacity)
                 }
-                let stripMedia = qmxMediaWithoutInlineTables(turn.media, answer: turn.answer)
+                let stripMedia = qmxMediaWithoutInlineTables(
+                    turn.media, answer: turn.answer, cards: turn.cards
+                )
                 if !stripMedia.isEmpty {
                     MediaStripView(media: stripMedia, contextTitle: "本轮回答")
                         .transition(reduceMotion ? .identity : .opacity)
                 }
                 workspaceLink
             } else if let turn = latestTurn,
-                      !turn.media.isEmpty || !turn.sources.isEmpty {
-                // Card-only answers (e.g. a table emitted inside <<<CARD>>>)
-                // have no spoken text, but their media must still be visible.
+                      !turn.cards.isEmpty || !turn.media.isEmpty || !turn.sources.isEmpty {
+                // Card-only answers have no spoken text; the card is the answer.
+                if !turn.cards.isEmpty {
+                    cardsView(turn)
+                }
                 if !turn.sources.isEmpty {
                     SourceChipsView(sources: turn.sources)
                         .transition(reduceMotion ? .identity : .opacity)
                 }
-                let stripMedia = qmxMediaWithoutInlineTables(turn.media, answer: turn.answer)
+                let stripMedia = qmxMediaWithoutInlineTables(
+                    turn.media, answer: turn.answer, cards: turn.cards
+                )
                 if !stripMedia.isEmpty {
                     MediaStripView(media: stripMedia, contextTitle: "本轮回答")
                         .transition(reduceMotion ? .identity : .opacity)
@@ -1236,6 +1249,31 @@ struct QuickEntryRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: latestTurn?.sources.isEmpty ?? true)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: latestTurn?.media.isEmpty ?? true)
+    }
+
+    @ViewBuilder
+    private func cardsView(_ turn: LiveTurn) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(turn.cards) { card in
+                QMXOutputCardView(card: card, isBusy: brainClient.isGenerating) { action in
+                    brainClient.sendCardAction(
+                        cardId: card.cardId,
+                        action: action.id,
+                        turnId: turn.id
+                    )
+                }
+            }
+        }
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: CardsHeightKey.self, value: geo.size.height)
+            }
+        )
+        .onPreferenceChange(CardsHeightKey.self) { height in
+            if abs(cardsContentHeight - height) > 0.5 {
+                cardsContentHeight = height
+            }
+        }
     }
 
     private func answerView(_ turn: LiveTurn) -> some View {
@@ -1496,6 +1534,7 @@ struct QuickEntryRootView: View {
         var isStreaming: Bool = false
         var sources: [SourceItem] = []
         var media: [MediaItem] = []
+        var cards: [OutputCardItem] = []
     }
 
     private var answerLineHeight: CGFloat {
@@ -1511,6 +1550,20 @@ struct QuickEntryRootView: View {
 
     private var mediaBarHeight: CGFloat {
         (latestTurn?.media.isEmpty == false) ? 94 : 0
+    }
+
+    private var cardsBarHeight: CGFloat {
+        guard let turn = latestTurn, !turn.cards.isEmpty else { return 0 }
+        if cardsContentHeight > 0 { return cardsContentHeight }
+        // Headless dumps render synchronously and may not receive the
+        // GeometryReader preference before the second pass.
+        return turn.cards.reduce(CGFloat(0)) { total, card in
+            let lineCount = max(1, card.contentMarkdown.components(separatedBy: "\n").count)
+            let body = CGFloat(min(lineCount, 12)) * 18
+            let tableExtra: CGFloat = card.contentMarkdown.contains("|") ? 40 : 0
+            let actions: CGFloat = card.actions.isEmpty ? 0 : 30
+            return total + 12 + 20 + 8 + body + tableExtra + actions + 12 + 8
+        }
     }
 
     private var attachmentBarHeight: CGFloat {
@@ -1550,11 +1603,13 @@ struct QuickEntryRootView: View {
         let promptSpacing: CGFloat = prompt > 0 ? 10 : 0
         let sourceGap: CGFloat = sourceBarHeight > 0 ? 10 : 0
         let mediaGap: CGFloat = mediaBarHeight > 0 ? 10 : 0
+        let cardsGap: CGFloat = cardsBarHeight > 0 ? 10 : 0
         let screenCap = max(
             160,
             visibleHeight - 24 - QuickEntryLayout.panelChrome - inputExtraHeight - 40 - prompt - promptSpacing
                 - foldedStatusHeight - 26 - 10
-                - sourceBarHeight - sourceGap - mediaBarHeight - mediaGap - attachmentBarHeight - errorBannerHeight
+                - sourceBarHeight - sourceGap - mediaBarHeight - mediaGap - cardsBarHeight - cardsGap
+                - attachmentBarHeight - errorBannerHeight
         )
         return min(CGFloat(answerMaxLines) * answerLineHeight, screenCap)
     }
@@ -1566,16 +1621,17 @@ struct QuickEntryRootView: View {
             inputExtraHeight: inputExtraHeight
         )
         let measured = answerContentHeight
-        guard measured > 0 else {
+        guard measured > 0 || cardsBarHeight > 0 else {
             return thinkingBase
         }
         let promptBlock = promptBlockHeight
         let promptSpacing: CGFloat = promptBlock > 0 ? 10 : 0
         let sourceGap: CGFloat = sourceBarHeight > 0 ? 10 : 0
         let mediaGap: CGFloat = mediaBarHeight > 0 ? 10 : 0
+        let cardsGap: CGFloat = cardsBarHeight > 0 ? 10 : 0
         let capped = min(measured, maxLinesContentHeight)
         let stage = 40 + promptBlock + promptSpacing + foldedStatusHeight + capped
-            + sourceBarHeight + sourceGap + mediaBarHeight + mediaGap
+            + sourceBarHeight + sourceGap + mediaBarHeight + mediaGap + cardsBarHeight + cardsGap
             + ghostCapsuleHeight + attachmentBarHeight + errorBannerHeight + 26 + 10
         return max(
             thinkingBase,
@@ -1595,7 +1651,8 @@ struct QuickEntryRootView: View {
             attachmentBarHeight: ghostCapsuleHeight + attachmentBarHeight + errorBannerHeight,
             inputExtraHeight: inputExtraHeight
         )
-        if isThinking || latestTurn?.answer.isEmpty != false {
+        let hasCards = !(latestTurn?.cards.isEmpty ?? true)
+        if isThinking || ((latestTurn?.answer.isEmpty ?? true) && !hasCards) {
             return max(turnPeakHeight, thinkingBase)
         }
         let natural = naturalAnswerChatHeight
@@ -1639,6 +1696,7 @@ struct QuickEntryRootView: View {
                 turn.isStreaming = message.isStreaming
                 turn.sources = message.sources
                 turn.media = message.media
+                turn.cards = message.cards
             }
         }
         return turn
@@ -1649,7 +1707,8 @@ struct QuickEntryRootView: View {
     }
 
     private var isThinking: Bool {
-        brainClient.isGenerating && !hasAnswer
+        let hasCards = !(latestTurn?.cards.isEmpty ?? true)
+        return brainClient.isGenerating && !hasAnswer && !hasCards
     }
 
     private var activeModelLabel: String {
@@ -1816,6 +1875,13 @@ struct QuickEntryRootView: View {
         inputState.uploadingNames.removeAll { $0 == name }
         try? FileManager.default.removeItem(at: tmp)
         onDesiredHeightChange(chatHeight)
+    }
+}
+
+private struct CardsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

@@ -471,6 +471,7 @@ Tools/UIPreviewDumper/
 - 公共 import 保持兼容，例如 `brain.hub.Hub` 继续可用；
 - 每个 PR 结束 Python 276+、Swift 全绿、UI 截图无回归；
 - 文件大小基线：`hub.py 3,135`、`QuickEntryPanel.swift 2,548`、`UIPreviewDumper.swift 1,342`；存量只降不升，新增文件 >800 行需拆分；
+  `[现状]` Phase 1a 是功能净增（`hub.py` 3,207、`QuickEntryPanel.swift` 2,614）；Phase 5 起以 1a 后的数值为新基线。
 - 行数由 `scripts/metrics_report.py` 采集；**是否在 CI 阻断**留到 Phase 4 定（先只报告）；
 - `Package.swift` 的 `-disable-dynamic-actor-isolation` / `-disable-actor-data-race-checks`（`:18-19`）在并发问题修复后移除，不作为长期配置。
 

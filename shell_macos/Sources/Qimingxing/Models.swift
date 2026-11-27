@@ -257,6 +257,65 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
     var isStreaming: Bool = false
     var sources: [SourceItem] = []
     var media: [MediaItem] = []
+    var cards: [OutputCardItem] = []
+}
+
+struct CardActionItem: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+
+    init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
+
+    init?(dict: [String: Any]) {
+        guard let id = dict["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        self.label = (dict["label"] as? String) ?? id
+    }
+}
+
+struct OutputCardItem: Codable, Identifiable, Equatable, Sendable {
+    let cardId: String
+    let cardType: String
+    let title: String
+    let contentMarkdown: String
+    let actions: [CardActionItem]
+
+    var id: String { cardId }
+
+    enum CodingKeys: String, CodingKey {
+        case cardId = "card_id"
+        case cardType = "card_type"
+        case title
+        case contentMarkdown = "content_markdown"
+        case actions
+    }
+
+    init(
+        cardId: String,
+        cardType: String,
+        title: String,
+        contentMarkdown: String,
+        actions: [CardActionItem]
+    ) {
+        self.cardId = cardId
+        self.cardType = cardType
+        self.title = title
+        self.contentMarkdown = contentMarkdown
+        self.actions = actions
+    }
+
+    init?(dict: [String: Any]) {
+        guard let cardId = dict["card_id"] as? String, !cardId.isEmpty else { return nil }
+        let rawActions = (dict["actions"] as? [[String: Any]]) ?? []
+        self.cardId = cardId
+        self.cardType = (dict["card_type"] as? String) ?? "markdown"
+        self.title = (dict["title"] as? String) ?? ""
+        self.contentMarkdown = (dict["content_markdown"] as? String) ?? ""
+        self.actions = rawActions.compactMap(CardActionItem.init(dict:))
+    }
 }
 
 struct StagedAttachment: Identifiable, Equatable, Sendable {

@@ -79,6 +79,20 @@ def largest_files(limit: int = 10) -> list[dict[str, object]]:
     return entries[:limit]
 
 
+def swift_test_count() -> int:
+    tests_dir = ROOT / "shell_macos" / "Tests"
+    if not tests_dir.exists():
+        return 0
+    count = 0
+    for path in tests_dir.rglob("*.swift"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        count += len(re.findall(r"\bfunc test\w*\s*\(", text))
+    return count
+
+
 def python_test_count(python: str) -> int | None:
     try:
         proc = subprocess.run(
@@ -175,7 +189,7 @@ def collect(python: str) -> dict[str, object]:
         "commit": git_commit(),
         "version": version,
         "python_tests": python_test_count(python),
-        "swift_tests": 0,
+        "swift_tests": swift_test_count(),
         "loc": loc_table(),
         "largest_files": largest_files(),
         "references": reference_counts(),

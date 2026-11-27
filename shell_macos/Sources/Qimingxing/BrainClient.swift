@@ -511,6 +511,16 @@ final class BrainClient: ObservableObject {
             let meta = prof.isEmpty ? "启明星" : "启明星 · \(prof) (\(mod))"
             ensureAssistantMessage(turnId: turnId, meta: meta)
 
+        case "output.card":
+            guard let card = OutputCardItem(dict: payload) else { break }
+            let targetTurn = turnId.isEmpty ? (currentTurnId ?? "") : turnId
+            guard !targetTurn.isEmpty else { break }
+            ensureAssistantMessage(turnId: targetTurn, meta: "启明星")
+            if let idx = messages.lastIndex(where: { !$0.isUser && $0.turnId == targetTurn }),
+               !messages[idx].cards.contains(where: { $0.cardId == card.cardId }) {
+                messages[idx].cards.append(card)
+            }
+
         case "output.text_delta":
             let delta = (payload["delta"] as? String) ?? ""
             if !delta.isEmpty {
@@ -714,6 +724,14 @@ final class BrainClient: ObservableObject {
         if !pendingApprovals.contains(where: { $0.approvalId == item.approvalId }) {
             pendingApprovals.append(item)
         }
+    }
+
+    func sendCardAction(cardId: String, action: String, turnId: String) {
+        sendEnvelope(
+            type: "input.action",
+            payload: ["action": action, "card_id": cardId],
+            turnId: turnId.isEmpty ? nil : turnId
+        )
     }
 
     private func ensureAssistantMessage(turnId: String, meta: String) {

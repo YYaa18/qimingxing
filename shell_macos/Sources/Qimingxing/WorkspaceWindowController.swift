@@ -39,6 +39,7 @@ struct WorkspaceItem: Identifiable, Codable, Equatable, Sendable {
     var updatedAt: Date
     var sources: [SourceItem]? = nil
     var media: [MediaItem]? = nil
+    var cards: [OutputCardItem]? = nil
     var bundlePath: String? = nil
 }
 
@@ -94,6 +95,7 @@ final class WorkspaceStore: ObservableObject {
         var streaming: Bool = false
         var sources: [SourceItem] = []
         var media: [MediaItem] = []
+        var cards: [OutputCardItem] = []
     }
 
     private struct MessageSignature: Equatable {
@@ -101,12 +103,14 @@ final class WorkspaceStore: ObservableObject {
         let streaming: Bool
         let sources: [SourceItem]
         let media: [MediaItem]
+        let cards: [OutputCardItem]
 
         init(_ message: ChatEntry) {
             textCount = message.text.count
             streaming = message.isStreaming
             sources = message.sources
             media = message.media
+            cards = message.cards
         }
     }
 
@@ -144,23 +148,26 @@ final class WorkspaceStore: ObservableObject {
                 map[message.turnId]?.streaming = message.isStreaming
                 map[message.turnId]?.sources = message.sources
                 map[message.turnId]?.media = message.media
+                map[message.turnId]?.cards = message.cards
             }
         }
 
         for id in order {
             guard let turn = map[id] else { continue }
-            guard !turn.prompt.isEmpty || !turn.answer.isEmpty else { continue }
+            guard !turn.prompt.isEmpty || !turn.answer.isEmpty || !turn.cards.isEmpty else { continue }
             let itemID = "turn_\(id)"
             let existing = items.first(where: { $0.id == itemID })
             let titleSource = turn.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             let title = titleSource.isEmpty ? "对话" : String(titleSource.prefix(80))
-            let status = turn.answer.isEmpty ? "waiting" : (turn.streaming ? "streaming" : "completed")
+            let hasContent = !turn.answer.isEmpty || !turn.cards.isEmpty
+            let status = hasContent ? (turn.streaming ? "streaming" : "completed") : "waiting"
             if let existing,
                existing.prompt == turn.prompt,
                existing.body == turn.answer,
                existing.status == status,
                existing.sources == turn.sources,
-               existing.media == turn.media {
+               existing.media == turn.media,
+               (existing.cards ?? []) == turn.cards {
                 continue
             }
             upsert(WorkspaceItem(
@@ -175,9 +182,18 @@ final class WorkspaceStore: ObservableObject {
                 createdAt: existing?.createdAt ?? Date(),
                 updatedAt: Date(),
                 sources: turn.sources.isEmpty ? nil : turn.sources,
-                media: turn.media.isEmpty ? nil : turn.media
+                media: turn.media.isEmpty ? nil : turn.media,
+                cards: turn.cards.isEmpty ? nil : turn.cards
             ))
         }
+    }
+
+    func sendCardAction(_ card: OutputCardItem, action: CardActionItem, turnItemID: String) {
+        guard let brainClient else { return }
+        let turnId = turnItemID.hasPrefix("turn_")
+            ? String(turnItemID.dropFirst("turn_".count))
+            : turnItemID
+        brainClient.sendCardAction(cardId: card.cardId, action: action.id, turnId: turnId)
     }
 
     private func ingestTasks(_ tasks: [BackgroundTaskItem]) {
@@ -830,17 +846,28 @@ struct WorkspaceRootView: View {
                 Spacer(minLength: 0)
             }
 
-            if turn.body.isEmpty {
+            if turn.body.isEmpty && (turn.cards?.isEmpty ?? true) {
                 Text(turn.status == "waiting" ? "等待回复…" : statusLabel(turn.status))
                     .font(.system(size: 13))
                     .foregroundStyle(QMXTheme.textTertiary)
             } else {
-                MarkdownMessageView(text: turn.body)
+                if !turn.body.isEmpty {
+                    MarkdownMessageView(text: turn.body)
+                }
+                if let cards = turn.cards, !cards.isEmpty {
+                    ForEach(cards) { card in
+                        QMXOutputCardView(card: card) { action in
+                            store.sendCardAction(card, action: action, turnItemID: turn.id)
+                        }
+                    }
+                }
                 if let sources = turn.sources, !sources.isEmpty {
                     SourceChipsView(sources: sources)
                 }
                 if let media = turn.media {
-                    let stripMedia = qmxMediaWithoutInlineTables(media, answer: turn.body)
+                    let stripMedia = qmxMediaWithoutInlineTables(
+                        media, answer: turn.body, cards: turn.cards ?? []
+                    )
                     if !stripMedia.isEmpty {
                         MediaStripView(media: stripMedia, mode: .expanded, contextTitle: "工作区")
                     }
@@ -888,7 +915,16 @@ struct WorkspaceRootView: View {
     private func itemBody(_ item: WorkspaceItem) -> some View {
         switch item.kind {
         case .answer:
-            MarkdownMessageView(text: item.body)
+            if !item.body.isEmpty {
+                MarkdownMessageView(text: item.body)
+            }
+            if let cards = item.cards, !cards.isEmpty {
+                ForEach(cards) { card in
+                    QMXOutputCardView(card: card) { action in
+                        store.sendCardAction(card, action: action, turnItemID: item.id)
+                    }
+                }
+            }
             if let sources = item.sources, !sources.isEmpty {
                 SourceChipsView(sources: sources)
             }

@@ -348,6 +348,10 @@ class Hub:
         self._latest_audio_turn_by_client: Dict[str, str] = {}
         self._tts_tasks: Dict[str, asyncio.Task[None]] = {}
         self._session_approved_tools: set[str] = set()
+        # card_id -> allowed action ids. Cards stay clickable after the turn
+        # ends, so entries are evicted FIFO by capacity, not per turn.
+        self._card_actions: Dict[str, set[str]] = {}
+        self._card_action_limit = 200
         self.last_build_stats: Optional[BuildStats] = None
 
     def register(self, websocket: WebSocket) -> ClientConnection:
@@ -729,6 +733,14 @@ class Hub:
             await self._handle_action(conn, env, payload)
             return
 
+    def _register_card_actions(self, card_id: str, action_ids: List[str]) -> None:
+        if not card_id:
+            return
+        self._card_actions[card_id] = set(action_ids)
+        while len(self._card_actions) > self._card_action_limit:
+            oldest = next(iter(self._card_actions))
+            self._card_actions.pop(oldest, None)
+
     async def _handle_action(
         self,
         conn: ClientConnection,
@@ -760,16 +772,55 @@ class Hub:
             )
             return
 
+        if payload.action == "dismiss":
+            # Fold/unfold is client-local. Accept it silently instead of
+            # synthesising a turn (the v1 behaviour was an LLM prompt).
+            return
+
         turn_id = env.turn_id or new_turn_id()
         if payload.action == "ask_with_screen":
             user_text = str(payload.data.get("text") or "").strip() or "帮我看看我现在正在看的屏幕内容。"
             await self._start_turn(conn, turn_id, user_text, force_screen=True)
             return
 
+        # Card actions must match a card the server just issued. This is both
+        # the anti-forgery check and the reason unknown actions can no longer
+        # be interpolated into a prompt.
+        card_id = str(payload.card_id or "")
+        allowed_actions = self._card_actions.get(card_id)
+        if allowed_actions is None or payload.action not in allowed_actions:
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "system.error",
+                    SystemErrorPayload(
+                        code="invalid_card_action",
+                        message="卡片动作已失效，请重新发起请求。",
+                        recoverable=True,
+                    ),
+                    turn_id=turn_id,
+                )
+            )
+            return
+
         if payload.action == "more_hint":
             prompt_text = "请基于刚才的防剧透提示，给出更进一步的第 2 级提示（依然尽量避免直接剧透结局）。"
         else:
-            prompt_text = f"用户触发快捷动作 `{payload.action}`（参数: {payload.data}），请简短响应。"
+            prompt_text = ""
+        if not prompt_text:
+            await conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "system.error",
+                    SystemErrorPayload(
+                        code="unsupported_card_action",
+                        message="该卡片动作暂不支持。",
+                        recoverable=True,
+                    ),
+                    turn_id=turn_id,
+                )
+            )
+            return
         await self._start_turn(conn, turn_id, prompt_text, force_screen=False)
 
     async def _send_welcome(self, conn: ClientConnection) -> None:
@@ -2110,6 +2161,7 @@ class Hub:
         seq = 0
         collected_spoken: List[str] = []
         collected_cards: List[str] = []
+        collected_card_payloads: List[Dict[str, Any]] = []
         attachment_names: List[str] = []
         artifact_id_to_burn = ""
         artifacts_to_burn: List[str] = list(attachments or [])
@@ -2553,6 +2605,7 @@ class Hub:
                     await self._emit_parser_events(
                         conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
                         collected_cards=collected_cards,
+                        collected_card_payloads=collected_card_payloads,
                         on_text_delta=_queue_text_delta,
                         flush_pending_text=_drain_text_delta_buffer,
                     )
@@ -2706,6 +2759,7 @@ class Hub:
                     await self._emit_parser_events(
                         conn, turn_id, events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
                         collected_cards=collected_cards,
+                        collected_card_payloads=collected_card_payloads,
                         on_text_delta=_queue_text_delta,
                         flush_pending_text=_drain_text_delta_buffer,
                     )
@@ -2725,6 +2779,7 @@ class Hub:
             await self._emit_parser_events(
                 conn, turn_id, tail_events, seq, collected_spoken, on_spoken_delta=_enqueue_tts_delta,
                 collected_cards=collected_cards,
+                collected_card_payloads=collected_card_payloads,
                 on_text_delta=_queue_text_delta,
                 flush_pending_text=_drain_text_delta_buffer,
             )
@@ -2762,6 +2817,11 @@ class Hub:
 
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             raw_assistant_reply = "".join(collected_spoken).strip()
+            card_markdown = "\n\n".join(
+                str(item.get("content_markdown") or "").strip()
+                for item in collected_card_payloads
+                if str(item.get("content_markdown") or "").strip()
+            )
             # Tables may be emitted inside a <<<CARD>>> (the system prompt
             # encourages cards for long content). Cards are streamed as a
             # separate event, so scan their markdown too or the table would
@@ -2885,15 +2945,19 @@ class Hub:
                     desktop_context_summary=scene_summary,
                 )
                 assistant_rec = None
-                if assistant_reply:
+                # A card-only answer has no spoken text; store the card body as
+                # the assistant content so the turn is not lost from memory.
+                stored_assistant_content = assistant_reply or card_markdown
+                if stored_assistant_content or collected_card_payloads:
                     assistant_rec = await self.memory_backend.append_message(
                         session_id=active_session_id,
                         turn_id=turn_id,
                         role="assistant",
-                        content=assistant_reply,
+                        content=stored_assistant_content,
                         desktop_context_summary=scene_summary,
                         sources=source_payloads,
                         media=media_payloads,
+                        cards=collected_card_payloads,
                     )
                 if self.memory_extractor is not None:
                     self.memory_extractor.schedule_post_turn(
@@ -2907,9 +2971,12 @@ class Hub:
                 self.memory_store.append_turn(
                     conn.client_id, "user", user_text, scene_summary=scene_summary
                 )
-                if assistant_reply:
+                if assistant_reply or card_markdown:
                     self.memory_store.append_turn(
-                        conn.client_id, "assistant", assistant_reply, scene_summary=scene_summary
+                        conn.client_id,
+                        "assistant",
+                        assistant_reply or card_markdown,
+                        scene_summary=scene_summary,
                     )
 
             try:
@@ -3072,6 +3139,7 @@ class Hub:
         collected_spoken: List[str],
         on_spoken_delta: Optional[Any] = None,
         collected_cards: Optional[List[str]] = None,
+        collected_card_payloads: Optional[List[Dict[str, Any]]] = None,
         on_text_delta: Optional[Any] = None,
         flush_pending_text: Optional[Any] = None,
     ) -> int:
@@ -3118,17 +3186,21 @@ class Hub:
                 if ev.card_type == "spoiler_steps":
                     actions.append(CardAction(id="more_hint", label="还是没头绪，看第 2 级提示"))
                 actions.append(CardAction(id="dismiss", label="知道了，收起"))
+                card_payload = OutputCardPayload(
+                    card_id=ev.card_id,
+                    card_type=ev.card_type,
+                    title=ev.title,
+                    content_markdown=ev.content_markdown,
+                    actions=actions,
+                )
+                if collected_card_payloads is not None:
+                    collected_card_payloads.append(card_payload.model_dump())
+                self._register_card_actions(ev.card_id, [action.id for action in actions])
                 await conn.send_envelope(
                     make_envelope(
                         "brain",
                         "output.card",
-                        OutputCardPayload(
-                            card_id=ev.card_id,
-                            card_type=ev.card_type,
-                            title=ev.title,
-                            content_markdown=ev.content_markdown,
-                            actions=actions,
-                        ),
+                        card_payload,
                         turn_id=turn_id,
                     )
                 )
