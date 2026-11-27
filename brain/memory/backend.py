@@ -86,6 +86,7 @@ class MemoryBackend(ABC):
         desktop_context_summary: str = "",
         sources: Optional[List[Dict[str, Any]]] = None,
         media: Optional[List[Dict[str, Any]]] = None,
+        cards: Optional[List[Dict[str, Any]]] = None,
     ) -> MessageRecord:
         """Append a message to L1 session history."""
 

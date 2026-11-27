@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS messages (
     desktop_context_summary TEXT NOT NULL DEFAULT '',
     sources_json TEXT NOT NULL DEFAULT '[]',
     media_json TEXT NOT NULL DEFAULT '[]',
+    cards_json TEXT NOT NULL DEFAULT '[]',
     created_at REAL NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
@@ -140,6 +141,7 @@ CREATE TABLE IF NOT EXISTS messages_archive (
     desktop_context_summary TEXT NOT NULL DEFAULT '',
     sources_json TEXT NOT NULL DEFAULT '[]',
     media_json TEXT NOT NULL DEFAULT '[]',
+    cards_json TEXT NOT NULL DEFAULT '[]',
     created_at REAL NOT NULL,
     archived_at REAL NOT NULL
 );
@@ -328,6 +330,10 @@ class SQLiteMemoryStore(MemoryBackend):
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN media_json TEXT NOT NULL DEFAULT '[]'"
                     )
+                if "cards_json" not in msg_cols:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN cards_json TEXT NOT NULL DEFAULT '[]'"
+                    )
             bg_cols = {
                 str(r["name"])
                 for r in conn.execute("PRAGMA table_info(background_tasks)").fetchall()
@@ -476,24 +482,27 @@ class SQLiteMemoryStore(MemoryBackend):
         desktop_context_summary: str = "",
         sources: Optional[List[Dict[str, Any]]] = None,
         media: Optional[List[Dict[str, Any]]] = None,
+        cards: Optional[List[Dict[str, Any]]] = None,
     ) -> MessageRecord:
         async with self._lock:
             conn = self._ensure_conn()
             now = time.time()
             sources = sources or []
             media = media or []
+            cards = cards or []
             cur = conn.execute(
                 """
                 INSERT INTO messages (
                     session_id, turn_id, role, content, emotion,
-                    desktop_context_summary, sources_json, media_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    desktop_context_summary, sources_json, media_json, cards_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id, turn_id, role, content, emotion,
                     desktop_context_summary,
                     json.dumps(sources, ensure_ascii=False),
                     json.dumps(media, ensure_ascii=False),
+                    json.dumps(cards, ensure_ascii=False),
                     now,
                 ),
             )
@@ -515,6 +524,7 @@ class SQLiteMemoryStore(MemoryBackend):
                 desktop_context_summary=desktop_context_summary,
                 sources=sources,
                 media=media,
+                cards=cards,
                 created_at=now,
             )
 
@@ -631,8 +641,8 @@ class SQLiteMemoryStore(MemoryBackend):
                 INSERT OR REPLACE INTO messages_archive (
                     msg_id, session_id, turn_id, role, content,
                     emotion, desktop_context_summary, sources_json, media_json,
-                    created_at, archived_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cards_json, created_at, archived_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -645,6 +655,7 @@ class SQLiteMemoryStore(MemoryBackend):
                         r["desktop_context_summary"],
                         r["sources_json"] if "sources_json" in r.keys() else "[]",
                         r["media_json"] if "media_json" in r.keys() else "[]",
+                        r["cards_json"] if "cards_json" in r.keys() else "[]",
                         r["created_at"],
                         now,
                     )
@@ -1995,8 +2006,8 @@ class SQLiteMemoryStore(MemoryBackend):
                             INSERT OR REPLACE INTO messages (
                                 msg_id, session_id, turn_id, role, content,
                                 emotion, desktop_context_summary, sources_json,
-                                media_json, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                media_json, cards_json, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["msg_id"],
@@ -2008,6 +2019,7 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec.get("desktop_context_summary", ""),
                                 json.dumps(_snapshot_rich(rec, "sources"), ensure_ascii=False),
                                 json.dumps(_snapshot_rich(rec, "media"), ensure_ascii=False),
+                                json.dumps(_snapshot_rich(rec, "cards"), ensure_ascii=False),
                                 rec["created_at"],
                             ),
                         )
@@ -2022,8 +2034,8 @@ class SQLiteMemoryStore(MemoryBackend):
                             INSERT OR REPLACE INTO messages_archive (
                                 msg_id, session_id, turn_id, role, content,
                                 emotion, desktop_context_summary, sources_json,
-                                media_json, created_at, archived_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                media_json, cards_json, created_at, archived_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 rec["msg_id"],
@@ -2035,6 +2047,7 @@ class SQLiteMemoryStore(MemoryBackend):
                                 rec.get("desktop_context_summary", ""),
                                 json.dumps(_snapshot_rich(rec, "sources"), ensure_ascii=False),
                                 json.dumps(_snapshot_rich(rec, "media"), ensure_ascii=False),
+                                json.dumps(_snapshot_rich(rec, "cards"), ensure_ascii=False),
                                 rec["created_at"],
                                 rec.get("archived_at", rec["created_at"]),
                             ),
@@ -2288,6 +2301,7 @@ def _row_to_message(row: sqlite3.Row) -> MessageRecord:
         desktop_context_summary=str(row["desktop_context_summary"] or ""),
         sources=_parse_json_list(row["sources_json"] if "sources_json" in row.keys() else "[]"),
         media=_parse_json_list(row["media_json"] if "media_json" in row.keys() else "[]"),
+        cards=_parse_json_list(row["cards_json"] if "cards_json" in row.keys() else "[]"),
         created_at=float(row["created_at"]),
     )
 

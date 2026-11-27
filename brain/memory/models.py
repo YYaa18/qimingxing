@@ -165,6 +165,7 @@ class MessageRecord:
     desktop_context_summary: str = ""
     sources: List[Dict[str, Any]] = field(default_factory=list)
     media: List[Dict[str, Any]] = field(default_factory=list)
+    cards: List[Dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
 
