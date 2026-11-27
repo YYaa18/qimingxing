@@ -269,9 +269,9 @@ cp "${SWIFT_BIN}" "${APP_BUNDLE}/Contents/MacOS/Qimingxing"
 chmod +x "${APP_BUNDLE}/Contents/MacOS/Qimingxing"
 
 # 4. Copy application source (strictly excluding config.yaml, data/, caches)
-echo "📂 复制 Brain/Senses/Protocol/Web 应用代码..."
+echo "📂 复制 Brain/Senses/Protocol 应用代码..."
 APP_RES="${APP_BUNDLE}/Contents/Resources/app"
-APP_ITEMS=(brain senses protocol body_web version.txt config.example.yaml)
+APP_ITEMS=(brain senses protocol version.txt config.example.yaml)
 if (( WITH_GODOT == 1 )); then
   APP_ITEMS+=(body_godot)
 fi

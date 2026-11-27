@@ -88,7 +88,7 @@ class SystemHelloPayload(ProtocolModel):
     client_name: str
     role: SourceRole
     client_type: Optional[
-        Literal["body_godot", "body_web", "body_macos", "body_windows", "senses"]
+        Literal["body_godot", "body_macos", "body_windows", "senses"]
     ] = None
     platform: Optional[str] = None
     app_version: Optional[str] = None

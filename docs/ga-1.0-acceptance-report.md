@@ -1,5 +1,7 @@
 # 启明星（Qimingxing）GA 1.0（v1.0.0）验收报告
 
+> **历史文档（2026-11-27 归档）**：v1.1 已移除 `body_web`，原生壳为唯一 UI；文中的版本号与测试数反映当时口径。
+
 - **目标版本**：`v1.0.0`（分支 `feat/ga-1.0`）
 - **版本唯一口径**：`version.txt` = `1.0.0`（同步至 `pyproject.toml`、`brain/hub.py:SERVER_VERSION`、`Qimingxing.app/Contents/Info.plist` 与 `system.hello.app_version`）
 - **应用产物**：`dist/Qimingxing.app`（原生 `arm64` Swift 6 壳，默认不打包/不启动 Godot）

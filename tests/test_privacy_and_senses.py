@@ -130,10 +130,13 @@ def test_artifact_store_save_burn_ttl_and_http_upload(tmp_path: Path) -> None:
         )
         assert r_big.status_code == 413
 
-        # Verify static hosting of 3-file body_web
-        assert client.get("/").status_code == 200
-        assert client.get("/app.js").status_code == 200
-        assert client.get("/styles.css").status_code == 200
+        # Native-only UI: `/` is a JSON service descriptor, the old web app is gone.
+        root = client.get("/")
+        assert root.status_code == 200
+        assert root.json()["service"] == "qimingxing"
+        assert root.json()["ui"] == "native"
+        assert client.get("/app.js").status_code == 404
+        assert client.get("/styles.css").status_code == 404
 
 
 def test_macos_quartz_frontmost_picker_skips_overlays_and_tracks_chrome() -> None:
