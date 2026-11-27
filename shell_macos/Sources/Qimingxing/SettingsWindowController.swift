@@ -167,12 +167,20 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let brainClient: BrainClient
     private let supervisor: ProcessSupervisor
     private let desktopActions: DesktopActions
+    private let windowCoordinator: WindowCoordinator?
+    private var windowLease: WindowLease?
     private let store = SettingsViewStore()
 
-    init(brainClient: BrainClient, supervisor: ProcessSupervisor, desktopActions: DesktopActions) {
+    init(
+        brainClient: BrainClient,
+        supervisor: ProcessSupervisor,
+        desktopActions: DesktopActions,
+        windowCoordinator: WindowCoordinator? = nil
+    ) {
         self.brainClient = brainClient
         self.supervisor = supervisor
         self.desktopActions = desktopActions
+        self.windowCoordinator = windowCoordinator
         super.init()
     }
 
@@ -183,7 +191,29 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         ensureWindow()
         desktopActions.refreshNotificationAuthorizationStatus()
         Task { await store.reload(brainClient: brainClient) }
-        NSApp.activate(ignoringOtherApps: true)
+        windowLease = windowCoordinator?.present(
+            WindowRequest(role: .settings, activation: .required)
+        )
+        if windowCoordinator == nil {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func hide() {
+        window?.orderOut(nil)
+        if let lease = windowLease, let windowCoordinator {
+            windowCoordinator.dismiss(lease)
+        }
+        windowLease = nil
+    }
+
+    /// Coordinator suspend: keep the window (and its draft) alive, just hide.
+    func orderOutForSuspend() {
+        window?.orderOut(nil)
+    }
+
+    func restoreFromSuspend() {
         window?.makeKeyAndOrderFront(nil)
     }
 
@@ -207,7 +237,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             brainClient: brainClient,
             supervisor: supervisor,
             desktopActions: desktopActions,
-            onClose: { [weak self] in self?.window?.orderOut(nil) }
+            onClose: { [weak self] in self?.hide() }
         )
 
         let hosting = NSHostingController(rootView: root)
@@ -225,7 +255,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        sender.orderOut(nil)
+        hide()
         return false
     }
 }

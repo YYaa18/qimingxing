@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var approvalController: ApprovalSheetController!
     private var workspaceStore: WorkspaceStore!
     private var workspaceController: WorkspaceWindowController!
+    private var windowCoordinator: WindowCoordinator!
+    private var focusArbitrator: FocusArbitrator!
     private let hotkeyManager = HotkeyManager()
     private var cancellables = Set<AnyCancellable>()
 
@@ -79,10 +81,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         workspaceStore = WorkspaceStore(brainClient: brainClient)
+        windowCoordinator = WindowCoordinator()
+        focusArbitrator = FocusArbitrator()
         quickEntryController = QuickEntryController(
             brainClient: brainClient,
             desktopActions: desktopActions,
-            workspaceStore: workspaceStore
+            workspaceStore: workspaceStore,
+            windowCoordinator: windowCoordinator,
+            focusArbitrator: focusArbitrator
         )
         dropPocketController = DropPocketController(brainClient: brainClient)
         dropPocketController.onDeliverToQuickEntry = { [weak self] attachments, snippets in
@@ -99,10 +105,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController = SettingsWindowController(
             brainClient: brainClient,
             supervisor: supervisor,
-            desktopActions: desktopActions
+            desktopActions: desktopActions,
+            windowCoordinator: windowCoordinator
         )
         approvalController = ApprovalSheetController(brainClient: brainClient)
         workspaceController = WorkspaceWindowController(store: workspaceStore, brainClient: brainClient)
+        wireWindowCoordinator()
 
         MediaViewerLauncher.openHandler = { [weak self] prefersLargeWindow in
             guard let self else { return }
@@ -228,6 +236,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return false
+    }
+
+    private func wireWindowCoordinator() {
+        windowCoordinator.onPresent = { [weak self] role, policy in
+            self?.focusArbitrator.activate(for: role, policy: policy)
+        }
+        windowCoordinator.onSuspend = { [weak self] role, _ in
+            switch role {
+            case .quickEntry:
+                self?.quickEntryController.orderOutForSuspend()
+            case .settings:
+                self?.settingsController.orderOutForSuspend()
+            default:
+                break
+            }
+        }
+        windowCoordinator.onResume = { [weak self] role in
+            switch role {
+            case .quickEntry:
+                self?.quickEntryController.restoreFromSuspend()
+            case .settings:
+                self?.settingsController.restoreFromSuspend()
+            default:
+                break
+            }
+        }
     }
 
     private func wireEvents() {

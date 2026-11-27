@@ -61,6 +61,9 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private let brainClient: BrainClient
     private let desktopActions: DesktopActions
     private let workspaceStore: WorkspaceStore
+    private let windowCoordinator: WindowCoordinator?
+    private let focusArbitrator: FocusArbitrator?
+    private var windowLease: WindowLease?
     private let inputState = QuickEntryInputState()
     private var cancellables = Set<AnyCancellable>()
     private var preWingOriginX: CGFloat?
@@ -82,11 +85,15 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     init(
         brainClient: BrainClient,
         desktopActions: DesktopActions,
-        workspaceStore: WorkspaceStore
+        workspaceStore: WorkspaceStore,
+        windowCoordinator: WindowCoordinator? = nil,
+        focusArbitrator: FocusArbitrator? = nil
     ) {
         self.brainClient = brainClient
         self.desktopActions = desktopActions
         self.workspaceStore = workspaceStore
+        self.windowCoordinator = windowCoordinator
+        self.focusArbitrator = focusArbitrator
         super.init()
         wireExpansion()
         installFocusRecovery()
@@ -114,6 +121,12 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
                           let panel = self.panel,
                           closingObjectID != ObjectIdentifier(panel)
                     else { return }
+                    // While suspended (Settings/Workspace/Media owns the key)
+                    // recovery must not fight the coordinator.
+                    if let coordinator = self.windowCoordinator,
+                       coordinator.keyOwner != .quickEntry {
+                        return
+                    }
                     try? await Task.sleep(nanoseconds: 120_000_000)
                     guard panel.isVisible else { return }
                     guard NSApp.keyWindow == nil || NSApp.keyWindow === panel else { return }
@@ -135,6 +148,10 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
                           panel.isVisible,
                           !panel.isKeyWindow
                     else { return }
+                    if let coordinator = self.windowCoordinator,
+                       coordinator.keyOwner != .quickEntry {
+                        return
+                    }
                     panel.makeKey()
                     self.inputState.focusRequestToken = UUID()
                     NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
@@ -349,6 +366,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         }
         ensurePanel()
         guard let panel else { return }
+        presentAsWindow()
         refreshExpansion()
         resizePanel(animated: false)
         positionPanel()
@@ -360,14 +378,39 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         DispatchQueue.main.async { [weak panel] in
             panel?.makeKey()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak panel] in
-            guard let panel, panel.isVisible else { return }
-            // A panel can be the key window while the app is inactive; that
-            // still swallows keystrokes. Activate in that case too.
-            guard !NSApp.isActive || !panel.isKeyWindow else { return }
-            NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self, weak panel] in
+            guard let self, let panel, panel.isVisible else { return }
+            // The coordinator already activated the app on present. Only the
+            // no-coordinator path (previews) still needs the manual fallback:
+            // a panel can be key while the app is inactive and swallow keys.
+            if self.windowCoordinator == nil {
+                guard !NSApp.isActive || !panel.isKeyWindow else { return }
+                NSApp.activate(ignoringOtherApps: true)
+            }
             panel.makeKey()
         }
+    }
+
+    private func presentAsWindow() {
+        guard let windowCoordinator else { return }
+        windowLease = windowCoordinator.present(
+            WindowRequest(role: .quickEntry, activation: .required)
+        )
+    }
+
+    /// Hide the panel without destroying it or its draft (coordinator suspend).
+    func orderOutForSuspend() {
+        stopHeightDriver()
+        panel?.orderOut(nil)
+    }
+
+    /// Bring a suspended panel back without re-running `show()`'s side effects.
+    func restoreFromSuspend() {
+        guard let panel else { return }
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeKey()
+        inputState.focusRequestToken = UUID()
+        NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
     }
 
     func openWithStagedItems(attachments: [StagedAttachment], textSnippets: [String]) {
@@ -429,8 +472,17 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     func hideAndRestoreFocus() {
         stopHeightDriver()
         inputState.isWorkspaceWingOpen = false
+        if let lease = windowLease, let windowCoordinator {
+            windowCoordinator.dismiss(lease)
+        }
+        windowLease = nil
         panel?.orderOut(nil)
-        if let prev = previousApp, !prev.isTerminated {
+        // A resumed content window (e.g. Settings) keeps focus in-app; only
+        // hand focus back to the external app when nothing else owns the key.
+        if windowCoordinator?.keyOwner == nil {
+            focusArbitrator?.restoreIfAppropriate()
+        }
+        if focusArbitrator == nil, let prev = previousApp, !prev.isTerminated {
             prev.activate(options: [])
         }
         previousApp = nil
