@@ -88,6 +88,16 @@ enum UIPreviewDumper {
                 width: 1920, height: 1080, durationSec: 18, sizeBytes: 4_200_000
             ),
         ]
+        let demoCard = OutputCardItem(
+            cardId: "card_demo",
+            cardType: "spoiler_steps",
+            title: "红狮子城 Boss 提示",
+            contentMarkdown: "- 第一阶段先清小怪，别急着贴脸\n- 听到长吼后再翻滚，二阶段会重置仇恨\n\n| 阶段 | 应对 |\n| --- | --- |\n| P1 | 绕背 |\n| P2 | 拉开距离 |",
+            actions: [
+                CardActionItem(id: "more_hint", label: "还是没头绪，看第 2 级提示"),
+                CardActionItem(id: "dismiss", label: "知道了，收起"),
+            ]
+        )
         let workspaceItems = [
             WorkspaceItem(
                 id: "turn_demo",
@@ -164,7 +174,8 @@ enum UIPreviewDumper {
                 meta: "启明星 · DeepSeek Flash",
                 text: "可以使用标准库 `socket` 在 10 行内完成：\n\n```python\nimport socket\nwith socket.socket() as s:\n    print(s.connect_ex(('127.0.0.1', 18790)) == 0)\n```\n\n如果返回 `True` 说明端口已被监听。\n\n**端口检查结果**\n\n| 检查项 | 结果 |\n| --- | --- |\n| 18790 | 已监听 |\n| 返回值 | 0 |",
                 sources: demoSources,
-                media: demoMedia
+                media: demoMedia,
+                cards: [demoCard]
             )
         ]
         let inputState2 = QuickEntryInputState()
@@ -186,6 +197,24 @@ enum UIPreviewDumper {
         render(makeChat(), size: CGSize(width: QuickEntryLayout.chatWidth, height: 520), to: outputDir.appendingPathComponent("quick_entry_chat.png"))
         let chatHeight = measuredChatHeight > 0 ? measuredChatHeight : 430
         render(makeChat(), size: CGSize(width: QuickEntryLayout.chatWidth, height: chatHeight), to: outputDir.appendingPathComponent("quick_entry_chat.png"))
+
+        // 2b. Card-only answer: no spoken text, no media. The card is the answer.
+        client.messages = [
+            ChatEntry(id: "u2", turnId: "t2", isUser: true, meta: "我", text: "给我一个不剧透的 Boss 提示"),
+            ChatEntry(
+                id: "a2",
+                turnId: "t2",
+                isUser: false,
+                meta: "启明星 · DeepSeek Flash",
+                text: "",
+                cards: [demoCard]
+            ),
+        ]
+        client.isGenerating = false
+        measuredChatHeight = 0
+        render(makeChat(), size: CGSize(width: QuickEntryLayout.chatWidth, height: 420), to: outputDir.appendingPathComponent("quick_entry_card_only.png"))
+        let cardHeight = measuredChatHeight > 0 ? measuredChatHeight : 360
+        render(makeChat(), size: CGSize(width: QuickEntryLayout.chatWidth, height: cardHeight), to: outputDir.appendingPathComponent("quick_entry_card_only.png"))
 
         // 2c. Quick Entry with the attached workspace wing
         let inputStateWing = QuickEntryInputState()
