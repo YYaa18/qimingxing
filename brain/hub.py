@@ -2895,7 +2895,7 @@ class Hub:
                 await _drain_text_delta_buffer()
             except Exception:
                 logger.debug(
-                    "Failed flushing text deltas on error path", exc_info=True
+                    "Failed flushing pending text deltas", exc_info=True
                 )
             await self._send_with_mirrors(
                 conn,
@@ -2945,7 +2945,7 @@ class Hub:
                 await _drain_text_delta_buffer()
             except Exception:
                 logger.debug(
-                    "Failed flushing text deltas on error path", exc_info=True
+                    "Failed flushing pending text deltas", exc_info=True
                 )
             await conn.send_envelope(
                 make_envelope(
@@ -2983,7 +2983,7 @@ class Hub:
                 await _drain_text_delta_buffer()
             except Exception:
                 logger.debug(
-                    "Failed flushing text deltas on error path", exc_info=True
+                    "Failed flushing pending text deltas", exc_info=True
                 )
             await conn.send_envelope(
                 make_envelope(
