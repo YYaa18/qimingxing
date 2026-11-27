@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import tempfile
 import time
 import uuid
@@ -17,6 +18,10 @@ DEFAULT_MAX_ARTIFACT_BYTES = 10 * 1024 * 1024  # 10 MB
 DEFAULT_TTL_SECONDS = 300  # 5 minutes
 
 ArtifactKind = Literal["image", "text", "pdf"]
+
+# Artifact ids are server-generated (`art_<hex>`), but `delete` is reachable
+# from a client-supplied id over the WebSocket, so validate before globbing.
+_ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _PDF_EXTS = {".pdf"}
@@ -252,16 +257,27 @@ class ArtifactStore:
 
     def delete(self, artifact_id: str) -> bool:
         """Physically remove a temporary artifact file immediately after use."""
-        if not artifact_id:
+        if not artifact_id or not _ARTIFACT_ID_RE.fullmatch(str(artifact_id)):
+            logger.warning("Rejected artifact delete with invalid id: %r", artifact_id)
             return False
         rec = self._records.pop(artifact_id, None)
         removed = False
+        base_dir = self.base_dir.resolve()
         if rec is not None and rec.path.exists():
             rec.path.unlink(missing_ok=True)
             removed = True
         else:
             for candidate in self.base_dir.glob(f"{artifact_id}.*"):
-                candidate.unlink(missing_ok=True)
+                try:
+                    resolved = candidate.resolve()
+                except OSError:
+                    continue
+                # `Path.glob` accepts `..`; containment must be re-checked
+                # after resolution, not inferred from the pattern.
+                if resolved.parent != base_dir:
+                    logger.warning("Skipped artifact delete outside root: %s", candidate)
+                    continue
+                resolved.unlink(missing_ok=True)
                 removed = True
         if removed:
             logger.debug("Deleted temporary artifact %s", artifact_id)

@@ -347,7 +347,8 @@ class Hub:
         self._active_audio_inputs: Dict[str, _AudioInputBuffer] = {}
         self._latest_audio_turn_by_client: Dict[str, str] = {}
         self._tts_tasks: Dict[str, asyncio.Task[None]] = {}
-        self._session_approved_tools: set[str] = set()
+        # Approval "remember" is scoped per client identity, not process-wide.
+        self._approved_tools_by_client: Dict[str, set[str]] = {}
         # card_id -> allowed action ids. Cards stay clickable after the turn
         # ends, so entries are evicted FIFO by capacity, not per turn.
         self._card_actions: Dict[str, set[str]] = {}
@@ -733,6 +734,15 @@ class Hub:
             await self._handle_action(conn, env, payload)
             return
 
+    @staticmethod
+    def _approval_scope_key(conn: ClientConnection) -> str:
+        return conn.client_name or conn.client_id
+
+    def _approval_scope_set(self, conn: ClientConnection) -> set[str]:
+        return self._approved_tools_by_client.setdefault(
+            self._approval_scope_key(conn), set()
+        )
+
     def _register_card_actions(self, card_id: str, action_ids: List[str]) -> None:
         if not card_id:
             return
@@ -749,7 +759,7 @@ class Hub:
     ) -> None:
         if payload.action == "clear_history":
             self.memory_store.clear(conn.client_id)
-            self._session_approved_tools.clear()
+            self._approved_tools_by_client.pop(self._approval_scope_key(conn), None)
             if self.memory_backend is not None:
                 prev_session = await self.memory_backend.get_or_create_active_session()
                 await self.memory_backend.create_new_session(archive_previous=True)
@@ -2725,7 +2735,7 @@ class Hub:
                     memory_backend=self.memory_backend,
                     context_store=self.context_store,
                     cancel_event=cancel_event,
-                    session_approved_tools=self._session_approved_tools,
+                    session_approved_tools=self._approval_scope_set(conn),
                     on_status=_on_status,
                     on_approval=_on_approval,
                     on_ask_user=_on_ask_user,

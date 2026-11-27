@@ -375,7 +375,7 @@ def test_hub_approval_allow_deny_remember_and_turn_cancel() -> None:
             assert len(confirm_tool.calls) == 2
 
             # Turn 4: Cancel mid-approval using kill_switch when session approval cleared
-            app.state.hub._session_approved_tools.clear()
+            app.state.hub._approved_tools_by_client.clear()
             ws.send_text(
                 json.dumps(
                     {

@@ -717,6 +717,21 @@ class AppConfig:
             sanitized = sanitized.replace(secret, "***REDACTED***")
         sanitized = re.sub(r"Bearer\s+[A-Za-z0-9._\-]{8,}", "Bearer ***REDACTED***", sanitized)
         sanitized = re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}\b", "***REDACTED***", sanitized)
+        # Credential formats that commonly leak through shell/file output even
+        # when they were never configured in this app.
+        sanitized = re.sub(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "***REDACTED***", sanitized)
+        sanitized = re.sub(
+            r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b", "***REDACTED***", sanitized
+        )
+        sanitized = re.sub(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "***REDACTED***", sanitized)
+        sanitized = re.sub(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b", "***REDACTED***", sanitized)
+        sanitized = re.sub(r"\bAIza[0-9A-Za-z_\-]{35}\b", "***REDACTED***", sanitized)
+        sanitized = re.sub(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            "***REDACTED***",
+            sanitized,
+            flags=re.DOTALL,
+        )
         return sanitized
 
     def list_public_profiles(self) -> List[ProfileInfo]:
