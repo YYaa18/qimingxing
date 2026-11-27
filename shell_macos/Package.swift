@@ -31,6 +31,11 @@ let package = Package(
                 .linkedFramework("UserNotifications"),
                 .linkedFramework("ServiceManagement")
             ]
+        ),
+        .testTarget(
+            name: "QimingxingTests",
+            dependencies: ["Qimingxing"],
+            path: "Tests/QimingxingTests"
         )
     ]
 )
