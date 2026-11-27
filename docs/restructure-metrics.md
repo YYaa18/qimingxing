@@ -224,6 +224,22 @@ wc -l brain/main.py brain/rich_content.py brain/rich/*.py brain/app/routes/*.py
 
 `RouteDeps` 显式传递共享对象；`brain.rich_content` 的公共 import 全部保持可用（hub、task_runner、browser tools、tests 未改）。
 
+### 3.8 Phase 5b 证据（hub 包）
+
+```bash
+.venv/bin/python -m pytest -q   # 296 passed
+wc -l brain/hub/*.py
+```
+
+| 文件 | 行数 |
+|---|---:|
+| `hub/__init__.py` | 6 |
+| `hub/connection.py` | 48 |
+| `hub/ui_state.py` | 94 |
+| `hub/core.py` | 3,109（原 3,207） |
+
+公共 import 未改；`Hub` 通过 `UIStateMixin` 复用搬出的方法。剩余 approvals/turns/media 待搬。
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
