@@ -678,7 +678,9 @@ final class DropPocketController: NSObject, ObservableObject, NSWindowDelegate {
         TaskToastController.shared.show(
             title: "已派发 · \(ShelfQuickSlot.summary.rawValue)",
             message: "正在后台处理暂存素材，完成后将在工作区与通知提示",
-            isError: false
+            style: .info,
+            actionTitle: "查看结果",
+            route: .workspace(taskId: "")
         ) {
             NotificationCenter.default.post(name: .qmxOpenWorkspace, object: nil)
         }
@@ -949,7 +951,9 @@ final class DropPocketController: NSObject, ObservableObject, NSWindowDelegate {
             TaskToastController.shared.show(
                 title: "已派发 · \(slot.rawValue)",
                 message: "正在后台处理素材，完成后将在工作区与通知提示",
-                isError: false
+                style: .info,
+                actionTitle: "查看结果",
+                route: .workspace(taskId: "")
             ) {
                 NotificationCenter.default.post(name: .qmxOpenWorkspace, object: nil)
             }

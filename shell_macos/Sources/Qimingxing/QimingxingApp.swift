@@ -256,6 +256,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onSpatialLasso: { [weak self] in self?.spatialLassoController.startSelection() }
             )
         }
+        TaskToastController.shared.nativeNotificationHandler = { [weak self] title, message, route, _ in
+            self?.desktopActions.deliverNativeNotification(
+                title: title,
+                body: message,
+                route: route
+            )
+        }
+        desktopActions.onNotificationRouteRequested = { [weak self] route in
+            guard let self else { return }
+            TaskToastController.shared.close()
+            switch route {
+            case .quickEntry:
+                self.quickEntryController.show()
+            case .workspace:
+                if self.quickEntryController.isVisible, !self.brainClient.messages.isEmpty {
+                    self.quickEntryController.showWorkspaceWing()
+                } else {
+                    self.workspaceController.show()
+                }
+            case .settings(let tab):
+                self.settingsController.show(tab: tab)
+            case .systemURL(let urlString):
+                if let url = URL(string: urlString) {
+                    NSWorkspace.shared.open(url)
+                }
+            case .none:
+                break
+            }
+        }
         desktopActions.onNotificationOpenRequested = { [weak self] _ in
             self?.quickEntryController.show()
         }

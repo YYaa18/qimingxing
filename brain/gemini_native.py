@@ -274,9 +274,31 @@ def build_request(
 
 
 def grounding_sources(metadata: Dict[str, Any]) -> List[Dict[str, str]]:
+    chunks = (metadata or {}).get("groundingChunks") or []
+    supports = (metadata or {}).get("groundingSupports") or []
+    chunk_snippets: Dict[int, List[str]] = {}
+    if isinstance(supports, list):
+        for support in supports:
+            if not isinstance(support, dict):
+                continue
+            seg = support.get("segment") or {}
+            seg_text = " ".join(str(seg.get("text") or "").split()).strip() if isinstance(seg, dict) else ""
+            if not seg_text:
+                continue
+            indices = support.get("groundingChunkIndices") or []
+            if not isinstance(indices, list):
+                continue
+            for idx in indices:
+                if not isinstance(idx, int):
+                    continue
+                bucket = chunk_snippets.setdefault(idx, [])
+                clipped = seg_text[:100]
+                if clipped not in bucket and len(bucket) < 2:
+                    bucket.append(clipped)
+
     sources: List[Dict[str, str]] = []
     seen: set[str] = set()
-    for chunk in (metadata or {}).get("groundingChunks") or []:
+    for idx, chunk in enumerate(chunks):
         if not isinstance(chunk, dict):
             continue
         web = chunk.get("web") or {}
@@ -286,7 +308,14 @@ def grounding_sources(metadata: Dict[str, Any]) -> List[Dict[str, str]]:
         if not uri or uri in seen:
             continue
         seen.add(uri)
-        sources.append({"url": uri, "title": str(web.get("title") or uri)})
+        entry: Dict[str, str] = {
+            "url": uri,
+            "title": str(web.get("title") or uri),
+        }
+        snippets = chunk_snippets.get(idx) or []
+        if snippets:
+            entry["snippet"] = " / ".join(snippets)[:160]
+        sources.append(entry)
         if len(sources) >= 6:
             break
     return sources

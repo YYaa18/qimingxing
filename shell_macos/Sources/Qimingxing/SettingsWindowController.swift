@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import ServiceManagement
 import SwiftUI
 
@@ -180,6 +181,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             store.selectedSection = sec
         }
         ensureWindow()
+        desktopActions.refreshNotificationAuthorizationStatus()
         Task { await store.reload(brainClient: brainClient) }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -494,10 +496,12 @@ struct SettingsRootView: View {
     @AppStorage("qmx.answerFontSize") private var answerFontSize: Double = 16
     @AppStorage("qmx.answerMaxLines") private var answerMaxLines: Int = 30
     @AppStorage("qmx.dropPocket.dragShakeEnabled") private var dragShakeEnabled: Bool = false
+    @AppStorage(DesktopActions.inAppToastEnabledKey) private var inAppToastEnabled: Bool = true
+    @AppStorage(DesktopActions.nativeNotificationsEnabledKey) private var nativeNotificationsEnabled: Bool = true
     @ObservedObject var store: SettingsViewStore
     @ObservedObject var brainClient: BrainClient
     let supervisor: ProcessSupervisor
-    let desktopActions: DesktopActions
+    @ObservedObject var desktopActions: DesktopActions
     let onClose: () -> Void
 
     @State private var showingCustomProvider = false
@@ -505,6 +509,10 @@ struct SettingsRootView: View {
     @State private var removedProviderIDs: Set<String> = []
     @State private var providerFeedback: [String: ProviderFeedback] = [:]
     @State private var busyProviders: Set<String> = []
+    @State private var accessibilityGranted = AXIsProcessTrusted()
+    @State private var screenRecordingGranted = CGPreflightScreenCaptureAccess()
+    @State private var microphoneGranted = PermissionGuideHelper.isGranted(.microphone)
+    @State private var speechGranted = PermissionGuideHelper.isGranted(.speechRecognition)
 
     var body: some View {
         HStack(spacing: 0) {
@@ -514,6 +522,12 @@ struct SettingsRootView: View {
         }
         .frame(minWidth: 760, minHeight: 520)
         .background(QMXTheme.window)
+        .onAppear {
+            refreshSystemPermissionStatuses()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshSystemPermissionStatuses()
+        }
         .sheet(isPresented: $showingCustomProvider) {
             CustomProviderSheet { provider in
                 store.providers.append(provider)
@@ -792,19 +806,117 @@ struct SettingsRootView: View {
                 .help("不超过该行数时完整展示；超过后固定高度并允许滚动。")
             }
 
-            Section("系统权限") {
-                HStack {
-                    Text("屏幕录制、麦克风与自动化权限")
-                        .font(.system(size: 13))
+            Section("通知与提示") {
+                Toggle("显示应用内毛玻璃提示弹窗", isOn: $inAppToastEnabled)
+                    .frame(minHeight: 38)
+
+                Toggle(isOn: $nativeNotificationsEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("同步推送 macOS 原生系统通知")
+                        Text("通过通知中心横幅推送结果与权限提醒，点击「查看结果」可直接回到启明星")
+                            .font(.system(size: 11))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                    }
+                }
+                .padding(.vertical, 2)
+
+                HStack(spacing: 10) {
+                    StatusDot(
+                        color: desktopActions.notificationAuthState.isReady
+                            ? QMXTheme.success
+                            : (desktopActions.notificationAuthState == .denied ? QMXTheme.warning : QMXTheme.textTertiary),
+                        size: 7
+                    )
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("macOS 通知权限")
+                            .font(.system(size: 13))
+                        Text(desktopActions.notificationAuthState.displayLabel)
+                            .font(.system(size: 11))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                    }
                     Spacer()
-                    Button("打开系统设置") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
-                            NSWorkspace.shared.open(url)
+                    Button("测试通知") {
+                        TaskToastController.shared.show(
+                            title: "已原位替换",
+                            message: "内容已写回目标应用选区 · 通知样式与系统横幅测试",
+                            style: .success,
+                            actionTitle: "查看结果",
+                            route: .quickEntry,
+                            mirrorToSystem: true
+                        ) {
+                            NotificationCenter.default.post(name: .qmxOpenQuickEntry, object: nil)
                         }
                     }
                     .buttonStyle(.qmxSecondary)
+
+                    if desktopActions.notificationAuthState == .notDetermined {
+                        Button("请求权限") {
+                            desktopActions.requestNotificationAuthorization()
+                        }
+                        .buttonStyle(.qmxProminent)
+                    } else {
+                        Button("通知设置") {
+                            desktopActions.openSystemNotificationSettings()
+                        }
+                        .buttonStyle(.qmxSecondary)
+                    }
                 }
-                .frame(minHeight: 40)
+                .padding(.vertical, 2)
+            }
+
+            Section("系统权限") {
+                HStack(spacing: 14) {
+                    DraggableAppBundleIcon(size: 44)
+                        .frame(width: 44, height: 44)
+                        .padding(6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(QMXTheme.surfaceRaised)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(QMXTheme.accent.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        )
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("拖放「启明星」图标到系统设置即可授权")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("按住左侧应用图标，直接拖入系统设置的「辅助功能」或「屏幕录制」列表中；也可点击右侧「拖放授权」打开置顶引导卡片")
+                            .font(.system(size: 11))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("刷新") {
+                        refreshSystemPermissionStatuses()
+                    }
+                    .buttonStyle(.qmxSecondary)
+                }
+                .padding(.vertical, 4)
+
+                permissionStatusRow(
+                    title: "辅助功能（原位替换 / 划词）",
+                    granted: accessibilityGranted,
+                    actionTitle: accessibilityGranted ? "已就绪" : "拖放授权"
+                ) {
+                    PermissionGuideController.shared.show(for: .accessibility, openSettings: true)
+                }
+
+                permissionStatusRow(
+                    title: "屏幕录制（圈选看屏 / 截屏）",
+                    granted: screenRecordingGranted,
+                    actionTitle: screenRecordingGranted ? "已就绪" : "拖放授权"
+                ) {
+                    PermissionGuideController.shared.show(for: .screenRecording, openSettings: true)
+                }
+
+                permissionStatusRow(
+                    title: "麦克风与语音识别",
+                    granted: microphoneGranted && speechGranted,
+                    actionTitle: "打开设置"
+                ) {
+                    PermissionGuideHelper.openSystemSettings(for: microphoneGranted ? .speechRecognition : .microphone)
+                }
 
                 HStack {
                     Text("运行日志")
@@ -825,6 +937,38 @@ struct SettingsRootView: View {
             }
 
         }
+    }
+
+    private func refreshSystemPermissionStatuses() {
+        accessibilityGranted = PermissionGuideHelper.isGranted(.accessibility)
+        screenRecordingGranted = PermissionGuideHelper.isGranted(.screenRecording)
+        microphoneGranted = PermissionGuideHelper.isGranted(.microphone)
+        speechGranted = PermissionGuideHelper.isGranted(.speechRecognition)
+    }
+
+    private func permissionStatusRow(
+        title: String,
+        granted: Bool,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            StatusDot(color: granted ? QMXTheme.success : QMXTheme.warning, size: 7)
+            Text(title)
+                .font(.system(size: 13))
+            Spacer()
+            Text(granted ? "已授权" : "未授权")
+                .font(.system(size: 11))
+                .foregroundStyle(granted ? QMXTheme.success : QMXTheme.textTertiary)
+            if granted {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.qmxSecondary)
+            } else {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.qmxProminent)
+            }
+        }
+        .frame(minHeight: 38)
     }
 
     private var routingPane: some View {

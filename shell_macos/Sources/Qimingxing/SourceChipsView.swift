@@ -12,18 +12,18 @@ struct SourceChipsView: View {
                         Button {
                             open(source)
                         } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "globe")
-                                    .font(.system(size: 11, weight: .medium))
+                            HStack(spacing: 5) {
+                                Image(systemName: iconName(for: source.domain))
+                                    .font(.system(size: 10.5, weight: .medium))
                                 Text(trimmed(source.title))
                                     .font(.system(size: 11, weight: .medium))
                                     .lineLimit(1)
                                 Image(systemName: "arrow.up.right")
                                     .font(.system(size: 9, weight: .semibold))
-                                    .opacity(0.7)
+                                    .opacity(0.65)
                             }
                             .foregroundStyle(QMXTheme.textSecondary)
-                            .padding(.horizontal, 8)
+                            .padding(.horizontal, 9)
                             .frame(height: 24)
                             .background(
                                 Capsule(style: .continuous)
@@ -42,6 +42,17 @@ struct SourceChipsView: View {
             }
             .frame(height: 26)
         }
+    }
+
+    private func iconName(for domain: String) -> String {
+        let host = domain.lowercased()
+        if host.contains("youtube.com") || host.contains("youtu.be") || host.contains("bilibili.com") {
+            return "play.rectangle.fill"
+        }
+        if host.contains("github.com") {
+            return "chevron.left.forwardslash.chevron.right"
+        }
+        return "globe"
     }
 
     private func trimmed(_ title: String) -> String {

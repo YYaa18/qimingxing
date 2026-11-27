@@ -376,14 +376,15 @@ final class SpatialLassoController: NSObject {
 
         if !CGPreflightScreenCaptureAccess() {
             CGRequestScreenCaptureAccess()
+            let prefsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             TaskToastController.shared.show(
                 title: "需要屏幕录制权限",
-                message: "请在系统设置 → 隐私与安全性 → 录屏与系统录音 中授权启明星",
-                isError: true
+                message: "拖放启明星图标到系统「屏幕录制」列表即可完成授权",
+                style: .error,
+                actionTitle: "去拖放授权",
+                route: .systemURL(prefsURL)
             ) {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                    NSWorkspace.shared.open(url)
-                }
+                PermissionGuideController.shared.show(for: .screenRecording, openSettings: true)
             }
             return
         }
@@ -452,14 +453,15 @@ final class SpatialLassoController: NSObject {
             // Wait briefly for the overlay window server surface to disappear cleanly
             try? await Task.sleep(nanoseconds: 50_000_000)
             guard let cgImage = await self.captureRegion(globalRect, on: screen) else {
+                let prefsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
                 TaskToastController.shared.show(
                     title: "截屏失败",
-                    message: "请检查 macOS 屏幕录制权限是否有效",
-                    isError: true
+                    message: "拖放启明星图标到系统「屏幕录制」列表后即可重试",
+                    style: .error,
+                    actionTitle: "去拖放授权",
+                    route: .systemURL(prefsURL)
                 ) {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    PermissionGuideController.shared.show(for: .screenRecording, openSettings: true)
                 }
                 return
             }

@@ -43,7 +43,14 @@ from brain.memory.models import (
 from brain.memory.retrieval import MemoryRetriever
 from brain.memory.skills import SkillManager
 from brain.prompts import BASE_SYSTEM_PROMPT
-from brain.rich_content import clean_answer_and_sources, collect_media, extract_table_media
+from brain.rich_content import (
+    clean_answer_and_sources,
+    collect_media,
+    extract_source_snippets,
+    extract_table_media,
+    label_sources_with_llm,
+    needs_source_labeling,
+)
 from protocol.models import MediaItem, SourceItem
 from brain.screen_router import DeepSeekOCRProvider, ScreenUnderstandingRouter
 from brain.stream_parser import CardEvent, EmotionEvent, StreamParser, TextEvent
@@ -2770,6 +2777,20 @@ class Hub:
             assistant_reply, source_payloads = clean_answer_and_sources(
                 raw_assistant_reply, raw_sources
             )
+            if source_payloads and needs_source_labeling(source_payloads):
+                fast_profile = self.config.resolve_slot_profile("fast_utility")
+                use_tagger = not (
+                    profile.provider == "mock"
+                    and fast_profile.provider == "mock"
+                    and type(self.llm_router).stream_chat is LLMRouter.stream_chat
+                )
+                source_payloads = await label_sources_with_llm(
+                    source_payloads,
+                    context_text=table_source,
+                    snippets_by_url=extract_source_snippets(raw_sources),
+                    llm_router=self.llm_router if use_tagger else None,
+                    profile_name=fast_profile.name or profile.name,
+                )
             media_payloads = collect_media(media_paths)
             if tool_media_items:
                 by_path = {

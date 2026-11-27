@@ -411,13 +411,17 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         let targetApp = previousApp
         inputState.ghostWriteTurnId = nil
         hideAndRestoreFocus()
-        GhostWriteEngine.replaceSelection(with: answer, targetApp: targetApp) { replaced in
+        GhostWriteEngine.replaceSelection(with: answer, targetApp: targetApp) { [weak self] replaced in
             if replaced {
                 TaskToastController.shared.show(
                     title: "已原位替换",
                     message: "内容已写回目标应用选区",
-                    isError: false
-                ) {}
+                    style: .success,
+                    actionTitle: "查看结果",
+                    route: .quickEntry
+                ) {
+                    self?.show()
+                }
             }
         }
     }
