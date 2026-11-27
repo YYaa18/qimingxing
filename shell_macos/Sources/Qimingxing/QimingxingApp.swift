@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var brainClient: BrainClient!
     private var menuBarController: MenuBarController!
     private var quickEntryController: QuickEntryController!
+    private var dropPocketController: DropPocketController!
     private var settingsController: SettingsWindowController!
     private var approvalController: ApprovalSheetController!
     private var workspaceStore: WorkspaceStore!
@@ -30,6 +31,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("--verify-streaming") {
             StreamingEngineVerifier.runAll()
+            NSApp.terminate(nil)
+            return
+        }
+        if args.contains("--verify-phase1") {
+            Phase1Verifier.runAll()
             NSApp.terminate(nil)
             return
         }
@@ -66,6 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             desktopActions: desktopActions,
             workspaceStore: workspaceStore
         )
+        dropPocketController = DropPocketController(brainClient: brainClient)
+        dropPocketController.onDeliverToQuickEntry = { [weak self] attachments, snippets in
+            self?.quickEntryController.openWithStagedItems(attachments: attachments, textSnippets: snippets)
+        }
         settingsController = SettingsWindowController(
             brainClient: brainClient,
             supervisor: supervisor,
@@ -104,8 +114,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self?.quickEntryController.shiftHorizontally(by: dx)
                     }
                 )
-            }
+            },
+            onOpenDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() }
         )
+        dropPocketController.onPendingCountChanged = { [weak self] count in
+            self?.menuBarController.setDropPocketBadgeCount(count)
+        }
 
         wireEvents()
         registerHotkeys()
@@ -213,7 +227,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 cancel: cancelHk,
                 onQuickEntry: { [weak self] in self?.quickEntryController.toggle() },
                 onSettings: { [weak self] in self?.settingsController.show() },
-                onEmergencyStop: { [weak self] in self?.brainClient.cancelActiveTurn(reason: "hotkey_stop") }
+                onEmergencyStop: { [weak self] in self?.brainClient.cancelActiveTurn(reason: "hotkey_stop") },
+                onDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() }
             )
         }
         desktopActions.onNotificationOpenRequested = { [weak self] _ in
@@ -299,7 +314,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.registerDefaults(
             onQuickEntry: { [weak self] in self?.quickEntryController.toggle() },
             onSettings: { [weak self] in self?.settingsController.show() },
-            onEmergencyStop: { [weak self] in self?.brainClient.cancelActiveTurn(reason: "hotkey_stop") }
+            onEmergencyStop: { [weak self] in self?.brainClient.cancelActiveTurn(reason: "hotkey_stop") },
+            onDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() }
         )
     }
 }

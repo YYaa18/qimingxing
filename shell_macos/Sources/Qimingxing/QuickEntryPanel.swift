@@ -25,6 +25,20 @@ enum QuickEntryLayout {
         let promptSpacing: CGFloat = promptHeight > 0 ? 10 : 0
         return panelChrome + inputExtraHeight + attachmentBarHeight + stagePadding + promptHeight + promptSpacing + statusBarHeight
     }
+
+    static func attachmentBarHeight(stagedCount: Int, uploadingCount: Int) -> CGFloat {
+        (stagedCount == 0 && uploadingCount == 0) ? 0 : 38
+    }
+
+    static func inputExtraHeight(for text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let charsPerLine = 28
+        var lines = 0
+        for line in text.components(separatedBy: "\n") {
+            lines += max(1, Int(ceil(Double(line.count) / Double(charsPerLine))))
+        }
+        return CGFloat(min(max(lines - 1, 0), 8)) * 24
+    }
 }
 
 @MainActor
@@ -265,6 +279,17 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         .store(in: &cancellables)
     }
 
+    private var idleContentHeight: CGFloat {
+        let errorH: CGFloat = brainClient.errorBannerText.isEmpty ? 0 : 40
+        return QuickEntryLayout.idleHeight
+            + QuickEntryLayout.attachmentBarHeight(
+                stagedCount: inputState.stagedAttachments.count,
+                uploadingCount: inputState.uploadingNames.count
+            )
+            + errorH
+            + QuickEntryLayout.inputExtraHeight(for: inputState.text)
+    }
+
     private func refreshExpansion() {
         let expanded = inputState.forceExpanded
             || brainClient.isGenerating
@@ -273,8 +298,9 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         inputState.isExpanded = expanded
         if !expanded {
             heightEngine.reset()
-            lastChatHeight = QuickEntryLayout.idleHeight
-            targetChatHeight = QuickEntryLayout.idleHeight
+            let target = idleContentHeight
+            lastChatHeight = target
+            targetChatHeight = target
         }
     }
 
@@ -288,14 +314,17 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     }
 
     private var desiredPanelHeight: CGFloat {
-        guard inputState.isExpanded else { return QuickEntryLayout.idleHeight }
+        guard inputState.isExpanded else { return idleContentHeight }
         if lastTurnHasAnswer {
             return QuickEntryLayout.answeringHeight
         }
         return QuickEntryLayout.compactThinkingHeight(
             promptHeight: 25,
-            attachmentBarHeight: 0,
-            inputExtraHeight: 0
+            attachmentBarHeight: QuickEntryLayout.attachmentBarHeight(
+                stagedCount: inputState.stagedAttachments.count,
+                uploadingCount: inputState.uploadingNames.count
+            ),
+            inputExtraHeight: QuickEntryLayout.inputExtraHeight(for: inputState.text)
         )
     }
 
@@ -333,6 +362,24 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKey()
         }
+    }
+
+    func openWithStagedItems(attachments: [StagedAttachment], textSnippets: [String]) {
+        for attachment in attachments where !inputState.stagedAttachments.contains(where: { $0.artifactId == attachment.artifactId }) {
+            inputState.stagedAttachments.append(attachment)
+        }
+        let joined = textSnippets
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        if !joined.isEmpty {
+            if inputState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                inputState.text = joined
+            } else {
+                inputState.text += "\n" + joined
+            }
+        }
+        show()
     }
 
     func hideAndRestoreFocus() {
@@ -814,6 +861,9 @@ struct QuickEntryRootView: View {
         .onChange(of: inputState.uploadingNames.count) { _ in
             onDesiredHeightChange(chatHeight)
         }
+        .onChange(of: brainClient.errorBannerText) { _ in
+            onDesiredHeightChange(chatHeight)
+        }
         .onChange(of: latestTurn?.media.map(\.mediaId)) { _ in
             guard !MediaViewerWindowController.shared.isVisible else { return }
             guard inputState.isWorkspaceWingOpen else { return }
@@ -830,6 +880,11 @@ struct QuickEntryRootView: View {
 
             if attachmentBarHeight > 0 {
                 attachmentBar
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if errorBannerHeight > 0 {
+                errorBanner
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
@@ -893,54 +948,103 @@ struct QuickEntryRootView: View {
     }
 
     private var attachmentBar: some View {
-        HStack(spacing: 7) {
-            ForEach(inputState.stagedAttachments) { attachment in
-                HStack(spacing: 6) {
-                    Image(systemName: attachmentSymbol(attachment.kind))
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(QMXTheme.accent)
-                    Text(attachment.filename)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(QMXTheme.textPrimary)
-                        .lineLimit(1)
-                    Button {
-                        inputState.stagedAttachments.removeAll { $0.id == attachment.id }
-                        onDesiredHeightChange(chatHeight)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(QMXTheme.textTertiary)
-                            .frame(width: 14, height: 14)
-                            .contentShape(Rectangle())
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                ForEach(inputState.stagedAttachments) { attachment in
+                    HStack(spacing: 6) {
+                        Image(systemName: attachmentSymbol(attachment.kind))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(QMXTheme.accent)
+                        Text(attachment.filename)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(QMXTheme.textPrimary)
+                            .lineLimit(1)
+                        Button {
+                            inputState.stagedAttachments.removeAll { $0.id == attachment.id }
+                            onDesiredHeightChange(chatHeight)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(QMXTheme.textTertiary)
+                                .frame(width: 14, height: 14)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 9)
+                    .frame(height: 26)
+                    .background(Capsule().fill(QMXTheme.surfaceRaised))
+                    .overlay(Capsule().strokeBorder(QMXTheme.hairline, lineWidth: 0.5))
                 }
-                .padding(.horizontal, 9)
-                .frame(height: 26)
-                .background(Capsule().fill(QMXTheme.surfaceRaised))
-                .overlay(Capsule().strokeBorder(QMXTheme.hairline, lineWidth: 0.5))
-            }
 
-            ForEach(inputState.uploadingNames, id: \.self) { name in
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.65)
-                        .frame(width: 12, height: 12)
-                    Text(name)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(QMXTheme.textTertiary)
-                        .lineLimit(1)
+                ForEach(inputState.uploadingNames, id: \.self) { name in
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.65)
+                            .frame(width: 12, height: 12)
+                        Text(name)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 9)
+                    .frame(height: 26)
+                    .background(Capsule().fill(QMXTheme.surfaceMuted))
                 }
-                .padding(.horizontal, 9)
-                .frame(height: 26)
-                .background(Capsule().fill(QMXTheme.surfaceMuted))
             }
-
-            Spacer(minLength: 0)
+            .padding(.horizontal, 20)
         }
-        .padding(.horizontal, 20)
         .frame(height: attachmentBarHeight)
+    }
+
+    private var errorBanner: some View {
+        let msg = brainClient.errorBannerText
+        let needsRouting = msg.contains("VISION")
+            || msg.contains("模型")
+            || msg.contains("400")
+            || msg.contains("API")
+            || msg.contains("视觉")
+        return HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(QMXTheme.warning)
+            Text(msg)
+                .font(.system(size: 11.5))
+                .foregroundStyle(QMXTheme.textPrimary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            if needsRouting {
+                Button("模型设置") {
+                    NotificationCenter.default.post(name: .qmxOpenSettings, object: "routing")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(QMXTheme.accent)
+                .buttonStyle(.plain)
+            }
+            Button {
+                brainClient.errorBannerText = ""
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(QMXTheme.textTertiary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(QMXTheme.warning.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(QMXTheme.warning.opacity(0.32), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 20)
+        .frame(height: errorBannerHeight)
     }
 
     private func attachmentSymbol(_ kind: String) -> String {
@@ -1015,6 +1119,17 @@ struct QuickEntryRootView: View {
                         .transition(reduceMotion ? .identity : .opacity)
                 }
                 workspaceLink
+            } else if !brainClient.errorBannerText.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(QMXTheme.warning)
+                    Text(brainClient.errorBannerText)
+                        .font(.system(size: 13))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
             } else {
                 Text("…")
                     .font(.system(size: 22))
@@ -1279,20 +1394,20 @@ struct QuickEntryRootView: View {
     }
 
     private var attachmentBarHeight: CGFloat {
-        (inputState.stagedAttachments.isEmpty && inputState.uploadingNames.isEmpty) ? 0 : 38
+        QuickEntryLayout.attachmentBarHeight(
+            stagedCount: inputState.stagedAttachments.count,
+            uploadingCount: inputState.uploadingNames.count
+        )
     }
 
-    /// Let the composer grow up to three extra lines so a pasted multi-line
+    private var errorBannerHeight: CGFloat {
+        brainClient.errorBannerText.isEmpty ? 0 : 40
+    }
+
+    /// Let the composer grow up to eight extra lines so a pasted multi-line
     /// instruction stays readable instead of hiding behind a one-line frame.
     private var inputExtraHeight: CGFloat {
-        let text = inputState.text
-        guard !text.isEmpty else { return 0 }
-        let charsPerLine = 28
-        var lines = 0
-        for line in text.components(separatedBy: "\n") {
-            lines += max(1, Int(ceil(Double(line.count) / Double(charsPerLine))))
-        }
-        return CGFloat(min(max(lines - 1, 0), 8)) * 24
+        QuickEntryLayout.inputExtraHeight(for: inputState.text)
     }
 
     private var promptBlockHeight: CGFloat {
@@ -1319,7 +1434,7 @@ struct QuickEntryRootView: View {
             160,
             visibleHeight - 24 - QuickEntryLayout.panelChrome - inputExtraHeight - 40 - prompt - promptSpacing
                 - foldedStatusHeight - 26 - 10
-                - sourceBarHeight - sourceGap - mediaBarHeight - mediaGap - attachmentBarHeight
+                - sourceBarHeight - sourceGap - mediaBarHeight - mediaGap - attachmentBarHeight - errorBannerHeight
         )
         return min(CGFloat(answerMaxLines) * answerLineHeight, screenCap)
     }
@@ -1327,7 +1442,7 @@ struct QuickEntryRootView: View {
     private var naturalAnswerChatHeight: CGFloat {
         let thinkingBase = QuickEntryLayout.compactThinkingHeight(
             promptHeight: promptBlockHeight,
-            attachmentBarHeight: attachmentBarHeight,
+            attachmentBarHeight: attachmentBarHeight + errorBannerHeight,
             inputExtraHeight: inputExtraHeight
         )
         let measured = answerContentHeight
@@ -1341,7 +1456,7 @@ struct QuickEntryRootView: View {
         let capped = min(measured, maxLinesContentHeight)
         let stage = 40 + promptBlock + promptSpacing + foldedStatusHeight + capped
             + sourceBarHeight + sourceGap + mediaBarHeight + mediaGap
-            + attachmentBarHeight + 26 + 10
+            + attachmentBarHeight + errorBannerHeight + 26 + 10
         return max(
             thinkingBase,
             QuickEntryLayout.panelChrome + inputExtraHeight + stage
@@ -1353,11 +1468,11 @@ struct QuickEntryRootView: View {
     /// under the user's cursor. Resets only on collapse / New Chat.
     private var chatHeight: CGFloat {
         if !inputState.isExpanded {
-            return QuickEntryLayout.idleHeight + attachmentBarHeight + inputExtraHeight
+            return QuickEntryLayout.idleHeight + attachmentBarHeight + errorBannerHeight + inputExtraHeight
         }
         let thinkingBase = QuickEntryLayout.compactThinkingHeight(
             promptHeight: promptBlockHeight,
-            attachmentBarHeight: attachmentBarHeight,
+            attachmentBarHeight: attachmentBarHeight + errorBannerHeight,
             inputExtraHeight: inputExtraHeight
         )
         if isThinking || latestTurn?.answer.isEmpty != false {
@@ -1841,12 +1956,19 @@ private struct StreamingAnswerContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-        case .codeBlock(let language, let code, _):
+        case .codeBlock(let language, let code, let isClosed):
             VStack(alignment: .leading, spacing: 6) {
-                if !language.isEmpty {
-                    Text(language)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(QMXTheme.textTertiary)
+                HStack(spacing: 6) {
+                    if !language.isEmpty {
+                        Text(language)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                    }
+                    Spacer(minLength: 0)
+                    if isClosed, !code.isEmpty, !QMXTheme.isHeadlessDump {
+                        QMXDragOutHandle(payload: .code(language: language, code: code))
+                            .frame(width: 22, height: 22)
+                    }
                 }
                 Text(code.isEmpty ? " " : code)
                     .font(.system(size: codeFontSize, design: .monospaced))

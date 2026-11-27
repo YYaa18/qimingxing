@@ -347,6 +347,16 @@ struct QMXTableNotice: View {
 
             Spacer(minLength: 0)
 
+            if !isStreaming, !QMXTheme.isHeadlessDump {
+                let parsedRaw = (table.columns.isEmpty && !table.raw.isEmpty) ? QMXMarkdownTables.scan(table.raw).first : nil
+                let dragCols = !table.columns.isEmpty ? table.columns : (parsedRaw?.columns ?? media?.previewColumns ?? [])
+                let dragRows = !table.rows.isEmpty ? table.rows : (parsedRaw?.rows ?? media?.previewRows ?? [])
+                if !dragCols.isEmpty {
+                    QMXDragOutHandle(payload: .table(title: table.title, columns: dragCols, rows: dragRows))
+                        .frame(width: 22, height: 22)
+                }
+            }
+
             if showsAction {
                 Text("媒体区")
                     .font(.system(size: 10.5, weight: .medium))
@@ -518,6 +528,11 @@ struct InlineMarkdownTableView: View {
             }
             .buttonStyle(.plain)
             .help(copied ? "已复制 TSV" : "复制 TSV")
+
+            if !isStreaming, !QMXTheme.isHeadlessDump, !headers.isEmpty {
+                QMXDragOutHandle(payload: .table(title: title, columns: headers, rows: rows))
+                    .frame(width: 22, height: 22)
+            }
 
             if let onOpen {
                 Button(action: onOpen) {

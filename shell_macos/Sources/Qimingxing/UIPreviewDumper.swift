@@ -375,8 +375,70 @@ enum UIPreviewDumper {
             allowRemember: true,
             timeoutSec: 48
         )
-        let aprView = ApprovalModalView(item: aprItem) { _, _, _ in }
-        render(aprView, size: CGSize(width: 440, height: 360), to: outputDir.appendingPathComponent("approval_modal.png"))
+        let aprView = ApprovalModalView(
+            item: aprItem,
+            queueIndex: 0,
+            queueTotal: 2
+        ) { _, _, _ in }
+        render(aprView, size: CGSize(width: 440, height: 372), to: outputDir.appendingPathComponent("approval_modal.png"))
+
+        // 5a. Drop Shelf (Scheme C: 3 states)
+        let pocketController = DropPocketController(brainClient: client)
+        let shelfEmpty = EdgeShelfRootView(controller: pocketController, onClose: {})
+        render(
+            shelfEmpty,
+            size: ScreenEdgeResolver.targetSize(for: .idleEar, itemCount: 0),
+            to: outputDir.appendingPathComponent("drop_pocket_empty.png")
+        )
+
+        let expandedController = DropPocketController(brainClient: client)
+        expandedController.configureForPreview(edge: .right, phase: .dragExpanded(hoveredSlot: .summary), items: [])
+        render(
+            EdgeShelfRootView(controller: expandedController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: .summary), itemCount: 0),
+            to: outputDir.appendingPathComponent("drop_pocket_expanded.png")
+        )
+
+        let stashedController = DropPocketController(brainClient: client)
+        let sampleImage = NSImage(contentsOfFile: repoPath + "/body_godot/assets/sprites/happy.png")
+        let stashedDemoItems = [
+            DropPocketItem(
+                id: UUID(),
+                filename: "happy.png",
+                kind: "image",
+                isUploading: false,
+                attachment: StagedAttachment(artifactId: "a1", filename: "happy.png", kind: "image"),
+                thumbnail: sampleImage
+            ),
+            DropPocketItem(
+                id: UUID(),
+                filename: "架构方案.pdf",
+                kind: "pdf",
+                isUploading: false,
+                attachment: StagedAttachment(artifactId: "a2", filename: "架构方案.pdf", kind: "pdf"),
+                thumbnail: NSWorkspace.shared.icon(forFile: "/tmp/sample.pdf")
+            ),
+            DropPocketItem(
+                id: UUID(),
+                filename: "接口调试日志片段",
+                kind: "text",
+                isUploading: false,
+                textSnippet: "curl -s http://127.0.0.1:18790/health"
+            ),
+            DropPocketItem(
+                id: UUID(),
+                filename: "extra.md",
+                kind: "file",
+                isUploading: false,
+                textSnippet: "more"
+            ),
+        ]
+        stashedController.configureForPreview(edge: .right, phase: .stashedStack, items: stashedDemoItems)
+        render(
+            EdgeShelfRootView(controller: stashedController, onClose: {}),
+            size: ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: stashedDemoItems.count),
+            to: outputDir.appendingPathComponent("drop_pocket_stashed.png")
+        )
 
         // 5b. Detached media viewer with a virtual markdown table
         let tableView = MediaViewerContent(model: MediaViewerModel.shared, mode: .detached)
@@ -729,7 +791,10 @@ enum StreamingEngineVerifier {
         let shrink = engine.evaluate(measured: 180, maxAllowed: 700, currentHeight: 210, isExpanded: true)
         check(shrink.target >= 210 && !shrink.shouldUpdate, "monotonic height must never shrink within a turn")
 
-        // Explicit collapse resets back to 120
+        // Explicit collapse resets back to 120 (or idle height with staged attachments)
+        let idleWithAttachment = engine.evaluate(measured: 158, maxAllowed: 700, currentHeight: 120, isExpanded: false)
+        check(idleWithAttachment.target == 158 && idleWithAttachment.shouldUpdate, "idle with staged attachment must grow to 158")
+
         let reset = engine.evaluate(measured: 120, maxAllowed: 700, currentHeight: 212, isExpanded: false)
         check(reset.target == 120 && reset.shouldUpdate, "collapse must reset back to 120")
     }
@@ -753,5 +818,148 @@ enum StreamingEngineVerifier {
 
         let noTable = qmxMediaWithoutInlineTables([tableMedia, imgMedia], answer: "仅卡片表格")
         check(noTable.count == 2, "standalone card table without inline markdown should remain in media strip")
+    }
+}
+
+@MainActor
+enum Phase1Verifier {
+    private static func check(_ condition: Bool, _ message: String) {
+        if !condition {
+            fatalError("PHASE1_VERIFY FAIL: \(message)")
+        }
+    }
+
+    static func runAll() {
+        verifyDropPocketGeometry()
+        verifyHoldToApproveAndQueue()
+        verifyFilePromiseSerialization()
+        print("PHASE1_VERIFY PASS")
+    }
+
+    private static func verifyDropPocketGeometry() {
+        let primary = ShelfScreenBounds(
+            frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: 36, width: 1440, height: 839)
+        )
+        let secondary = ShelfScreenBounds(
+            frame: CGRect(x: 1440, y: 0, width: 1920, height: 1080),
+            visibleFrame: CGRect(x: 1440, y: 0, width: 1920, height: 1055)
+        )
+
+        // 1. Single screen: cursor near left docks .left, cursor near right docks .right
+        let leftPlace = ScreenEdgeResolver.resolve(for: CGPoint(x: 200, y: 400), screens: [primary])
+        check(leftPlace.edge == .left, "single screen left cursor should dock left")
+        let leftIdleFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: leftPlace)
+        check(abs(leftIdleFrame.minX - primary.visibleFrame.minX) < 0.5, "left dock must sit flush at minX")
+        check(leftIdleFrame.size == CGSize(width: 48, height: 220), "idle ear size must be 48x220")
+
+        let rightPlace = ScreenEdgeResolver.resolve(for: CGPoint(x: 1300, y: 500), screens: [primary])
+        check(rightPlace.edge == .right, "single screen right cursor should dock right")
+
+        // 2. Dual screen seam avoidance: cursor near inner seam on left monitor avoids seam and docks .left
+        let dualLeftInner = ScreenEdgeResolver.resolve(for: CGPoint(x: 1410, y: 450), screens: [primary, secondary])
+        check(dualLeftInner.edge == .left, "left screen with seam on right must dock to outer left edge")
+
+        // Cursor near inner seam on right monitor avoids seam and docks .right
+        let dualRightInner = ScreenEdgeResolver.resolve(for: CGPoint(x: 1460, y: 450), screens: [primary, secondary])
+        check(dualRightInner.edge == .right, "right screen with seam on left must dock to outer right edge")
+
+        // 3. Vertical clamping with 24pt top/bottom margin
+        let topNear = ScreenEdgeResolver.resolve(for: CGPoint(x: 3300, y: 1075), screens: [primary, secondary])
+        let topFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.dragExpandedSize, placement: topNear)
+        check(topFrame.maxY <= secondary.visibleFrame.maxY - 24 + 0.5, "expanded shelf must clamp top edge by 24pt")
+        check(abs(topFrame.maxX - secondary.visibleFrame.maxX) < 0.5, "right expanded shelf must stay anchored flush on right edge")
+
+        let botNear = ScreenEdgeResolver.resolve(for: CGPoint(x: 3300, y: 5), screens: [primary, secondary])
+        let botFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.dragExpandedSize, placement: botNear)
+        check(botFrame.minY >= secondary.visibleFrame.minY + 24 - 0.5, "expanded shelf must clamp bottom edge by 24pt")
+
+        // 4. Target sizes across all 3 phases + edge-anchored resize invariant
+        let expSize = ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: .summary), itemCount: 0)
+        check(expSize == CGSize(width: 224, height: 220), "dragExpanded size must be 224x220")
+        let stashed1 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 1)
+        let stashed3 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 5)
+        check(stashed1.width == 112 && stashed1.height >= 176, "stashed 1-item size mismatch")
+        check(stashed3 == CGSize(width: 112, height: 288), "stashed 3+-item size mismatch: \(stashed3)")
+
+        let earRightFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: rightPlace)
+        let expRightFrame = ScreenEdgeResolver.frame(for: expSize, placement: rightPlace)
+        check(abs(earRightFrame.maxX - expRightFrame.maxX) < 0.5, "right-docked expansion must keep right edge fixed")
+
+        // 5. Non-activating panel check
+        let shelfPanel = DropShelfPanel(
+            contentRect: NSRect(origin: .zero, size: ScreenEdgeResolver.idleEarSize),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        check(!shelfPanel.canBecomeKey && !shelfPanel.canBecomeMain, "DropShelfPanel must never steal key/main focus")
+    }
+
+    private static func verifyHoldToApproveAndQueue() {
+        let now = Date()
+        var hold = HoldToApproveState(appearedAt: now)
+        check(!hold.canClickInReduceMotion(now: now.addingTimeInterval(0.20)), "reduce motion must wait 400ms cooldown")
+        check(hold.canClickInReduceMotion(now: now.addingTimeInterval(0.45)), "reduce motion should unlock after 400ms")
+
+        hold.beginHold()
+        // Early release at 0.25s must cancel and reset progress
+        for _ in 0..<5 {
+            let triggered = hold.advance(dt: 0.05)
+            check(!triggered, "0.25s hold must not trigger approval")
+        }
+        check(hold.progress > 0.4 && hold.progress < 0.7, "progress should be ~0.55 at 0.25s")
+        hold.cancelHold()
+        check(hold.progress == 0 && !hold.didTrigger, "early release must reset progress to 0")
+
+        // Full 0.45s hold triggers once
+        hold.beginHold()
+        var triggeredCount = 0
+        for _ in 0..<10 {
+            if hold.advance(dt: 0.05) {
+                triggeredCount += 1
+            }
+        }
+        check(triggeredCount == 1 && hold.didTrigger, "0.45s hold must trigger exactly once")
+
+        // Stacked queue model
+        let queue = ApprovalQueueModel()
+        let item1 = PendingApprovalItem(approvalId: "a1", turnId: "t1", toolName: "browser_act", riskLevel: "confirm", summary: "1", details: [:], options: [], isClarification: false, allowRemember: true, timeoutSec: 60)
+        let item2 = PendingApprovalItem(approvalId: "a2", turnId: "t1", toolName: "macos_mail_draft", riskLevel: "confirm", summary: "2", details: [:], options: [], isClarification: false, allowRemember: true, timeoutSec: 60)
+        queue.sync([item1, item2])
+        check(queue.items.count == 2 && queue.currentItem?.approvalId == "a1", "queue should start on first item")
+        queue.step(by: 1)
+        check(queue.currentItem?.approvalId == "a2", "queue step should advance to second item")
+        queue.remove(approvalId: "a2")
+        check(queue.currentItem?.approvalId == "a1", "removing resolved item should keep valid selection")
+    }
+
+    private static func verifyFilePromiseSerialization() {
+        let csv = QMXFilePromiseSerializer.csvData(
+            columns: ["名称", "备注"],
+            rows: [["启明星", "支持 \"引号\", 逗号"]]
+        )
+        let csvStr = String(data: csv, encoding: .utf8) ?? ""
+        check(csv.starts(with: [0xEF, 0xBB, 0xBF]), "CSV must include UTF-8 BOM for Excel/Numbers")
+        check(csvStr.contains("\"支持 \"\"引号\"\", 逗号\""), "CSV must RFC-4180 escape quotes and commas")
+
+        check(QMXFilePromiseSerializer.fileExtension(forLanguage: "python") == "py", "python -> .py")
+        check(QMXFilePromiseSerializer.fileExtension(forLanguage: "swift") == "swift", "swift -> .swift")
+        check(
+            QMXFilePromiseSerializer.suggestedFilename(for: .table(title: "端口/状态:检查", columns: ["A"], rows: [["1"]])) == "端口_状态_检查.csv",
+            "table filename must sanitize invalid path chars and append .csv"
+        )
+
+        // Lazy write check
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("qmx_promise_test_\(UUID().uuidString.prefix(6))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let targetURL = tmpDir.appendingPathComponent("out.csv")
+        try? QMXFilePromiseSerializer.write(
+            payload: .table(title: "Test", columns: ["Col"], rows: [["Val"]]),
+            to: targetURL
+        )
+        check(FileManager.default.fileExists(atPath: targetURL.path), "lazy write must produce target CSV file")
     }
 }

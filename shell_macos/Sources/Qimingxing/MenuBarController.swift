@@ -13,6 +13,8 @@ final class MenuBarController: NSObject {
     private let onOpenQuickEntry: () -> Void
     private let onOpenSettings: () -> Void
     private let onOpenWorkspace: () -> Void
+    private let onOpenDropPocket: (() -> Void)?
+    private var dropPocketBadgeCount: Int = 0
 
     init(
         brainClient: BrainClient,
@@ -20,7 +22,8 @@ final class MenuBarController: NSObject {
         desktopActions: DesktopActions,
         onOpenQuickEntry: @escaping () -> Void,
         onOpenSettings: @escaping () -> Void,
-        onOpenWorkspace: @escaping () -> Void
+        onOpenWorkspace: @escaping () -> Void,
+        onOpenDropPocket: (() -> Void)? = nil
     ) {
         self.brainClient = brainClient
         self.supervisor = supervisor
@@ -28,6 +31,7 @@ final class MenuBarController: NSObject {
         self.onOpenQuickEntry = onOpenQuickEntry
         self.onOpenSettings = onOpenSettings
         self.onOpenWorkspace = onOpenWorkspace
+        self.onOpenDropPocket = onOpenDropPocket
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
 
@@ -36,16 +40,24 @@ final class MenuBarController: NSObject {
         configureContextMenu()
     }
 
+    func setDropPocketBadgeCount(_ count: Int) {
+        dropPocketBadgeCount = max(0, count)
+        statusItem.button?.image = Self.makeStarImage(size: 16, hasBadge: dropPocketBadgeCount > 0)
+        statusItem.button?.toolTip = dropPocketBadgeCount > 0
+            ? "启明星 Qimingxing（投喂口袋中有 \(dropPocketBadgeCount) 项素材）"
+            : "启明星 Qimingxing"
+    }
+
     private func configureButton() {
         guard let btn = statusItem.button else { return }
-        btn.image = Self.makeStarImage(size: 16)
+        btn.image = Self.makeStarImage(size: 16, hasBadge: dropPocketBadgeCount > 0)
         btn.toolTip = "启明星 Qimingxing"
         btn.target = self
         btn.action = #selector(handleStatusButtonClick(_:))
         btn.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    private static func makeStarImage(size: CGFloat) -> NSImage {
+    private static func makeStarImage(size: CGFloat, hasBadge: Bool = false) -> NSImage {
         let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
             let center = CGPoint(x: rect.midX, y: rect.midY)
             let outer = min(rect.width, rect.height) / 2 - 1
@@ -63,6 +75,12 @@ final class MenuBarController: NSObject {
             path.close()
             NSColor.black.setFill()
             path.fill()
+
+            if hasBadge {
+                let badgeRect = NSRect(x: rect.maxX - 4.5, y: rect.maxY - 4.5, width: 4, height: 4)
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: badgeRect).fill()
+            }
             return true
         }
         image.isTemplate = true
@@ -77,6 +95,10 @@ final class MenuBarController: NSObject {
             onOpenQuickEntry: { [weak self] in
                 self?.popover.performClose(nil)
                 self?.onOpenQuickEntry()
+            },
+            onOpenDropPocket: { [weak self] in
+                self?.popover.performClose(nil)
+                self?.onOpenDropPocket?()
             },
             onOpenSettings: { [weak self] in
                 self?.popover.performClose(nil)
@@ -95,13 +117,14 @@ final class MenuBarController: NSObject {
 
     private func updatePopoverSize() {
         let taskRows = min(2, brainClient.backgroundTasks.filter(\.isActive).count)
-        let height: CGFloat = 354 + (taskRows == 0 ? 0 : 22 + CGFloat(taskRows) * 44)
+        let height: CGFloat = 392 + (taskRows == 0 ? 0 : 22 + CGFloat(taskRows) * 44)
         popover.contentSize = NSSize(width: 280, height: height)
     }
 
     private func configureContextMenu() {
         let items: [(String, Selector)] = [
             ("打开对话", #selector(menuQuickEntry)),
+            ("投喂口袋 (⌥D)", #selector(menuDropPocket)),
             ("打开工作区", #selector(menuWorkspace)),
             ("设置与 API Key", #selector(menuSettings)),
             ("打开日志目录", #selector(menuOpenLogs)),
@@ -145,6 +168,7 @@ final class MenuBarController: NSObject {
     }
 
     @objc private func menuQuickEntry() { onOpenQuickEntry() }
+    @objc private func menuDropPocket() { onOpenDropPocket?() }
     @objc private func menuSettings() { onOpenSettings() }
     @objc private func menuWorkspace() { onOpenWorkspace() }
     @objc private func menuOpenLogs() { desktopActions.openLogsDirectory() }
@@ -157,6 +181,7 @@ struct MenuBarPopoverView: View {
     let supervisor: ProcessSupervisor
     let desktopActions: DesktopActions
     let onOpenQuickEntry: () -> Void
+    var onOpenDropPocket: (() -> Void)? = nil
     let onOpenSettings: () -> Void
     let onOpenWorkspace: () -> Void
     let onQuit: () -> Void
@@ -172,6 +197,14 @@ struct MenuBarPopoverView: View {
                     keycap: "⌥Space",
                     action: onOpenQuickEntry
                 )
+                if let onOpenDropPocket {
+                    MenuActionRow(
+                        icon: "tray.and.arrow.down",
+                        title: "投喂口袋",
+                        keycap: "⌥D",
+                        action: onOpenDropPocket
+                    )
+                }
                 MenuActionRow(
                     icon: "gearshape",
                     title: "设置与 API Key",

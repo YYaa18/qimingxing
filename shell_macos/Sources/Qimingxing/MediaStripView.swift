@@ -142,6 +142,13 @@ struct MediaStripView: View {
         .frame(width: width, height: height)
         .frame(maxWidth: width == nil ? .infinity : nil)
         .clipped()
+        .overlay(alignment: .topTrailing) {
+            if !QMXTheme.isHeadlessDump, let path = item.fileURL?.path, FileManager.default.fileExists(atPath: path) {
+                QMXDragOutHandle(payload: .file(path: path, suggestedName: item.title))
+                    .frame(width: 22, height: 22)
+                    .padding(4)
+            }
+        }
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .gesture(ExclusiveGesture(doubleTap, singleTap))
         .help(attributionCaption(item) ?? item.title)
@@ -179,6 +186,15 @@ struct MediaStripView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
+                if !QMXTheme.isHeadlessDump {
+                    if item.isMarkdownTable, !item.previewColumns.isEmpty {
+                        QMXDragOutHandle(payload: .table(title: item.title, columns: item.previewColumns, rows: item.previewRows))
+                            .frame(width: 22, height: 22)
+                    } else if let path = item.fileURL?.path, FileManager.default.fileExists(atPath: path) {
+                        QMXDragOutHandle(payload: .file(path: path, suggestedName: item.title))
+                            .frame(width: 22, height: 22)
+                    }
+                }
                 Image(systemName: "arrow.up.forward")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(QMXTheme.textTertiary)

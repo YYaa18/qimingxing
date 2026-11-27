@@ -18,6 +18,7 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Carbon"),
                 .linkedFramework("QuickLookUI"),
+                .linkedFramework("QuickLookThumbnailing"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("UserNotifications"),
                 .linkedFramework("ServiceManagement")

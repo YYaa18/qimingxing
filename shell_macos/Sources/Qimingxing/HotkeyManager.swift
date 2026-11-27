@@ -12,7 +12,8 @@ final class HotkeyManager {
     func registerDefaults(
         onQuickEntry: @escaping @MainActor () -> Void,
         onSettings: @escaping @MainActor () -> Void,
-        onEmergencyStop: @escaping @MainActor () -> Void
+        onEmergencyStop: @escaping @MainActor () -> Void,
+        onDropPocket: (@MainActor () -> Void)? = nil
     ) {
         unregisterAll()
         Self.sharedInstance = self
@@ -21,15 +22,20 @@ final class HotkeyManager {
         register(id: 1, keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey), action: onQuickEntry)
         register(id: 2, keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(optionKey), action: onSettings)
         register(id: 3, keyCode: UInt32(kVK_Escape), modifiers: UInt32(optionKey), action: onEmergencyStop)
+        if let onDropPocket {
+            register(id: 4, keyCode: UInt32(kVK_ANSI_D), modifiers: UInt32(optionKey), action: onDropPocket)
+        }
     }
 
     func updateFromStrings(
         chatInput: String,
         settings: String,
         cancel: String,
+        dropPocket: String = "option+d",
         onQuickEntry: @escaping @MainActor () -> Void,
         onSettings: @escaping @MainActor () -> Void,
-        onEmergencyStop: @escaping @MainActor () -> Void
+        onEmergencyStop: @escaping @MainActor () -> Void,
+        onDropPocket: (@MainActor () -> Void)? = nil
     ) {
         unregisterAll()
         Self.sharedInstance = self
@@ -49,6 +55,13 @@ final class HotkeyManager {
             register(id: 3, keyCode: kc, modifiers: mods, action: onEmergencyStop)
         } else {
             register(id: 3, keyCode: UInt32(kVK_Escape), modifiers: UInt32(optionKey), action: onEmergencyStop)
+        }
+        if let onDropPocket {
+            if let (kc, mods) = Self.parseHotkey(dropPocket) {
+                register(id: 4, keyCode: kc, modifiers: mods, action: onDropPocket)
+            } else {
+                register(id: 4, keyCode: UInt32(kVK_ANSI_D), modifiers: UInt32(optionKey), action: onDropPocket)
+            }
         }
     }
 
@@ -136,6 +149,7 @@ final class HotkeyManager {
             "space": kVK_Space,
             "esc": kVK_Escape,
             "escape": kVK_Escape,
+            "d": kVK_ANSI_D,
             "h": kVK_ANSI_H,
             "k": kVK_ANSI_K,
             "j": kVK_ANSI_J,
