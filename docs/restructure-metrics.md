@@ -21,7 +21,7 @@ git worktree add /tmp/qmx-baseline 22ca135
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
 |---|---:|---:|---:|
-| Python 测试 | 276 | ≥276 | **282**（Phase 1a：+6） |
+| Python 测试 | 276 | ≥276 | **293**（Phase 1a +6，1c +11） |
 | Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **27**（Phase 1a） |
 | `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | **0**（Phase 1b） |
 | `body_web` 代码行 | 1,933 | 0 | **0**（Phase 1b） |
@@ -64,13 +64,13 @@ git worktree add /tmp/qmx-baseline 22ca135
 
 | 项 | 基线证据 | 目标 | 实测 |
 |---|---|---|---|
-| artifact 路径穿越删除 | 探针：`ArtifactStore.delete("../victim")` 返回 `True`，`victim.txt` 被删除 | 拒绝并保留文件 | 待填 |
-| HTTP 跨站请求 | 无 middleware；24 个路由各自 inline 判 loopback；无 Host/Origin/Content-Type 校验（`brain/main.py:316`） | 外部 Origin / 非法 Host / `text/plain` 写请求 403/415 | 待填 |
-| 绑定地址 | `QIMINGXING_HOST` 未校验直接传给 uvicorn（`brain/main.py:1085`） | 只绑回环 | 待填 |
-| shell 读凭据 | `cat ~/.aws/credentials` 判为 `safe`（`shell_tool.py:18` 无 `.aws`；`:118-122` 前缀判定） | 工作区外审批；凭据目录硬拒绝 | 待填 |
-| 输出脱敏 | 只覆盖已配置密钥 / `Bearer` / `sk-`（`config.py:711-720`），`AKIA…` 不遮 | 覆盖常见凭据格式 | 待填 |
-| MCP 子进程环境 | 配了 `env:` 时 `{**os.environ, **srv.env}`（`mcp_client.py:418`）；未配时 SDK 6 变量 allowlist | 父进程环境不透传 | 待填 |
-| 审批记住 scope | 进程级全局 `set`（`hub.py:350`），重启即失效；shell 已按命令前缀（`shell_tool.py:125-155`） | 按连接/会话隔离 | 待填 |
+| artifact 路径穿越删除 | 探针：`ArtifactStore.delete("../victim")` 返回 `True`，`victim.txt` 被删除 | 拒绝并保留文件 | **探针返回 `False`，文件保留**；id 限 `^[A-Za-z0-9_-]{1,64}$` + resolve 后根目录包含检查 |
+| HTTP 跨站请求 | 无 middleware；24 个路由各自 inline 判 loopback；无 Host/Origin/Content-Type 校验（`brain/main.py:316`） | 外部 Origin / 非法 Host / `text/plain` 写请求 403/415 | **统一 middleware**：非法 Host 403、外部 Origin / `Origin: null` 403、`text/plain` 写请求 415、无 CORS；OAuth 顶层跳转与无 body 的原生 POST 不受影响 |
+| 绑定地址 | `QIMINGXING_HOST` 未校验直接传给 uvicorn（`brain/main.py:1085`） | 只绑回环 | **覆盖已删除**；非回环 `server.host` 强制回退 `127.0.0.1` 并告警 |
+| shell 读凭据 | `cat ~/.aws/credentials` 判为 `safe`（`shell_tool.py:18` 无 `.aws`；`:118-122` 前缀判定） | 工作区外审批；凭据目录硬拒绝 | **`.aws/.kube/.docker/.config/gh/.npmrc/.netrc/.gnupg/.password-store` 等硬拒绝**；`cat /etc/hosts` → confirm；`cwd=/tmp` → confirm；安全前缀只在工作区内自动放行 |
+| 输出脱敏 | 只覆盖已配置密钥 / `Bearer` / `sk-`（`config.py:711-720`），`AKIA…` 不遮 | 覆盖常见凭据格式 | **AKIA/ASIA、`ghp_`/`github_pat_`、`xox*`、`AIza`、PEM 私钥均已遮蔽** |
+| MCP 子进程环境 | 配了 `env:` 时 `{**os.environ, **srv.env}`（`mcp_client.py:418`）；未配时 SDK 6 变量 allowlist | 父进程环境不透传 | 待填（Phase 2） |
+| 审批记住 scope | 进程级全局 `set`（`hub.py:350`），重启即失效；shell 已按命令前缀（`shell_tool.py:125-155`） | 按连接/会话隔离 | **按 `client_name`/`client_id` 隔离**；`clear_history` 只清当前客户端 |
 
 路径穿越探针（基线可复现）：
 
@@ -131,6 +131,23 @@ shell_macos/.build/debug/Qimingxing --dump-ui /tmp/qmx-ui-dark2
 ```
 
 `GET /` 返回 `{"service":"qimingxing","version":"1.0.4","status":"ok","ui":"native"}`；`/app.js`、`/styles.css` 返回 404。
+
+### 3.3 Phase 1c 证据（同一组测试，基线 vs 本分支）
+
+```bash
+# 基线 22ca135（独立 worktree）
+git worktree add /tmp/qmx-baseline 22ca135
+cp tests/test_security_gate.py /tmp/qmx-baseline/tests/
+cd /tmp/qmx-baseline && <repo>/.venv/bin/python -m pytest tests/test_security_gate.py -q
+# → 7 failed, 4 passed
+
+# 本分支
+.venv/bin/python -m pytest tests/test_security_gate.py -q
+# → 11 passed
+```
+
+基线失败项：非法 Host、跨站 Origin、`text/plain` 写请求、路径穿越删除、凭据脱敏、shell 凭据硬拒绝、工作区边界。
+其余 4 项（原生无 Origin、multipart 上传、OAuth 顶层跳转、有效 id 删除）在两侧都通过，用来证明门禁没有误伤。
 
 ## 4. 性能
 

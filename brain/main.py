@@ -327,6 +327,60 @@ def create_app(
     app.state.mcp_manager = active_mcp
     app.state.oauth_coordinator = active_oauth
 
+    # -- Security gate ------------------------------------------------------
+    # Loopback only, no CORS headers, no cross-site writes. Native clients and
+    # the MCP OAuth callback send no Origin; every browser-originated state
+    # change is rejected here instead of in each route.
+    _allowed_host_names = {"127.0.0.1", "localhost", "::1", "testserver"}
+
+    def _host_header_allowed(value: str) -> bool:
+        host = (value or "").strip().lower()
+        if not host:
+            return False
+        if host.startswith("["):
+            host = host[1:].split("]", 1)[0]
+        elif host.count(":") == 1:
+            host = host.rsplit(":", 1)[0]
+        return host in _allowed_host_names
+
+    def _origin_allowed(value: str) -> bool:
+        if not value:
+            return True
+        if value.strip().lower() == "null":
+            return False
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return host in {"127.0.0.1", "localhost", "::1"} and port == int(cfg.server.port)
+
+    @app.middleware("http")
+    async def _security_gate(request: Request, call_next):
+        if not _host_header_allowed(request.headers.get("host", "")):
+            return JSONResponse({"detail": "invalid host"}, status_code=403)
+        if not _origin_allowed(request.headers.get("origin", "")):
+            return JSONResponse({"detail": "invalid origin"}, status_code=403)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            raw_length = request.headers.get("content-length")
+            has_body = request.headers.get("transfer-encoding") is not None or (
+                raw_length is not None and raw_length.strip() not in ("", "0")
+            )
+            if has_body:
+                content_type = (
+                    request.headers.get("content-type", "").split(";")[0] or ""
+                ).strip().lower()
+                allowed = (
+                    {"multipart/form-data"}
+                    if request.url.path == "/api/artifacts"
+                    else {"application/json"}
+                )
+                if content_type not in allowed:
+                    return JSONResponse(
+                        {"detail": "unsupported content type"}, status_code=415
+                    )
+        return await call_next(request)
+
     @app.get("/health")
     async def health() -> JSONResponse:
         return JSONResponse(
@@ -1081,7 +1135,15 @@ def main() -> None:
 
     app = get_app()
     cfg = app.state.config
-    host = os.environ.get("QIMINGXING_HOST") or cfg.server.host
+    # Loopback is a security boundary, not a preference: ignore non-loopback
+    # config values and never let an env var override the bind address.
+    host = cfg.server.host if cfg.server.host in {"127.0.0.1", "::1"} else "127.0.0.1"
+    if host != cfg.server.host:
+        logger.warning(
+            "Ignoring non-loopback server.host=%r; binding to %s",
+            cfg.server.host,
+            host,
+        )
     port_env = os.environ.get("QIMINGXING_PORT")
     port = int(port_env) if port_env else cfg.server.port
     # Pass the object (not "brain.main:app") so `python -m brain.main` does not

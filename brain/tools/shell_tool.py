@@ -15,7 +15,15 @@ from protocol.models import RiskLevel
 logger = logging.getLogger("qimingxing.tools.shell")
 
 _CHAIN_OR_REDIRECT_TOKENS = (";", "&&", "||", "|", ">", "<", "`", "$(", "\n", "\r")
-_SENSITIVE_PATH_RE = re.compile(r"(\.ssh/|id_rsa|id_ed25519|config\.yaml|\.env\b)", re.IGNORECASE)
+_SENSITIVE_PATH_RE = re.compile(
+    r"(\.ssh/|id_rsa|id_ed25519|id_ecdsa|\.aws/|\.kube/|\.docker/config\.json|"
+    r"\.config/gh/|\.npmrc|\.pypirc|\.netrc|\.gnupg/|\.password-store/|"
+    r"config\.yaml|\.env\b)",
+    re.IGNORECASE,
+)
+# Hard cap on what a single command may buffer; the visible truncation to
+# max_output_chars happens later. Reading continues so the child never blocks.
+_MAX_CAPTURE_BYTES = 256 * 1024
 _MUTATING_BINARIES = {
     "rm",
     "rmdir",
@@ -67,6 +75,22 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
             pass
 
 
+async def _read_capped(
+    stream: Optional[asyncio.StreamReader], cap: int
+) -> bytes:
+    """Buffer at most `cap` bytes but keep draining, so the child never blocks."""
+    if stream is None:
+        return b""
+    buf = bytearray()
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        if len(buf) < cap:
+            buf.extend(chunk[: cap - len(buf)])
+    return bytes(buf)
+
+
 class ShellTool(Tool):
     name = "shell_exec"
     description = (
@@ -101,6 +125,29 @@ class ShellTool(Tool):
         expanded = os.path.abspath(os.path.expanduser(chosen))
         return expanded
 
+    def _workspace_root(self) -> str:
+        return os.path.realpath(self._resolve_cwd(None))
+
+    def _paths_escape_root(self, cmd: str, root: str) -> bool:
+        """True when a path-like token resolves outside the workspace root."""
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError:
+            return True
+        root_real = os.path.realpath(root)
+        for token in tokens:
+            probe = token
+            if probe.startswith("--") and "=" in probe:
+                probe = probe.split("=", 1)[1]
+            if not probe or probe.startswith("-"):
+                continue
+            if not (probe.startswith(("/", "~", "./", "../")) or "/" in probe):
+                continue
+            expanded = os.path.realpath(os.path.expanduser(probe))
+            if expanded != root_real and not expanded.startswith(root_real + os.sep):
+                return True
+        return False
+
     def classify_risk(self, arguments: Dict[str, Any]) -> RiskLevel:
         cmd = str(arguments.get("command") or "").strip()
         if not cmd:
@@ -113,6 +160,14 @@ class ShellTool(Tool):
 
         # SAFE only for simple single readonly commands with no shell chaining/redirection
         if any(tok in cmd for tok in _CHAIN_OR_REDIRECT_TOKENS):
+            return "confirm"
+
+        # Default-deny: a "safe" prefix may only read inside the workspace.
+        root = self._workspace_root()
+        if self._paths_escape_root(cmd, root):
+            return "confirm"
+        requested_cwd = os.path.realpath(self._resolve_cwd(arguments.get("cwd")))
+        if requested_cwd != root and not requested_cwd.startswith(root + os.sep):
             return "confirm"
 
         lower_cmd = cmd.lower()
@@ -199,6 +254,7 @@ class ShellTool(Tool):
 
         timeout = max(1, int(arguments.get("timeout_sec") or self.config.timeout_sec))
         proc: Optional[asyncio.subprocess.Process] = None
+        reader: Optional[asyncio.Task[bytes]] = None
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
@@ -207,10 +263,12 @@ class ShellTool(Tool):
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )
+            reader = asyncio.create_task(_read_capped(proc.stdout, _MAX_CAPTURE_BYTES))
             try:
-                raw_out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 _kill_process_group(proc)
+                reader.cancel()
                 try:
                     await proc.wait()
                 except Exception:
@@ -224,6 +282,8 @@ class ShellTool(Tool):
         except asyncio.CancelledError:
             if proc is not None:
                 _kill_process_group(proc)
+                if reader is not None:
+                    reader.cancel()
                 try:
                     await proc.wait()
                 except Exception:
@@ -237,6 +297,8 @@ class ShellTool(Tool):
                 summary="命令启动失败",
                 status="error",
             )
+
+        raw_out = await reader if reader is not None else b""
 
         text = (raw_out or b"").decode("utf-8", errors="replace").strip()
         text = ctx.config.redact_secrets(text)
