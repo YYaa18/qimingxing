@@ -391,10 +391,16 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     /// Bring a suspended panel back without re-running `show()`'s side effects.
     func restoreFromSuspend() {
         guard let panel else { return }
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeKey()
-        inputState.focusRequestToken = UUID()
-        NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
+        if windowCoordinator?.keyOwner == .quickEntry {
+            panel.makeKeyAndOrderFront(nil)
+            panel.makeKey()
+            inputState.focusRequestToken = UUID()
+            NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
+        } else {
+            // Another content window kept the key; show the panel without
+            // stealing focus from it.
+            panel.orderFront(nil)
+        }
     }
 
     func openWithStagedItems(attachments: [StagedAttachment], textSnippets: [String]) {

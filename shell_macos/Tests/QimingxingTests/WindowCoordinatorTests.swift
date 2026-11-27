@@ -192,6 +192,33 @@ final class WindowCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.keyOwner, .quickEntry)
     }
 
+    func testResumeDoesNotJumpAheadOfExistingContent() {
+        let coordinator = makeCoordinator()
+        coordinator.present(WindowRequest(role: .quickEntry))
+        coordinator.present(WindowRequest(role: .workspaceWindow))
+        let media = coordinator.present(WindowRequest(role: .mediaDetached))
+        XCTAssertTrue(coordinator.isSuspended(.quickEntry))
+        XCTAssertEqual(coordinator.keyOwner, .mediaDetached)
+
+        coordinator.dismiss(media)
+        XCTAssertFalse(coordinator.isSuspended(.quickEntry))
+        // QuickEntry comes back, but the workspace keeps the key.
+        XCTAssertEqual(coordinator.keyOwner, .workspaceWindow)
+    }
+
+    func testWorkspaceCloseDoesNotReopenClosedQuickEntry() {
+        let coordinator = makeCoordinator()
+        let quickEntry = coordinator.present(WindowRequest(role: .quickEntry))
+        coordinator.dismiss(quickEntry)
+        XCTAssertFalse(coordinator.isActive(.quickEntry))
+
+        let workspace = coordinator.present(WindowRequest(role: .workspaceWindow))
+        coordinator.dismiss(workspace)
+
+        XCTAssertFalse(coordinator.isActive(.quickEntry))
+        XCTAssertNil(coordinator.keyOwner)
+    }
+
     func testPresentCallbacksReceiveActivationPolicy() {
         let coordinator = makeCoordinator()
         var seen: [(WindowRole, ActivationPolicy)] = []

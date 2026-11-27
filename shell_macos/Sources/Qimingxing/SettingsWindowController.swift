@@ -214,7 +214,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     func restoreFromSuspend() {
-        window?.makeKeyAndOrderFront(nil)
+        if windowCoordinator?.keyOwner == .settings {
+            window?.makeKeyAndOrderFront(nil)
+        } else {
+            window?.orderFront(nil)
+        }
     }
 
     private static func section(for tab: String) -> SettingsSection? {

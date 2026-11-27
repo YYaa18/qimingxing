@@ -130,8 +130,11 @@ final class WindowCoordinator {
         generation += 1
         let entry = Entry(
             role: stored.entry.role,
+            // Fresh generation invalidates old leases, but the original
+            // sequence is kept so a resumed window does not jump ahead of a
+            // content window that was already on screen.
             lease: WindowLease(role: role, generation: generation),
-            sequence: generation,
+            sequence: stored.entry.sequence,
             activation: stored.entry.activation,
             exclusiveGroup: stored.entry.exclusiveGroup
         )

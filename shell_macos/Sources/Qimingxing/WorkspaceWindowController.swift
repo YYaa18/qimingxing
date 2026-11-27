@@ -502,7 +502,11 @@ final class WorkspaceWindowController: NSObject, NSWindowDelegate {
     }
 
     func restoreFromSuspend() {
-        window?.makeKeyAndOrderFront(nil)
+        if windowCoordinator?.keyOwner == .workspaceWindow {
+            window?.makeKeyAndOrderFront(nil)
+        } else {
+            window?.orderFront(nil)
+        }
     }
 
     /// Opens the workspace beside the Quick Entry panel when there is room,
