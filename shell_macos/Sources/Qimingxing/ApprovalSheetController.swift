@@ -160,9 +160,15 @@ final class ApprovalQueueModel: ObservableObject {
     }
 }
 
+/// Borderless windows cannot become key by default; the approval surface must
+/// own the keyboard so typing never leaks into QuickEntry behind it.
+private final class ApprovalWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor
-final class ApprovalSheetController {
-    private var window: NSWindow?
+final class ApprovalSheetController {    private var window: NSWindow?
     private var windowLease: WindowLease?
     private weak var brainClient: BrainClient?
     private let windowCoordinator: WindowCoordinator?
@@ -240,7 +246,7 @@ final class ApprovalSheetController {
         hosting.view.wantsLayer = true
         hosting.view.layer?.backgroundColor = NSColor.clear.cgColor
 
-        let win = NSWindow(contentViewController: hosting)
+        let win = ApprovalWindow(contentViewController: hosting)
         win.title = "启明星 · 操作审批"
         win.styleMask = [.borderless]
         win.isOpaque = false
