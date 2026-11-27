@@ -283,6 +283,22 @@ extension QMXMarkdownTable {
     var dedupeSignature: String {
         QMXTableDedupe.signature(columns: columns, rows: rows)
     }
+
+    /// Synthetic media item for tables that only exist inside a card body.
+    func asMediaItem(id: String, contextTitle: String) -> MediaItem {
+        MediaItem(
+            mediaId: id,
+            kind: "file",
+            title: title,
+            mimeType: "text/markdown",
+            sourceTitle: contextTitle,
+            provider: "qimingxing",
+            fileExt: "md-table",
+            summaryBadge: summary,
+            previewColumns: columns,
+            previewRows: rows
+        )
+    }
 }
 
 func qmxTableTSV(columns: [String], rows: [[String]]) -> String {

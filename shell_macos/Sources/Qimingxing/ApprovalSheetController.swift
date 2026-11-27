@@ -160,16 +160,25 @@ final class ApprovalQueueModel: ObservableObject {
     }
 }
 
+/// Borderless windows cannot become key by default; the approval surface must
+/// own the keyboard so typing never leaks into QuickEntry behind it.
+private final class ApprovalWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor
-final class ApprovalSheetController {
-    private var window: NSWindow?
+final class ApprovalSheetController {    private var window: NSWindow?
+    private var windowLease: WindowLease?
     private weak var brainClient: BrainClient?
+    private let windowCoordinator: WindowCoordinator?
     private let queueModel = ApprovalQueueModel()
     private let holdDriver = HoldToApproveDriver()
     private var keyMonitor: Any?
 
-    init(brainClient: BrainClient) {
+    init(brainClient: BrainClient, windowCoordinator: WindowCoordinator? = nil) {
         self.brainClient = brainClient
+        self.windowCoordinator = windowCoordinator
     }
 
     func syncPending(_ items: [PendingApprovalItem]) {
@@ -193,6 +202,10 @@ final class ApprovalSheetController {
     private func closeAll() {
         holdDriver.endHold()
         removeKeyMonitor()
+        if let lease = windowLease, let windowCoordinator {
+            windowCoordinator.dismiss(lease)
+        }
+        windowLease = nil
         window?.close()
         window = nil
     }
@@ -211,10 +224,15 @@ final class ApprovalSheetController {
     private func showOrUpdateWindow() {
         if let window {
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if windowCoordinator == nil {
+                NSApp.activate(ignoringOtherApps: true)
+            }
             return
         }
 
+        windowLease = windowCoordinator?.present(
+            WindowRequest(role: .approval, activation: .required)
+        )
         holdDriver.reset()
         let rootView = ApprovalQueueView(
             model: queueModel,
@@ -228,7 +246,7 @@ final class ApprovalSheetController {
         hosting.view.wantsLayer = true
         hosting.view.layer?.backgroundColor = NSColor.clear.cgColor
 
-        let win = NSWindow(contentViewController: hosting)
+        let win = ApprovalWindow(contentViewController: hosting)
         win.title = "启明星 · 操作审批"
         win.styleMask = [.borderless]
         win.isOpaque = false
@@ -239,10 +257,17 @@ final class ApprovalSheetController {
         win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         win.setContentSize(NSSize(width: 440, height: 372))
         win.center()
-        NSApp.activate(ignoringOtherApps: true)
+        if windowCoordinator == nil {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         win.makeKeyAndOrderFront(nil)
         self.window = win
         installKeyMonitor()
+    }
+
+    func focusIfVisible() {
+        guard let window, window.isVisible, !window.isKeyWindow else { return }
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func installKeyMonitor() {

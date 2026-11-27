@@ -22,7 +22,7 @@ git worktree add /tmp/qmx-baseline 22ca135
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
 |---|---:|---:|---:|
 | Python 测试 | 276 | ≥276 | **296**（1a +6，1c +11，Phase 2 +3） |
-| Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **27**（Phase 1a） |
+| Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **60**（Phase 1a 27 + Phase 3 33） |
 | `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | **0**（Phase 1b） |
 | `body_web` 代码行 | 1,933 | 0 | **0**（Phase 1b） |
 | `body_web` 打包产物 | 随 `Resources/app/body_web` 打入 | 不打包 | **不在产物内**（Phase 1b） |
@@ -177,6 +177,24 @@ QIMINGXING_WS_URL=ws://127.0.0.1:18791/ws \
 ```
 
 Brain 日志：`Handshake hello: client=client_1 role=body type=body_godot name=body_godot`，随后干净断开。头像/场景/脚本/主题与 80 个提交历史均在远程仓库中。
+
+### 3.5 Phase 3（骨架）证据
+
+```bash
+cd shell_macos && swift test   # 56 passed（新增 29）
+```
+
+新增 `Core/Window/{WindowRole,WindowCoordinator,FocusArbitrator,PanelFactory}.swift`：
+
+- 纯状态机：优先级、key owner、suspend/resume、`WindowLease` generation。
+- 决策 A 已进规则并接线：QuickEntry 覆盖 Settings 时挂起 Settings，QuickEntry 关闭后恢复。
+- `FocusArbitrator` 是当前唯一允许 `NSApp.activate` 的组件；记录外部前台 App，用户已切走时不抢焦点。
+- `PanelConfiguration` 按 role 给出 level/styleMask/collectionBehavior，可在无窗口环境下断言。
+- 已接线：QuickEntry、Settings、Media（detached）、Workspace（只接管 key，保留并排）、Approval、Permission（永不拿 key）。
+- 卡片内表格可点击打开媒体查看器（`MarkdownMessageView.onOpenTable`）。
+- 不注册（passive/transient，不接管 key）：Toast、DropPocket、Lasso、Walkie、菜单栏、QL 面板。
+- 例外清单（仍可直接 `NSApp.activate`）：`NSOpenPanel` 系统模态、fatal `NSAlert`、SpatialLasso overlay/popover、QL 预览、composer 焦点通知。
+- `resume` 保留原 sequence；`onKeyOwnerChanged` 会把模型里的 keyOwner 强制落到真实窗口（含 `ApprovalWindow.canBecomeKey = true`）。
 
 ## 4. 性能
 

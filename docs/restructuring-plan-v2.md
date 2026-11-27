@@ -271,7 +271,7 @@ git push <new-remote> split/body-godot:main
 |---|---|---|
 | passive | `taskToast`、`sidecarSuggestion` | 不抢 key、不 `NSApp.activate`、不挂起其他窗口 |
 | transient | `dropPocket`、`spatialLasso`、`walkieTalkie`、`menuBarPopover`、`quickLookPanel` | 非激活浮层；不改变 key owner |
-| content | `quickEntry`、`workspaceWing`、`workspaceWindow`、`mediaAttached`、`mediaDetached`、`settings`、`pinnedNote` | 同一时刻只有一个 key owner；大内容面打开时挂起 QuickEntry |
+| content | `quickEntry`、`workspaceWing`、`workspaceWindow`、`mediaAttached`、`mediaDetached`、`settings`、`pinnedNote` | 同一时刻只有一个 key owner；Settings / Detached Media 打开时挂起 QuickEntry（Workspace 只接管 key，保留并排） |
 | modal | `approval` | 高于 content；不挂起 QuickEntry，只接管 key，关闭后归还 |
 | security | `permissionGuide` | 最高优先级；不抢焦点，关闭后归还 |
 
@@ -321,7 +321,7 @@ final class WindowCoordinator {
 | 场景 | QuickEntry 行为 | 关闭后 |
 |---|---|---|
 | 打开 Workspace Wing | 不挂起，wing 是同一面板的一部分 | 收 wing，不重建面板 |
-| 打开完整 Workspace 窗口 | **挂起**：`orderOut`，保留 frame/draft/焦点状态 | 若挂起前可见且 App 仍在前台，恢复并聚焦输入框 |
+| 打开完整 Workspace 窗口 | **不挂起**（决策：保留并排布局）；Workspace 接管 key，QuickEntry 留在原位 | 关闭 Workspace 后 key 还给 QuickEntry |
 | 打开 Settings | **挂起** | 同上；若用户已切到别的 App，不抢焦点 |
 | 打开 detached Media Viewer | **挂起** | 同上；保留现有 250 ms 延迟但走 lease generation |
 | 打开 Approval | 不挂起；QuickEntry 保留但让出 key | 归还 key 给之前 owner |
@@ -329,7 +329,7 @@ final class WindowCoordinator {
 | 打开 Permission Guide | 不挂起；security 优先 | 归还 key |
 | Task Toast / Drop Pocket / Lasso / Walkie / 菜单栏弹层 | 不挂起 | 不改变 key |
 | QuickEntry 热键 | 切换 QuickEntry；若被挂起则恢复并置于当前内容之上 | 关闭后 key 回到原内容；审批/权限存在时不抢 |
-| Settings 打开时按 QuickEntry 热键 | `[待定]` 两种方案：A) 把 QuickEntry 提到 Settings 之上并挂起 Settings；B) 热键被吞掉，只把 Settings 置前 | Phase 3 开工前定 |
+| Settings 打开时按 QuickEntry 热键 | **A（已定）**：把 QuickEntry 提到 Settings 之上并挂起 Settings | 关闭 QuickEntry 后恢复 Settings；审批/权限存在时不抢 |
 
 **焦点归还规则**：
 
@@ -341,12 +341,14 @@ final class WindowCoordinator {
 
 ### 5.5 迁移顺序
 
-1. 引入 `WindowCoordinator` + `FocusArbitrator` + `PanelFactory` 骨架，先注册 12+ 窗口拥有者，不改变行为。
-2. 吸收 QuickEntry 的 5 个焦点特例（先 `installFocusRecovery`，最后 `hiddenForMediaViewer`）。
-3. 加 suspend/restore，先覆盖 Settings 和 detached Media。
-4. 覆盖完整 Workspace；Wing 保持不挂起。
-5. 迁移 Approval、Permission、Toast、DropPocket、Lasso、Walkie、菜单栏弹层、QL 面板。
-6. 删除各控制器里的直接激活和 `hiddenForMediaViewer` 特例。
+`[现状]` Phase 3 已落地（PR #21）：
+
+1. ~~骨架~~：`WindowCoordinator` + `FocusArbitrator` + `PanelFactory` 已入，59→60 XCTest。
+2. ~~QuickEntry 焦点特例~~：show/hide 走 lease；`installFocusRecovery` 在非 owner 时让位；`hiddenForMediaViewer` 及其 250ms+350ms 延迟链已删除。
+3. ~~Settings / detached Media~~：present/dismiss + suspend/restore；决策 A 已人工验证。
+4. ~~Workspace~~：只接管 key、保留并排布局（决策见 §5.4）。
+5. ~~Approval / Permission~~：Approval 为可成为 key 的独立浮窗（`ApprovalWindow.canBecomeKey`）；Permission 最高优先级但永不拿 key。Toast / DropPocket / Lasso / Walkie / 菜单栏 / QL 面板按 passive/transient **不注册**（不接管 key、不挂起别人）。
+6. **仍保留的直接激活（例外清单）**：`NSOpenPanel.runModal` 前后、fatal error `NSAlert`、SpatialLasso overlay/popover、QL 预览、composer 焦点通知。这些是系统模态或瞬态浮层，不经 coordinator；其余 content/modal 角色的激活只经 `FocusArbitrator`。
 
 ### 5.6 Sidecar
 

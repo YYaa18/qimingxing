@@ -131,17 +131,25 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
     static let shared = MediaViewerWindowController()
 
     private var window: MediaViewerWindow?
+    private var windowLease: WindowLease?
+    /// Injected by AppDelegate; nil in previews so they keep the old behavior.
+    var windowCoordinator: WindowCoordinator?
 
     var isVisible: Bool { window?.isVisible ?? false }
 
     func show(large: Bool = false) {
         let wantsLarge = large || (MediaViewerModel.shared.selectedItem?.isMarkdownTable ?? false)
+        windowLease = windowCoordinator?.present(
+            WindowRequest(role: .mediaDetached, activation: .required)
+        )
         if let window {
             if wantsLarge {
                 expandForTable(window)
             }
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if windowCoordinator == nil {
+                NSApp.activate(ignoringOtherApps: true)
+            }
             return
         }
         let host = NSHostingController(
@@ -173,7 +181,9 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
         }
         self.window = window
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if windowCoordinator == nil {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     private func expandForTable(_ window: NSWindow) {
@@ -217,6 +227,10 @@ final class MediaViewerWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         NotificationCenter.default.post(name: .qmxStopMediaPlayback, object: nil)
         NotificationCenter.default.post(name: .qmxMediaViewerClosed, object: nil)
+        if let lease = windowLease, let windowCoordinator {
+            windowCoordinator.dismiss(lease)
+        }
+        windowLease = nil
         window = nil
     }
 }

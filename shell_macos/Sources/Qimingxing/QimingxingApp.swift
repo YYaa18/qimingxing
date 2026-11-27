@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var approvalController: ApprovalSheetController!
     private var workspaceStore: WorkspaceStore!
     private var workspaceController: WorkspaceWindowController!
+    private var windowCoordinator: WindowCoordinator!
+    private var focusArbitrator: FocusArbitrator!
     private let hotkeyManager = HotkeyManager()
     private var cancellables = Set<AnyCancellable>()
 
@@ -79,10 +81,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         workspaceStore = WorkspaceStore(brainClient: brainClient)
+        windowCoordinator = WindowCoordinator()
+        focusArbitrator = FocusArbitrator()
         quickEntryController = QuickEntryController(
             brainClient: brainClient,
             desktopActions: desktopActions,
-            workspaceStore: workspaceStore
+            workspaceStore: workspaceStore,
+            windowCoordinator: windowCoordinator,
+            focusArbitrator: focusArbitrator
         )
         dropPocketController = DropPocketController(brainClient: brainClient)
         dropPocketController.onDeliverToQuickEntry = { [weak self] attachments, snippets in
@@ -99,17 +105,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsController = SettingsWindowController(
             brainClient: brainClient,
             supervisor: supervisor,
-            desktopActions: desktopActions
+            desktopActions: desktopActions,
+            windowCoordinator: windowCoordinator
         )
-        approvalController = ApprovalSheetController(brainClient: brainClient)
-        workspaceController = WorkspaceWindowController(store: workspaceStore, brainClient: brainClient)
+        approvalController = ApprovalSheetController(
+            brainClient: brainClient,
+            windowCoordinator: windowCoordinator
+        )
+        workspaceController = WorkspaceWindowController(
+            store: workspaceStore,
+            brainClient: brainClient,
+            windowCoordinator: windowCoordinator
+        )
+        wireWindowCoordinator()
 
         MediaViewerLauncher.openHandler = { [weak self] prefersLargeWindow in
             guard let self else { return }
             if prefersLargeWindow || self.workspaceController.isVisible {
-                if prefersLargeWindow, self.quickEntryController.isVisible {
-                    self.quickEntryController.hideForMediaViewer()
-                }
+                // Presenting .mediaDetached suspends QuickEntry in the
+                // coordinator; no special-case hiding here.
                 MediaViewerWindowController.shared.show(large: prefersLargeWindow)
             } else if self.quickEntryController.isVisible {
                 self.quickEntryController.showMediaViewer()
@@ -230,6 +244,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    private func wireWindowCoordinator() {
+        MediaViewerWindowController.shared.windowCoordinator = windowCoordinator
+        PermissionGuideController.shared.windowCoordinator = windowCoordinator
+        windowCoordinator.onPresent = { [weak self] role, policy in
+            self?.focusArbitrator.activate(for: role, policy: policy)
+        }
+        windowCoordinator.onKeyOwnerChanged = { [weak self] role in
+            self?.focusWindow(for: role)
+        }
+        windowCoordinator.onSuspend = { [weak self] role, _ in
+            switch role {
+            case .quickEntry:
+                self?.quickEntryController.orderOutForSuspend()
+            case .settings:
+                self?.settingsController.orderOutForSuspend()
+            case .workspaceWindow:
+                self?.workspaceController.orderOutForSuspend()
+            default:
+                break
+            }
+        }
+        windowCoordinator.onResume = { [weak self] role in
+            switch role {
+            case .quickEntry:
+                self?.quickEntryController.restoreFromSuspend()
+            case .settings:
+                self?.settingsController.restoreFromSuspend()
+            case .workspaceWindow:
+                self?.workspaceController.restoreFromSuspend()
+            default:
+                break
+            }
+        }
+    }
+
+    /// AppKit may hand key status to a floating panel when the previous key
+    /// window closes; enforce the coordinator's decision explicitly so the
+    /// model and the real key window never disagree.
+    private func focusWindow(for role: WindowRole?) {
+        switch role {
+        case .quickEntry:
+            quickEntryController.focusIfVisible()
+        case .settings:
+            settingsController.focusIfVisible()
+        case .workspaceWindow:
+            workspaceController.focusIfVisible()
+        case .approval:
+            approvalController.focusIfVisible()
+        default:
+            break
+        }
+    }
+
     private func wireEvents() {
         brainClient.onPendingApprovalsUpdated = { [weak self] items in
             self?.approvalController.syncPending(items)
@@ -313,15 +380,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     } else {
                         self.workspaceController.show()
                     }
-                }
-            }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .qmxMediaViewerClosed)
-            .sink { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    self?.quickEntryController.restoreAfterMediaViewer()
                 }
             }
             .store(in: &cancellables)

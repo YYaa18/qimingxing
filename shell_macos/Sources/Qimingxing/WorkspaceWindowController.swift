@@ -196,6 +196,43 @@ final class WorkspaceStore: ObservableObject {
         brainClient.sendCardAction(cardId: card.cardId, action: action.id, turnId: turnId)
     }
 
+    /// Card tables are deduped out of the media strip; the notice inside the
+    /// card opens the full viewer, preferring the brain media twin.
+    func openCardTable(
+        _ table: QMXMarkdownTable,
+        media: [MediaItem]?,
+        contextTitle: String
+    ) {
+        let signature = table.dedupeSignature
+        if let match = (media ?? []).first(where: {
+            $0.isMarkdownTable
+                && QMXTableDedupe.signature(
+                    columns: $0.previewColumns,
+                    rows: $0.previewRows
+                ) == signature
+        }) {
+            MediaViewerLauncher.open(
+                items: [match],
+                selectedID: match.mediaId,
+                title: match.title.isEmpty ? "表格" : match.title,
+                contextLabel: contextTitle,
+                prefersLargeWindow: true
+            )
+            return
+        }
+        let fallback = table.asMediaItem(
+            id: "card_table_\(table.id)",
+            contextTitle: contextTitle
+        )
+        MediaViewerLauncher.open(
+            items: [fallback],
+            selectedID: fallback.mediaId,
+            title: fallback.title,
+            contextLabel: contextTitle,
+            prefersLargeWindow: true
+        )
+    }
+
     private func ingestTasks(_ tasks: [BackgroundTaskItem]) {
         for task in tasks {
             let itemID = "task_\(task.taskId)"
@@ -419,23 +456,62 @@ enum WorkspaceEntry: Identifiable {
 // MARK: - Window
 
 @MainActor
-final class WorkspaceWindowController {
+final class WorkspaceWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
+    private var windowLease: WindowLease?
 
     var isVisible: Bool { window?.isVisible ?? false }
     private let store: WorkspaceStore
     private let brainClient: BrainClient
+    private let windowCoordinator: WindowCoordinator?
 
-    init(store: WorkspaceStore, brainClient: BrainClient) {
+    init(
+        store: WorkspaceStore,
+        brainClient: BrainClient,
+        windowCoordinator: WindowCoordinator? = nil
+    ) {
         self.store = store
         self.brainClient = brainClient
+        self.windowCoordinator = windowCoordinator
+        super.init()
     }
 
     func show(anchoredTo anchor: NSRect? = nil, movePanelBy: ((CGFloat) -> Void)? = nil) {
         ensureWindow()
         positionWindow(anchoredTo: anchor, movePanelBy: movePanelBy)
-        NSApp.activate(ignoringOtherApps: true)
+        // Decision: the full workspace docks beside QuickEntry instead of
+        // suspending it; it only takes the key.
+        windowLease = windowCoordinator?.present(
+            WindowRequest(role: .workspaceWindow, activation: .required)
+        )
+        if windowCoordinator == nil {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let lease = windowLease, let windowCoordinator {
+            windowCoordinator.dismiss(lease)
+        }
+        windowLease = nil
+    }
+
+    func focusIfVisible() {
+        guard let window, window.isVisible, !window.isKeyWindow else { return }
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func orderOutForSuspend() {
+        window?.orderOut(nil)
+    }
+
+    func restoreFromSuspend() {
+        if windowCoordinator?.keyOwner == .workspaceWindow {
+            window?.makeKeyAndOrderFront(nil)
+        } else {
+            window?.orderFront(nil)
+        }
     }
 
     /// Opens the workspace beside the Quick Entry panel when there is room,
@@ -518,6 +594,7 @@ final class WorkspaceWindowController {
         win.minSize = NSSize(width: 820, height: 540)
         win.center()
         win.isReleasedWhenClosed = false
+        win.delegate = self
         self.window = win
     }
 }
@@ -856,7 +933,16 @@ struct WorkspaceRootView: View {
                 }
                 if let cards = turn.cards, !cards.isEmpty {
                     ForEach(cards) { card in
-                        QMXOutputCardView(card: card) { action in
+                        QMXOutputCardView(
+                            card: card,
+                            onOpenTable: { table in
+                                store.openCardTable(
+                                    table,
+                                    media: turn.media,
+                                    contextTitle: "工作区"
+                                )
+                            }
+                        ) { action in
                             store.sendCardAction(card, action: action, turnItemID: turn.id)
                         }
                     }
@@ -920,7 +1006,16 @@ struct WorkspaceRootView: View {
             }
             if let cards = item.cards, !cards.isEmpty {
                 ForEach(cards) { card in
-                    QMXOutputCardView(card: card) { action in
+                    QMXOutputCardView(
+                        card: card,
+                        onOpenTable: { table in
+                            store.openCardTable(
+                                table,
+                                media: item.media,
+                                contextTitle: "工作区"
+                            )
+                        }
+                    ) { action in
                         store.sendCardAction(card, action: action, turnItemID: item.id)
                     }
                 }
