@@ -21,12 +21,13 @@ git worktree add /tmp/qmx-baseline 22ca135
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
 |---|---:|---:|---:|
-| Python 测试 | 276 | ≥276 | **293**（Phase 1a +6，1c +11） |
+| Python 测试 | 276 | ≥276 | **296**（1a +6，1c +11，Phase 2 +3） |
 | Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **27**（Phase 1a） |
 | `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | **0**（Phase 1b） |
 | `body_web` 代码行 | 1,933 | 0 | **0**（Phase 1b） |
 | `body_web` 打包产物 | 随 `Resources/app/body_web` 打入 | 不打包 | **不在产物内**（Phase 1b） |
-| `body_godot` 产品代码引用 | 7 文件 / 20 次 | 0（Phase 2） | 7 文件 / 20 次 |
+| `body_godot` 产品代码引用 | 7 文件 / 20 次 | 0（Phase 2） | **2 文件 / 5 次**（仅协议兼容面：client type + schema） |
+| `body_godot` 代码行 | 6,521 | 0 | **0**（Phase 2） |
 | 应用包体 | 417.5 MB | ≤ 基线 | **418 MB**（body_web 仅 64K，体积由 Python runtime 主导） |
 | `brain/hub.py` | 3,135 行 | 不增长 | **3,207**（1a 净增 72；Phase 5 基线改为 3,207） |
 | `QuickEntryPanel.swift` | 2,548 行 | 不增长 | **2,614**（1a 净增 66） |
@@ -69,7 +70,8 @@ git worktree add /tmp/qmx-baseline 22ca135
 | 绑定地址 | `QIMINGXING_HOST` 未校验直接传给 uvicorn（`brain/main.py:1085`） | 只绑回环 | **覆盖已删除**；非回环 `server.host` 强制回退 `127.0.0.1` 并告警 |
 | shell 读凭据 | `cat ~/.aws/credentials` 判为 `safe`（`shell_tool.py:18` 无 `.aws`；`:118-122` 前缀判定） | 工作区外审批；凭据目录硬拒绝 | **`.aws/.kube/.docker/.config/gh/.npmrc/.netrc/.gnupg/.password-store` 等硬拒绝**；`cat /etc/hosts` → confirm；`cwd=/tmp` → confirm；安全前缀只在工作区内自动放行 |
 | 输出脱敏 | 只覆盖已配置密钥 / `Bearer` / `sk-`（`config.py:711-720`），`AKIA…` 不遮 | 覆盖常见凭据格式 | **AKIA/ASIA、`ghp_`/`github_pat_`、`xox*`、`AIza`、PEM 私钥均已遮蔽** |
-| MCP 子进程环境 | 配了 `env:` 时 `{**os.environ, **srv.env}`（`mcp_client.py:418`）；未配时 SDK 6 变量 allowlist | 父进程环境不透传 | 待填（Phase 2） |
+| MCP 子进程环境 | 配了 `env:` 时 `{**os.environ, **srv.env}`（`mcp_client.py:418`）；未配时 SDK 6 变量 allowlist | 父进程环境不透传 | **已实现**：固定 allowlist + per-server `env:`；密钥不再从父进程继承 |
+| MCP OAuth 目录 | `Path(__file__)` 推导，打包后写进签名 bundle | 用户数据目录 + 一次性迁移 | **已实现**：`Application Support/Qimingxing/mcp_oauth`（Windows `%APPDATA%`），旧 token 首次使用时迁移并保持 0600 |
 | 审批记住 scope | 进程级全局 `set`（`hub.py:350`），重启即失效；shell 已按命令前缀（`shell_tool.py:125-155`） | 按连接/会话隔离 | **按 `client_name`/`client_id` 隔离**；`clear_history` 只清当前客户端 |
 
 路径穿越探针（基线可复现）：
@@ -148,6 +150,33 @@ cd /tmp/qmx-baseline && <repo>/.venv/bin/python -m pytest tests/test_security_ga
 
 基线失败项：非法 Host、跨站 Origin、`text/plain` 写请求、路径穿越删除、凭据脱敏、shell 凭据硬拒绝、工作区边界。
 其余 4 项（原生无 Origin、multipart 上传、OAuth 顶层跳转、有效 id 删除）在两侧都通过，用来证明门禁没有误伤。
+
+### 3.4 Phase 2（迁出准备）证据
+
+```bash
+cp body_godot/assets/sprites/happy.png assets/app_icon.png
+.venv/bin/python -m pytest -q            # 296 passed
+cd shell_macos && swift test             # 27 passed
+
+git subtree split -P body_godot -b split/body-godot
+git ls-tree --name-only split/body-godot
+# assets/ default_bus_layout.tres project.godot scenes/ scripts/ theme/
+git ls-tree split/body-godot assets/sprites/happy.png   # 头像精灵在
+```
+
+主仓已摘除：`--with-godot`、`Godot.app` 打包、`ProcessSupervisor` 启动器、设置页头像开关、`avatar_enabled` 写入、`qimingxing.sh` Godot 分支、AppIcon/预览对 `body_godot` 的路径依赖（改用 `assets/app_icon.png`）；最后 `git rm -r body_godot`（6,521 行 GDScript）。
+
+**独立仓库运行时验证**（`YYaa18/qimingxing-avatar`，private）：
+
+```bash
+# 临时 Brain（隔离数据目录，端口 18791）
+cd /tmp/qmx-run && PYTHONPATH=<repo> QIMINGXING_PORT=18791 <repo>/.venv/bin/python -m brain.main
+# 从新仓库 clone 出来的项目，headless 启动
+QIMINGXING_WS_URL=ws://127.0.0.1:18791/ws \
+  ~/Downloads/Godot.app/Contents/MacOS/Godot --headless --path /tmp/qmx-avatar --quit-after 400
+```
+
+Brain 日志：`Handshake hello: client=client_1 role=body type=body_godot name=body_godot`，随后干净断开。头像/场景/脚本/主题与 80 个提交历史均在远程仓库中。
 
 ## 4. 性能
 

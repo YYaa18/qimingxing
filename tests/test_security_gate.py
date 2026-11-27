@@ -131,6 +131,43 @@ def test_redaction_covers_common_credential_formats() -> None:
     assert "BEGIN RSA PRIVATE KEY" not in cfg.redact_secrets(pem)
 
 
+def test_mcp_stdio_env_filters_parent_secrets(monkeypatch) -> None:
+    from brain.tools.mcp_client import _build_stdio_env
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-parent-secret")
+    env = _build_stdio_env({"MCP_TOKEN": "server-token"})
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert "OPENAI_API_KEY" not in env
+    assert env["MCP_TOKEN"] == "server-token"
+
+
+def test_mcp_oauth_dir_lives_outside_repo() -> None:
+    from brain.tools import mcp_oauth
+
+    repo = Path(__file__).resolve().parent.parent
+    resolved = Path(mcp_oauth._DEFAULT_OAUTH_DIR).resolve()
+    assert repo not in resolved.parents
+
+
+def test_legacy_oauth_tokens_are_migrated(tmp_path: Path, monkeypatch) -> None:
+    from brain.tools import mcp_oauth
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "github.json").write_text(
+        '{"tokens": {"access_token": "t"}}', encoding="utf-8"
+    )
+    target = tmp_path / "target"
+    monkeypatch.setattr(mcp_oauth, "_legacy_oauth_dir", lambda: legacy)
+
+    mcp_oauth._migrate_legacy_tokens(target)
+
+    migrated = target / "github.json"
+    assert migrated.exists()
+    assert (migrated.stat().st_mode & 0o777) == 0o600
+
+
 def test_shell_credential_paths_are_hard_blocked() -> None:
     tool = ShellTool(ShellToolConfig(default_cwd=str(Path.cwd())))
     assert tool.classify_risk({"command": "cat ~/.aws/credentials"}) == "blocked"

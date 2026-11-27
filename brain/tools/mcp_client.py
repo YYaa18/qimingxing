@@ -18,6 +18,35 @@ logger = logging.getLogger("qimingxing.tools.mcp")
 
 MCP_MAX_OUTPUT_CHARS = 4000
 
+# Child processes get only what a normal CLI needs to start; API keys and
+# unrelated parent env stay out. Server-specific secrets come from `env:`.
+_STDIO_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "TZ",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "COMSPEC",
+    "PATHEXT",
+)
+
+
+def _build_stdio_env(extra: Optional[Dict[str, str]]) -> Dict[str, str]:
+    merged = {key: os.environ[key] for key in _STDIO_ENV_ALLOWLIST if key in os.environ}
+    merged.update({k: v for k, v in (extra or {}).items() if v is not None})
+    return merged
+
 _TRANSPORT_DISCONNECT_RE = re.compile(
     r"(?:closedresourceerror|brokenresourceerror|endofstream|connecterror|"
     r"remoteprotocolerror|connection\s+closed|broken\s+pipe|connection\s+reset|"
@@ -415,7 +444,7 @@ class MCPClientManager:
         if srv.transport == "stdio":
             if not srv.command:
                 raise ValueError(f"MCP stdio server '{srv.name}' 缺少 command")
-            merged_env = {**os.environ, **srv.env} if srv.env else None
+            merged_env = _build_stdio_env(srv.env)
             params = StdioServerParameters(
                 command=srv.command,
                 args=list(srv.args),

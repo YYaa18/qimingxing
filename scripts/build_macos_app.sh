@@ -16,12 +16,10 @@ TARGET_ARCH="${QMX_ARCH:-$(uname -m)}"
 
 DO_INSTALL=0
 DO_DMG=0
-WITH_GODOT=0
 while (( $# > 0 )); do
   case "$1" in
     --install) DO_INSTALL=1 ;;
     --dmg) DO_DMG=1 ;;
-    --with-godot) WITH_GODOT=1 ;;
     --arch)
       if (( $# < 2 )); then
         echo "❌ --arch 需要指定架构 (arm64 或 x86_64)" >&2
@@ -35,10 +33,9 @@ while (( $# > 0 )); do
       ;;
     -h|--help)
       cat <<'EOF'
-Usage: scripts/build_macos_app.sh [--install] [--dmg] [--with-godot] [--arch arm64|x86_64]
+Usage: scripts/build_macos_app.sh [--install] [--dmg] [--arch arm64|x86_64]
   --install     Install built Qimingxing.app to /Applications/Qimingxing.app
   --dmg         Create distributable drag-and-drop DMG in dist/
-  --with-godot  Optionally bundle Godot.app & body_godot/ (disabled by default in v1.0.1)
   --arch        Target macOS architecture: arm64 or x86_64 (default: current machine via uname -m, or QMX_ARCH)
   Env QMX_CODESIGN_IDENTITY  Optional codesign identity (default: "Qimingxing Local Code Signing" if trusted, else ad-hoc)
 EOF
@@ -84,30 +81,10 @@ if [[ -n "${PY_ARCHS}" ]] && ! grep -qw "${TARGET_ARCH}" <<< "${PY_ARCHS}"; then
   exit 1
 fi
 
-GODOT_APP_SRC=""
-if (( WITH_GODOT == 1 )); then
-  for cand in \
-    "${QIMINGXING_GODOT_APP:-}" \
-    "/Users/yangyang/Downloads/Godot.app" \
-    "/Applications/Godot.app" \
-    "${HOME}/Applications/Godot.app" \
-    "${HOME}/Downloads/Godot.app"; do
-    if [[ -n "${cand}" && -x "${cand}/Contents/MacOS/Godot" ]]; then
-      GODOT_APP_SRC="${cand}"
-      break
-    fi
-  done
-  if [[ -z "${GODOT_APP_SRC}" ]]; then
-    echo "❌ 指定了 --with-godot 但未找到 Godot.app" >&2
-    exit 1
-  fi
-fi
-
 echo "📦 开始构建 ${APP_NAME}.app (v${APP_VERSION})"
 echo "   Arch:       ${TARGET_ARCH}"
 echo "   Source:     ${ROOT_DIR}"
 echo "   Python:     ${PY_HOME}"
-echo "   Godot:      ${GODOT_APP_SRC:-disabled (native shell standalone)}"
 
 echo "🔨 编译 Swift 原生 macOS 壳 (shell_macos, ${TARGET_ARCH})..."
 (cd "${ROOT_DIR}/shell_macos" && swift build -c release --arch "${TARGET_ARCH}")
@@ -131,7 +108,7 @@ echo "🎨 生成 AppIcon.icns..."
 ICONSET_DIR="${TMP_WORK}/AppIcon.iconset"
 mkdir -p "${ICONSET_DIR}"
 
-"${VENV_PY}" - "${ROOT_DIR}/body_godot/assets/sprites/happy.png" "${ICONSET_DIR}" <<'PY'
+"${VENV_PY}" - "${ROOT_DIR}/assets/app_icon.png" "${ICONSET_DIR}" <<'PY'
 import sys
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter
@@ -272,9 +249,6 @@ chmod +x "${APP_BUNDLE}/Contents/MacOS/Qimingxing"
 echo "📂 复制 Brain/Senses/Protocol 应用代码..."
 APP_RES="${APP_BUNDLE}/Contents/Resources/app"
 APP_ITEMS=(brain senses protocol version.txt config.example.yaml)
-if (( WITH_GODOT == 1 )); then
-  APP_ITEMS+=(body_godot)
-fi
 for item in "${APP_ITEMS[@]}"; do
   rsync -a \
     --exclude '__pycache__' \
@@ -310,13 +284,7 @@ rsync -a \
   --exclude 'distutils-precedence.pth' \
   "${SITE_SRC}/" "${PY_DEST}/lib/python3.12/site-packages/"
 
-# 6. Optional Godot runtime
-if (( WITH_GODOT == 1 )) && [[ -n "${GODOT_APP_SRC}" ]]; then
-  echo "✨ 打包可选 Godot 4 运行时..."
-  cp -R "${GODOT_APP_SRC}" "${APP_BUNDLE}/Contents/Resources/Godot.app"
-fi
-
-# 7. Precompile bytecode, strip quarantine/resource forks and sign
+# 6. Precompile bytecode, strip quarantine/resource forks and sign
 echo "🧹 清理旧字节码缓存..."
 find "${APP_BUNDLE}" -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "${APP_BUNDLE}" -name "*.pyc" -type f -delete 2>/dev/null || true
