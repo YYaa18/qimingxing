@@ -1391,7 +1391,6 @@
             {
               "enum": [
                 "body_godot",
-                "body_web",
                 "body_macos",
                 "body_windows",
                 "senses"

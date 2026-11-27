@@ -23,11 +23,11 @@ git worktree add /tmp/qmx-baseline 22ca135
 |---|---:|---:|---:|
 | Python 测试 | 276 | ≥276 | **282**（Phase 1a：+6） |
 | Swift 测试 | 0 | 1a ≥20；Phase 4 ≥80 | **27**（Phase 1a） |
-| `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | 5 文件 / 11 次（未动，1b） |
-| `body_web` 代码行 | 1,933 | 0 | 1,933（未动，1b） |
-| `body_web` 打包产物 | 随 `Resources/app/body_web` 打入 | 不打包 | 待填（1b） |
+| `body_web` 产品代码引用 | 5 文件 / 11 次 | 0 | **0**（Phase 1b） |
+| `body_web` 代码行 | 1,933 | 0 | **0**（Phase 1b） |
+| `body_web` 打包产物 | 随 `Resources/app/body_web` 打入 | 不打包 | **不在产物内**（Phase 1b） |
 | `body_godot` 产品代码引用 | 7 文件 / 20 次 | 0（Phase 2） | 7 文件 / 20 次 |
-| 应用包体 | 417.5 MB | ≤ 基线 | 待填（1b 后重建） |
+| 应用包体 | 417.5 MB | ≤ 基线 | **418 MB**（body_web 仅 64K，体积由 Python runtime 主导） |
 | `brain/hub.py` | 3,135 行 | 不增长 | **3,207**（1a 净增 72；Phase 5 基线改为 3,207） |
 | `QuickEntryPanel.swift` | 2,548 行 | 不增长 | **2,614**（1a 净增 66） |
 | `UIPreviewDumper.swift` | 1,342 行 | 移出生产 target | **1,371**（新增卡片 fixture） |
@@ -118,6 +118,19 @@ shell_macos/.build/debug/Qimingxing --dump-ui /tmp/qmx-ui-light --light
 - 卡片动作 registry 按容量（200）淘汰，不按回合失效——卡片在回合结束后仍需可点。
 - 表格签名只比较表头与前 3 行，以兼容 brain 侧 15×100 截断。
 - 1a 是功能净增：`hub.py` +72 行、`QuickEntryPanel.swift` +66 行；Phase 5 的"只降不升"基线改为 3,207 / 2,614。
+
+### 3.2 Phase 1b 证据
+
+```bash
+.venv/bin/python -m pytest -q                 # 282 passed
+.venv/bin/python -m protocol.export_schema    # body_web refs: 0
+find dist/Qimingxing.app -name "body_web*"    # 空
+codesign --verify --deep --strict dist/Qimingxing.app   # OK
+./scripts/build_macos_app.sh                  # 418M
+shell_macos/.build/debug/Qimingxing --dump-ui /tmp/qmx-ui-dark2
+```
+
+`GET /` 返回 `{"service":"qimingxing","version":"1.0.4","status":"ok","ui":"native"}`；`/app.js`、`/styles.css` 返回 404。
 
 ## 4. 性能
 

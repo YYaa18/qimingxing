@@ -15,7 +15,7 @@ import uvicorn
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from brain.artifact_store import ArtifactStore
 from brain.audio import ASRProvider, TTSProvider
@@ -1016,16 +1016,15 @@ def create_app(
         return JSONResponse({"status": "ok" if ok else "noop", "ok": ok, "message": msg})
 
     @app.get("/")
-    async def index() -> FileResponse:
-        return FileResponse(_REPO_ROOT / "body_web" / "index.html")
-
-    @app.get("/app.js")
-    async def body_js() -> FileResponse:
-        return FileResponse(_REPO_ROOT / "body_web" / "app.js", media_type="application/javascript")
-
-    @app.get("/styles.css")
-    async def body_css() -> FileResponse:
-        return FileResponse(_REPO_ROOT / "body_web" / "styles.css", media_type="text/css")
+    async def index() -> JSONResponse:
+        return JSONResponse(
+            {
+                "service": "qimingxing",
+                "version": SERVER_VERSION,
+                "status": "ok",
+                "ui": "native",
+            }
+        )
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

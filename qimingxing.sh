@@ -244,12 +244,9 @@ start_godot() {
 }
 
 cmd_start() {
-  local no_open=0
   local with_godot=0
   for arg in "$@"; do
-    if [[ "${arg}" == "--no-open" ]]; then
-      no_open=1
-    elif [[ "${arg}" == "--with-godot" ]]; then
+    if [[ "${arg}" == "--with-godot" ]]; then
       with_godot=1
     fi
   done
@@ -263,10 +260,8 @@ cmd_start() {
 
   echo ""
   echo "🌟 启明星已就绪: ${BASE_HTTP}/"
+  echo "   原生 App: 启明星（QuickEntry 热键 ⌥Space）"
   echo "   日志文件: ${BRAIN_LOG} | ${SENSES_LOG}"
-  if (( no_open == 0 )) && (( with_godot == 0 )) && command -v open >/dev/null 2>&1; then
-    open "${BASE_HTTP}/"
-  fi
 }
 
 cmd_stop() {
@@ -366,9 +361,9 @@ usage() {
 用法: ./qimingxing.sh <command> [options]
 
 Commands:
-  start [--no-open] [--with-godot]    一键启动 Brain + Senses（可选同步拉起 Godot 桌面真身）
+  start [--with-godot]    一键启动 Brain + Senses（可选同步拉起 Godot 桌面真身）
   stop                                一键停止 Godot、Senses 与 Brain
-  restart [--no-open] [--with-godot]  重启全部服务
+  restart [--with-godot]  重启全部服务
   status                              查看 Brain / Senses / Godot 运行状态与健康检查
   logs                                实时查看后台日志
 EOF

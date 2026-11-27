@@ -57,7 +57,11 @@ def test_ws_origin_guard_rejects_evil_origins(tmp_path: Path) -> None:
                         "ts": 1,
                         "source": "body",
                         "type": "system.hello",
-                        "payload": {"client_name": "body_web", "role": "body"},
+                        "payload": {
+                            "client_name": "native_test",
+                            "role": "body",
+                            "client_type": "body_macos",
+                        },
                     }
                 )
             )
@@ -255,7 +259,11 @@ def test_ui_state_ui_command_and_approval_reconnect_sync(tmp_path: Path) -> None
                             "ts": 6,
                             "source": "body",
                             "type": "system.hello",
-                            "payload": {"client_name": "body_web", "role": "body"},
+                            "payload": {
+                            "client_name": "native_test",
+                            "role": "body",
+                            "client_type": "body_macos",
+                        },
                         }
                     )
                 )
@@ -265,6 +273,25 @@ def test_ui_state_ui_command_and_approval_reconnect_sync(tmp_path: Path) -> None
                 assert recovered_ui["type"] == "ui.state"
                 assert len(recovered_ui["payload"]["pending_approvals"]) == 1
                 aid = recovered_ui["payload"]["pending_approvals"][0]["approval_id"]
+
+                # The client declares body_macos, so it is ui_subscribed.
+                # Assert the broadcast path itself (hub.py:_broadcast_ui_state),
+                # not just the pending-approval fallback.
+                web_ws.send_text(
+                    json.dumps(
+                        {
+                            "v": "1.0",
+                            "id": "ui_1",
+                            "ts": 6,
+                            "source": "body",
+                            "type": "ui.set_state",
+                            "payload": {"patch": {"earcons": False}},
+                        }
+                    )
+                )
+                broadcast_ui = json.loads(web_ws.receive_text())
+                assert broadcast_ui["type"] == "ui.state"
+                assert broadcast_ui["payload"]["earcons"] is False
 
                 # Resolve from web_ws -> shell_ws receives tool.approval_resolved
                 web_ws.send_text(

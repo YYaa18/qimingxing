@@ -112,6 +112,8 @@ REF_SUFFIXES = {
     ".py", ".swift", ".sh", ".js", ".html", ".css", ".gd",
     ".json", ".md", ".yaml", ".yml", ".toml", ".txt",
 }
+# The metrics script names these tokens itself; do not count it as product code.
+REF_SKIP_FILES = {Path(__file__).resolve()}
 
 
 def reference_counts() -> dict[str, dict[str, int]]:
@@ -137,6 +139,8 @@ def reference_counts() -> dict[str, dict[str, int]]:
                         if p.is_file() and p.suffix in REF_SUFFIXES
                     ]
                 for path in candidates:
+                    if path.resolve() in REF_SKIP_FILES:
+                        continue
                     if any(part in EXCLUDED_DIRS for part in path.parts):
                         continue
                     try:

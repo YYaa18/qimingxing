@@ -539,7 +539,7 @@ class Hub:
             conn.role = payload.role
             conn.client_name = payload.client_name
             conn.client_type = payload.client_type or (
-                "body_web" if payload.role == "body" else "senses"
+                "body_generic" if payload.role == "body" else "senses"
             )
             conn.platform = payload.platform or (
                 "macos"
