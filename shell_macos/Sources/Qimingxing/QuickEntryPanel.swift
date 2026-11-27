@@ -2337,11 +2337,12 @@ private final class QMXTextView: NSTextView {
         invalidateCaret()
         let timer = Timer(
             timeInterval: 0.5,
-            target: self,
-            selector: #selector(blinkCaret),
-            userInfo: nil,
             repeats: true
-        )
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.blinkCaret()
+            }
+        }
         RunLoop.main.add(timer, forMode: .common)
         caretTimer = timer
     }
@@ -2353,7 +2354,7 @@ private final class QMXTextView: NSTextView {
         invalidateCaret()
     }
 
-    @objc private func blinkCaret() {
+    private func blinkCaret() {
         caretVisible.toggle()
         invalidateCaret()
     }

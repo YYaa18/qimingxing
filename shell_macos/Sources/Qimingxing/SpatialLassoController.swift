@@ -284,6 +284,7 @@ final class LassoPopoverState: ObservableObject {
 final class SpatialLassoController: NSObject {
     private let brainClient: BrainClient
     private var overlayPanel: LassoOverlayPanel?
+    private var cursorPushed = false
     private var popoverPanel: LassoPopoverPanel?
     private let popoverState = LassoPopoverState()
     private var activeSelectionRect: CGRect = .zero
@@ -298,6 +299,10 @@ final class SpatialLassoController: NSObject {
     }
 
     func startSelection() {
+        if overlayPanel != nil {
+            cancelSelection()
+            return
+        }
         closePopover()
 
         let mouse = NSEvent.mouseLocation
@@ -331,6 +336,7 @@ final class SpatialLassoController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
+        panel.ignoresMouseEvents = false
         panel.onCancel = { [weak self] in self?.cancelSelection() }
 
         let view = LassoSelectionView(frame: NSRect(origin: .zero, size: screen.frame.size))
@@ -347,12 +353,20 @@ final class SpatialLassoController: NSObject {
 
         panel.contentView = view
         overlayPanel = panel
+        if !cursorPushed {
+            NSCursor.crosshair.push()
+            cursorPushed = true
+        }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(view)
     }
 
     func cancelSelection() {
+        if cursorPushed {
+            NSCursor.pop()
+            cursorPushed = false
+        }
         overlayPanel?.orderOut(nil)
         overlayPanel = nil
     }

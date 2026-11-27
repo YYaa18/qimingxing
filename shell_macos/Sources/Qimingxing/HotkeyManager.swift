@@ -259,43 +259,31 @@ final class HotkeyManager {
         }
     }
 
+    static func dispatchCarbonEvent(id: UInt32, isRelease: Bool) {
+        guard let mgr = sharedInstance else { return }
+        if isRelease {
+            mgr.releaseCallbacks[id]?()
+        } else {
+            mgr.pressCallbacks[id]?()
+        }
+    }
+
     private func installHandlerIfNeeded() {
         guard handlerRef == nil else { return }
         let eventTypes = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
         ]
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, event, _ in
-                var hkID = EventHotKeyID()
-                let status = GetEventParameter(
-                    event,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hkID
-                )
-                guard status == noErr, let event else { return noErr }
-                let kind = GetEventKind(event)
-                let targetID = hkID.id
-                Task { @MainActor in
-                    guard let mgr = HotkeyManager.sharedInstance else { return }
-                    if kind == UInt32(kEventHotKeyReleased) {
-                        mgr.releaseCallbacks[targetID]?()
-                    } else {
-                        mgr.pressCallbacks[targetID]?()
-                    }
-                }
-                return noErr
-            },
-            eventTypes.count,
-            eventTypes,
-            nil,
-            &handlerRef
-        )
+        _ = eventTypes.withUnsafeBufferPointer { buf in
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                qmxCarbonHotKeyHandler,
+                buf.count,
+                buf.baseAddress,
+                nil,
+                &handlerRef
+            )
+        }
     }
 
     private func register(
@@ -356,4 +344,29 @@ final class HotkeyManager {
         guard let kc = keyMap[keyPart] else { return nil }
         return (UInt32(kc), mods)
     }
+}
+
+private nonisolated func qmxCarbonHotKeyHandler(
+    _ nextHandler: EventHandlerCallRef?,
+    _ event: EventRef?,
+    _ userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let event else { return noErr }
+    var hkID = EventHotKeyID()
+    let status = GetEventParameter(
+        event,
+        EventParamName(kEventParamDirectObject),
+        EventParamType(typeEventHotKeyID),
+        nil,
+        MemoryLayout<EventHotKeyID>.size,
+        nil,
+        &hkID
+    )
+    guard status == noErr else { return noErr }
+    let targetID = hkID.id
+    let isRelease = (GetEventKind(event) == UInt32(kEventHotKeyReleased))
+    DispatchQueue.main.async {
+        HotkeyManager.dispatchCarbonEvent(id: targetID, isRelease: isRelease)
+    }
+    return noErr
 }
