@@ -249,6 +249,28 @@ enum UIPreviewDumper {
             to: outputDir.appendingPathComponent("quick_entry_thinking.png")
         )
 
+        // 2c. Quick Entry (Phase 3 Ghost Write captured selection capsule)
+        client.isGenerating = false
+        let inputStateGhost = QuickEntryInputState()
+        let sampleLines = (1...18).map { "line \($0)" }.joined(separator: "\n")
+        inputStateGhost.capturedSelection = CapturedSelectionContext.make(
+            text: sampleLines,
+            appName: "Xcode",
+            bundleId: "com.apple.dt.Xcode"
+        )
+        let qeGhost = QuickEntryRootView(
+            brainClient: client,
+            desktopActions: desktop,
+            workspaceStore: workspaceStore,
+            inputState: inputStateGhost,
+            onClose: {}
+        )
+        render(
+            qeGhost,
+            size: CGSize(width: QuickEntryLayout.chatWidth, height: QuickEntryLayout.idleHeight + 34),
+            to: outputDir.appendingPathComponent("quick_entry_ghost_selection.png")
+        )
+
         // 3. Menu Bar Popover
         let popover = MenuBarPopoverView(
             brainClient: client,
@@ -1091,5 +1113,79 @@ enum Phase2Verifier {
             defer: false
         )
         check(!capsulePanel.canBecomeKey && !capsulePanel.canBecomeMain, "WalkieTalkieCapsulePanel must never steal key/main focus")
+    }
+}
+
+@MainActor
+enum Phase3Verifier {
+    private static func check(_ condition: Bool, _ message: String) {
+        if !condition {
+            fatalError("PHASE3_VERIFY FAIL: \(message)")
+        }
+    }
+
+    static func runAll() {
+        verifyCapturedSelectionAndPrompt()
+        verifyPasteboardSnapshotRoundTrip()
+        verifyDragShakeDetector()
+        print("PHASE3_VERIFY PASS")
+    }
+
+    private static func verifyCapturedSelectionAndPrompt() {
+        check(
+            CapturedSelectionContext.make(text: "   \n\t ", appName: "Notes", bundleId: "com.apple.Notes") == nil,
+            "whitespace-only selection must be ignored"
+        )
+        let lines = (1...18).map { "let line\($0) = \($0)" }.joined(separator: "\n")
+        guard let ctx = CapturedSelectionContext.make(text: lines, appName: "Xcode", bundleId: "com.apple.dt.Xcode") else {
+            check(false, "valid multiline selection must succeed")
+            return
+        }
+        check(ctx.lineCount == 18 && ctx.summaryLabel == "已捕获 · Xcode 选区 · 18 行", "summaryLabel mismatch: \(ctx.summaryLabel)")
+
+        let prompt = GhostWriteEngine.formatPromptWithSelection(userPrompt: "优化这段代码", selection: ctx)
+        check(prompt.contains("Xcode") && prompt.contains("let line18 = 18") && prompt.contains("优化这段代码"), "formatted ghost write prompt missing fields")
+    }
+
+    private static func verifyPasteboardSnapshotRoundTrip() {
+        let items = [
+            PasteboardSnapshotItem(entries: [
+                .init(typeRawValue: NSPasteboard.PasteboardType.string.rawValue, data: Data("原始剪贴板内容".utf8)),
+                .init(typeRawValue: "com.example.custom-type", data: Data([0xDE, 0xAD, 0xBE, 0xEF])),
+            ])
+        ]
+        check(PasteboardSnapshot.roundTripVerify(items: items), "pasteboard snapshot must losslessly preserve multi-type items")
+    }
+
+    private static func verifyDragShakeDetector() {
+        var detector = DragShakeDetector()
+
+        // Linear drag in one direction must not trigger
+        check(!detector.record(x: 100, at: 1.00), "initial sample should not trigger")
+        check(!detector.record(x: 120, at: 1.05), "linear drag step 1 should not trigger")
+        check(!detector.record(x: 140, at: 1.10), "linear drag step 2 should not trigger")
+        check(!detector.record(x: 165, at: 1.15), "linear drag step 3 should not trigger")
+
+        // Micro-jitter < 12pt must not trigger
+        check(!detector.record(x: 158, at: 1.18), "micro jitter should be ignored")
+
+        // 3 rapid reversals >= 12pt within 400ms must trigger
+        var fast = DragShakeDetector()
+        check(!fast.record(x: 500, at: 2.00), "start")
+        check(!fast.record(x: 524, at: 2.07), "right move")
+        check(!fast.record(x: 496, at: 2.14), "reversal 1")
+        check(!fast.record(x: 530, at: 2.21), "reversal 2")
+        check(fast.record(x: 498, at: 2.28), "reversal 3 within 400ms must trigger")
+
+        // Immediate follow-up inside 1.2s cooldown must be suppressed
+        check(!fast.record(x: 530, at: 2.35), "cooldown must suppress immediate repeat")
+        check(!fast.record(x: 495, at: 2.42), "cooldown must suppress reversal 1")
+
+        // Slow reversals > 400ms must reset and not trigger
+        var slow = DragShakeDetector()
+        check(!slow.record(x: 500, at: 5.00), "slow start")
+        check(!slow.record(x: 524, at: 5.20), "slow right")
+        check(!slow.record(x: 496, at: 5.45), "window expired -> reset")
+        check(!slow.record(x: 530, at: 5.65), "only reversal 1 after reset")
     }
 }

@@ -281,7 +281,9 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
     private var idleContentHeight: CGFloat {
         let errorH: CGFloat = brainClient.errorBannerText.isEmpty ? 0 : 40
+        let ghostH: CGFloat = inputState.capturedSelection == nil ? 0 : 34
         return QuickEntryLayout.idleHeight
+            + ghostH
             + QuickEntryLayout.attachmentBarHeight(
                 stagedCount: inputState.stagedAttachments.count,
                 uploadingCount: inputState.uploadingNames.count
@@ -337,9 +339,13 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        let wasVisible = isVisible
         if let front = NSWorkspace.shared.frontmostApplication,
            front.bundleIdentifier != Bundle.main.bundleIdentifier {
             previousApp = front
+        }
+        if !wasVisible && inputState.capturedSelection == nil && !brainClient.isGenerating {
+            inputState.capturedSelection = GhostWriteEngine.captureSelection(from: previousApp)
         }
         ensurePanel()
         guard let panel else { return }
@@ -401,6 +407,21 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         brainClient.sendText(trimmed, attachments: [], includeScreen: false)
     }
 
+    func performGhostWriteReplace(answer: String) {
+        let targetApp = previousApp
+        inputState.ghostWriteTurnId = nil
+        hideAndRestoreFocus()
+        GhostWriteEngine.replaceSelection(with: answer, targetApp: targetApp) { replaced in
+            if replaced {
+                TaskToastController.shared.show(
+                    title: "已原位替换",
+                    message: "内容已写回目标应用选区",
+                    isError: false
+                ) {}
+            }
+        }
+    }
+
     func hideAndRestoreFocus() {
         stopHeightDriver()
         inputState.isWorkspaceWingOpen = false
@@ -445,6 +466,9 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             onCloseWing: { [weak self] in self?.hideWorkspaceWing() },
             onSplitWing: { [weak self] in self?.detachWorkspace() },
             onSplitMedia: { [weak self] in self?.detachMediaViewer() },
+            onGhostWriteReplace: { [weak self] answer in
+                self?.performGhostWriteReplace(answer: answer)
+            },
             onDesiredHeightChange: { [weak self] height in
                 self?.resize(toContentHeight: height)
             }
@@ -661,6 +685,8 @@ final class QuickEntryInputState: ObservableObject {
     @Published var includeScreen: Bool = false
     @Published var stagedAttachments: [StagedAttachment] = []
     @Published var uploadingNames: [String] = []
+    @Published var capturedSelection: CapturedSelectionContext? = nil
+    @Published var ghostWriteTurnId: String? = nil
     @Published var focusRequestToken: UUID = UUID()
     @Published var isExpanded: Bool = false
     @Published var forceExpanded: Bool = false
@@ -678,6 +704,7 @@ struct QuickEntryRootView: View {
     var onCloseWing: () -> Void = {}
     var onSplitWing: () -> Void = {}
     var onSplitMedia: () -> Void = {}
+    var onGhostWriteReplace: (String) -> Void = { _ in }
     var onDesiredHeightChange: (CGFloat) -> Void = { _ in }
 
     @AppStorage("qmx.answerFontSize") private var answerFontSize: Double = 16
@@ -897,6 +924,11 @@ struct QuickEntryRootView: View {
         VStack(spacing: 0) {
             inputRow
 
+            if ghostCapsuleHeight > 0 {
+                ghostSelectionBar
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             if attachmentBarHeight > 0 {
                 attachmentBar
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -1015,6 +1047,45 @@ struct QuickEntryRootView: View {
             .padding(.horizontal, 20)
         }
         .frame(height: attachmentBarHeight)
+    }
+
+    private var ghostCapsuleHeight: CGFloat {
+        inputState.capturedSelection == nil ? 0 : 34
+    }
+
+    private var ghostSelectionBar: some View {
+        HStack(spacing: 8) {
+            if let sel = inputState.capturedSelection {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.cursor")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(QMXTheme.accent)
+                    Text(sel.summaryLabel)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(QMXTheme.textPrimary)
+                        .lineLimit(1)
+                    Button {
+                        inputState.capturedSelection = nil
+                        onDesiredHeightChange(chatHeight)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                            .frame(width: 14, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("取消引用选区")
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(Capsule().fill(QMXTheme.accent.opacity(0.12)))
+                .overlay(Capsule().strokeBorder(QMXTheme.accent.opacity(0.32), lineWidth: 0.5))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .frame(height: ghostCapsuleHeight)
     }
 
     private var errorBanner: some View {
@@ -1303,6 +1374,28 @@ struct QuickEntryRootView: View {
                         help: "没帮助",
                         action: { rateAnswer("down", turn: turn) }
                     )
+
+                    if inputState.ghostWriteTurnId == turn.id {
+                        Button {
+                            onGhostWriteReplace(turn.answer)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text("原位替换")
+                                Text("⌘↩")
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .opacity(0.75)
+                            }
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(QMXTheme.primaryText)
+                            .padding(.horizontal, 10)
+                            .frame(height: 24)
+                            .background(QMXTheme.primaryFill, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .padding(.leading, 6)
+                        .qmxTooltip("覆盖写回原应用选区 (⌘↩)")
+                    }
                 }
                 .transition(reduceMotion ? .identity : .opacity)
             }
@@ -1479,7 +1572,7 @@ struct QuickEntryRootView: View {
         let capped = min(measured, maxLinesContentHeight)
         let stage = 40 + promptBlock + promptSpacing + foldedStatusHeight + capped
             + sourceBarHeight + sourceGap + mediaBarHeight + mediaGap
-            + attachmentBarHeight + errorBannerHeight + 26 + 10
+            + ghostCapsuleHeight + attachmentBarHeight + errorBannerHeight + 26 + 10
         return max(
             thinkingBase,
             QuickEntryLayout.panelChrome + inputExtraHeight + stage
@@ -1491,11 +1584,11 @@ struct QuickEntryRootView: View {
     /// under the user's cursor. Resets only on collapse / New Chat.
     private var chatHeight: CGFloat {
         if !inputState.isExpanded {
-            return QuickEntryLayout.idleHeight + attachmentBarHeight + errorBannerHeight + inputExtraHeight
+            return QuickEntryLayout.idleHeight + ghostCapsuleHeight + attachmentBarHeight + errorBannerHeight + inputExtraHeight
         }
         let thinkingBase = QuickEntryLayout.compactThinkingHeight(
             promptHeight: promptBlockHeight,
-            attachmentBarHeight: attachmentBarHeight + errorBannerHeight,
+            attachmentBarHeight: ghostCapsuleHeight + attachmentBarHeight + errorBannerHeight,
             inputExtraHeight: inputExtraHeight
         )
         if isThinking || latestTurn?.answer.isEmpty != false {
@@ -1621,6 +1714,8 @@ struct QuickEntryRootView: View {
         inputState.forceExpanded = false
         inputState.stagedAttachments = []
         inputState.uploadingNames = []
+        inputState.capturedSelection = nil
+        inputState.ghostWriteTurnId = nil
         brainClient.clearHistory()
         scrollController.resetForNewTurn()
         inputState.focusRequestToken = UUID()
@@ -1631,6 +1726,7 @@ struct QuickEntryRootView: View {
         let text = inputState.text
         let attachments = inputState.stagedAttachments
         let withScreen = inputState.includeScreen
+        let selectionContext = inputState.capturedSelection
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else {
             return
         }
@@ -1649,10 +1745,22 @@ struct QuickEntryRootView: View {
             brainClient.errorBannerText = "附件还在上传，请稍候再发送。"
             return
         }
+        let outgoingPrompt: String
+        if let selectionContext {
+            outgoingPrompt = GhostWriteEngine.formatPromptWithSelection(userPrompt: text, selection: selectionContext)
+        } else {
+            outgoingPrompt = text
+        }
         inputState.forceExpanded = true
         inputState.text = ""
         inputState.stagedAttachments = []
-        brainClient.sendText(text, attachments: attachments, includeScreen: withScreen)
+        inputState.capturedSelection = nil
+        brainClient.sendText(outgoingPrompt, attachments: attachments, includeScreen: withScreen)
+        if selectionContext != nil {
+            inputState.ghostWriteTurnId = brainClient.currentTurnId
+        } else {
+            inputState.ghostWriteTurnId = nil
+        }
     }
 
     private func pickAttachmentFile() {

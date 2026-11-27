@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        if args.contains("--verify-phase3") {
+            Phase3Verifier.runAll()
+            NSApp.terminate(nil)
+            return
+        }
         if let idx = args.firstIndex(of: "--dump-ui"), idx + 1 < args.count {
             let dirURL = URL(fileURLWithPath: args[idx + 1], isDirectory: true)
             let appearance: NSAppearance.Name = args.contains("--light") ? .aqua : .darkAqua
@@ -323,6 +328,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.spatialLassoController.startSelection()
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .qmxDragShakeSettingChanged)
+            .sink { [weak self] note in
+                let enabled = (note.object as? Bool)
+                    ?? UserDefaults.standard.bool(forKey: DropPocketController.dragShakeDefaultsKey)
+                Task { @MainActor [weak self] in
+                    self?.dropPocketController.setDragShakeEnabled(enabled)
                 }
             }
             .store(in: &cancellables)

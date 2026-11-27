@@ -143,6 +143,52 @@ struct DropPocketItem: Identifiable, Equatable {
     var thumbnail: NSImage?
 }
 
+struct DragShakeDetector {
+    static let windowDuration: TimeInterval = 0.40
+    static let minSegmentDeltaX: CGFloat = 12
+    static let requiredReversals: Int = 3
+    static let cooldown: TimeInterval = 1.2
+
+    private var windowStartAt: TimeInterval?
+    private var anchorX: CGFloat = 0
+    private var lastDirection: Int = 0
+    private var reversals: Int = 0
+    private var lastTriggeredAt: TimeInterval = -100
+
+    mutating func record(x: CGFloat, at timestamp: TimeInterval) -> Bool {
+        if timestamp - lastTriggeredAt < Self.cooldown {
+            windowStartAt = nil
+            lastDirection = 0
+            reversals = 0
+            anchorX = x
+            return false
+        }
+        guard let start = windowStartAt, timestamp - start <= Self.windowDuration else {
+            windowStartAt = timestamp
+            anchorX = x
+            lastDirection = 0
+            reversals = 0
+            return false
+        }
+        let dx = x - anchorX
+        guard abs(dx) >= Self.minSegmentDeltaX else { return false }
+        let dir = dx > 0 ? 1 : -1
+        anchorX = x
+        if lastDirection != 0 && dir != lastDirection {
+            reversals += 1
+            if reversals >= Self.requiredReversals {
+                lastTriggeredAt = timestamp
+                windowStartAt = nil
+                lastDirection = 0
+                reversals = 0
+                return true
+            }
+        }
+        lastDirection = dir
+        return false
+    }
+}
+
 // MARK: - Non-Activating Dark Obsidian Panel & Drag Destination Host
 
 @MainActor
@@ -267,6 +313,8 @@ private final class EdgeDropHostView: NSView {
 
 @MainActor
 final class DropPocketController: ObservableObject {
+    static let dragShakeDefaultsKey = "qmx.dropPocket.dragShakeEnabled"
+
     @Published private(set) var items: [DropPocketItem] = []
     @Published private(set) var isVisible: Bool = false
     @Published private(set) var phase: ShelfPhase = .idleEar
@@ -275,12 +323,56 @@ final class DropPocketController: ObservableObject {
     private var panel: DropShelfPanel?
     private var currentPlacement: ShelfPlacement?
     private let brainClient: BrainClient
+    private var shakeDetector = DragShakeDetector()
+    private var lastDragChangeCount: Int = -1
+    private nonisolated(unsafe) var dragShakeMonitor: Any?
 
     var onDeliverToQuickEntry: (([StagedAttachment], [String]) -> Void)?
     var onPendingCountChanged: ((Int) -> Void)?
 
     init(brainClient: BrainClient) {
         self.brainClient = brainClient
+        if !QMXTheme.isHeadlessDump, UserDefaults.standard.bool(forKey: Self.dragShakeDefaultsKey) {
+            setDragShakeEnabled(true)
+        }
+    }
+
+    deinit {
+        if let dragShakeMonitor {
+            NSEvent.removeMonitor(dragShakeMonitor)
+        }
+    }
+
+    func setDragShakeEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.dragShakeDefaultsKey)
+        if let dragShakeMonitor {
+            NSEvent.removeMonitor(dragShakeMonitor)
+            self.dragShakeMonitor = nil
+        }
+        guard enabled else { return }
+        dragShakeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDragged) { [weak self] _ in
+            let mouseX = NSEvent.mouseLocation.x
+            let uptime = ProcessInfo.processInfo.systemUptime
+            Task { @MainActor [weak self] in
+                self?.processGlobalDragSample(mouseX: mouseX, timestamp: uptime)
+            }
+        }
+    }
+
+    private func processGlobalDragSample(mouseX: CGFloat, timestamp: TimeInterval) {
+        guard !isVisible else { return }
+        let dragPB = NSPasteboard(name: .drag)
+        let currentCount = dragPB.changeCount
+        if currentCount != lastDragChangeCount {
+            lastDragChangeCount = currentCount
+            shakeDetector = DragShakeDetector()
+        }
+        let supportedTypes: [NSPasteboard.PasteboardType] = [.fileURL, .png, .tiff, .URL, .string]
+        guard dragPB.availableType(from: supportedTypes) != nil else { return }
+        if shakeDetector.record(x: mouseX, at: timestamp) {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            showAtCursorEdge()
+        }
     }
 
     var pendingCount: Int {
