@@ -454,7 +454,7 @@ enum UIPreviewDumper {
         lassoState.submittedQuestion = "这是什么报错？怎么修"
         lassoState.answerText = "这是 Swift 6 跨隔离域传递非 Sendable 值引发的编译错误。可以在回调中先提取 `CGImage` 或基础标量字段后再切换回 `@MainActor`。"
         render(
-            LassoPopoverView(state: lassoState, onSubmit: { _ in }, onPin: {}, onClose: {}),
+            LassoPopoverView(state: lassoState, onSubmit: { _, _ in }, onPin: {}, onClose: {}),
             size: CGSize(width: SpatialLassoGeometry.popoverWidth, height: SpatialLassoGeometry.answeredHeight),
             to: outputDir.appendingPathComponent("lasso_popover.png")
         )
@@ -1072,6 +1072,15 @@ enum Phase2Verifier {
             visibleFrame: visible
         )
         check(nearBottom.minY >= 150 - 0.5 && nearBottom.maxX <= visible.maxX - 12 + 0.5, "bottom selection must flip above and clamp right edge")
+
+        // Inline artifact extraction for markdown card files
+        let tmpFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qmx_lasso_artifact_\(UUID().uuidString.prefix(6)).md")
+        try? "Translated English output".write(to: tmpFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+        let cap = ArtifactCapsuleItem(id: "c1", turnId: "t1", title: "译文卡片", path: tmpFile.path, mediaType: "text", actions: [])
+        let extracted = SpatialLassoGeometry.extractInlineArtifactText(media: [], capsules: [cap])
+        check(extracted.contains("Translated English output"), "extractInlineArtifactText must inline .md artifact content")
     }
 
     private static func verifyWalkieTalkiePanel() {

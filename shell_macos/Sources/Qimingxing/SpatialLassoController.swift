@@ -70,6 +70,67 @@ enum SpatialLassoGeometry {
         let clampedY = min(max(candidateOrigin.y, safe.minY), maxOriginY)
         return CGRect(origin: CGPoint(x: clampedX, y: clampedY), size: popoverSize)
     }
+
+    static func extractInlineArtifactText(
+        media: [MediaItem],
+        capsules: [ArtifactCapsuleItem]
+    ) -> String {
+        var sections: [String] = []
+        var seenPaths = Set<String>()
+        let textExts: Set<String> = [
+            "md", "markdown", "txt", "json", "csv",
+            "py", "swift", "ts", "js", "html", "xml", "yaml", "yml"
+        ]
+
+        func appendFileIfReadable(title: String, path: String) {
+            let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedPath.isEmpty, !seenPaths.contains(trimmedPath) else { return }
+            seenPaths.insert(trimmedPath)
+
+            let url = URL(fileURLWithPath: trimmedPath)
+            let ext = url.pathExtension.lowercased()
+            guard ext.isEmpty || textExts.contains(ext) else { return }
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: trimmedPath),
+                  let size = attrs[.size] as? NSNumber,
+                  size.intValue > 0,
+                  size.intValue <= 65_536,
+                  let raw = try? String(contentsOf: url, encoding: .utf8)
+            else { return }
+
+            let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty else { return }
+            if !title.isEmpty && !clean.hasPrefix("#") {
+                sections.append("[\(title)]\n\(clean)")
+            } else {
+                sections.append(clean)
+            }
+        }
+
+        for item in media {
+            appendFileIfReadable(title: item.title, path: item.localPath)
+        }
+        for cap in capsules {
+            appendFileIfReadable(title: cap.title, path: cap.path)
+        }
+
+        if sections.isEmpty {
+            for item in media where !item.previewColumns.isEmpty {
+                let header = "| " + item.previewColumns.joined(separator: " | ") + " |"
+                let sep = "| " + item.previewColumns.map { _ in "---" }.joined(separator: " | ") + " |"
+                let body = item.previewRows.map { "| " + $0.joined(separator: " | ") + " |" }.joined(separator: "\n")
+                let titleLine = item.title.isEmpty ? "" : "[\(item.title)]\n"
+                sections.append(titleLine + header + "\n" + sep + (body.isEmpty ? "" : "\n" + body))
+            }
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
+}
+
+struct LassoArtifactRef: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let path: String
 }
 
 // MARK: - Overlay, Popover & Pinned Panels
@@ -112,6 +173,7 @@ struct PinnedNoteItem: Identifiable, Equatable {
     let thumbnail: NSImage?
     let question: String
     let answer: String
+    var artifactFiles: [LassoArtifactRef] = []
 }
 
 // MARK: - Full-Screen Crosshair Selection View
@@ -271,12 +333,13 @@ final class LassoPopoverState: ObservableObject {
     @Published var questionText: String = ""
     @Published var submittedQuestion: String = ""
     @Published var answerText: String = ""
+    @Published var artifactFiles: [LassoArtifactRef] = []
     @Published var isStreamingAnswer: Bool = false
     @Published var statusNote: String = ""
     @Published var boundTurnId: String?
 
     var hasAnswerUI: Bool {
-        isStreamingAnswer || !answerText.isEmpty || !statusNote.isEmpty
+        isStreamingAnswer || !answerText.isEmpty || !statusNote.isEmpty || !artifactFiles.isEmpty
     }
 }
 
@@ -468,6 +531,7 @@ final class SpatialLassoController: NSObject {
         popoverState.questionText = ""
         popoverState.submittedQuestion = ""
         popoverState.answerText = ""
+        popoverState.artifactFiles = []
         popoverState.isStreamingAnswer = false
         popoverState.statusNote = ""
         popoverState.boundTurnId = nil
@@ -501,7 +565,9 @@ final class SpatialLassoController: NSObject {
 
         let view = LassoPopoverView(
             state: popoverState,
-            onSubmit: { [weak self] prompt in self?.submitPopoverQuestion(prompt) },
+            onSubmit: { [weak self] prompt, title in
+                self?.submitPopoverQuestion(prompt, displayTitle: title)
+            },
             onPin: { [weak self] in self?.pinCurrentAnswer() },
             onClose: { [weak self] in self?.closePopover() }
         )
@@ -521,7 +587,7 @@ final class SpatialLassoController: NSObject {
         p.makeKeyAndOrderFront(nil)
     }
 
-    private func submitPopoverQuestion(_ rawPrompt: String) {
+    private func submitPopoverQuestion(_ rawPrompt: String, displayTitle: String? = nil) {
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         guard brainClient.phase == .connected else {
@@ -534,9 +600,10 @@ final class SpatialLassoController: NSObject {
         }
 
         popoverState.statusNote = ""
-        popoverState.submittedQuestion = prompt
+        popoverState.submittedQuestion = displayTitle ?? prompt
         popoverState.questionText = ""
         popoverState.answerText = ""
+        popoverState.artifactFiles = []
         popoverState.isStreamingAnswer = true
         resizePopover(expanded: true)
 
@@ -565,25 +632,62 @@ final class SpatialLassoController: NSObject {
     }
 
     private func bindBrainMessages() {
-        Publishers.CombineLatest(brainClient.$messages, brainClient.$isGenerating)
-            .sink { [weak self] messages, isGenerating in
-                guard let self, let turnId = self.popoverState.boundTurnId else { return }
-                let assistantTexts = messages
-                    .filter { $0.turnId == turnId && !$0.isUser }
-                    .map { qmxCleanAssistantText($0.text) }
-                    .filter { !$0.isEmpty }
-                let combined = assistantTexts.joined(separator: "\n\n")
-                if !combined.isEmpty {
-                    self.popoverState.answerText = combined
-                    self.resizePopover(expanded: true)
-                }
-                let stillActive = isGenerating && self.brainClient.currentTurnId == turnId
-                self.popoverState.isStreamingAnswer = stillActive
-                if !stillActive && !self.brainClient.errorBannerText.isEmpty && combined.isEmpty {
-                    self.popoverState.statusNote = self.brainClient.errorBannerText
-                }
+        Publishers.CombineLatest3(
+            brainClient.$messages,
+            brainClient.$artifactCapsules,
+            brainClient.$isGenerating
+        )
+        .sink { [weak self] messages, capsules, isGenerating in
+            guard let self, let turnId = self.popoverState.boundTurnId else { return }
+            let turnAssistantEntries = messages.filter { $0.turnId == turnId && !$0.isUser }
+            let assistantTexts = turnAssistantEntries
+                .map { qmxCleanAssistantText($0.text) }
+                .filter { !$0.isEmpty }
+            let combined = assistantTexts.joined(separator: "\n\n")
+
+            let turnMedia = turnAssistantEntries.flatMap(\.media)
+            let turnCapsules = capsules.filter { $0.turnId == turnId }
+
+            var refs: [LassoArtifactRef] = []
+            var seenRefPaths = Set<String>()
+            for m in turnMedia where !m.localPath.isEmpty && !seenRefPaths.contains(m.localPath) {
+                seenRefPaths.insert(m.localPath)
+                let label = m.title.isEmpty ? URL(fileURLWithPath: m.localPath).lastPathComponent : m.title
+                refs.append(LassoArtifactRef(id: m.localPath, title: label, path: m.localPath))
             }
-            .store(in: &cancellables)
+            for c in turnCapsules where !c.path.isEmpty && !seenRefPaths.contains(c.path) {
+                seenRefPaths.insert(c.path)
+                let label = c.title.isEmpty ? URL(fileURLWithPath: c.path).lastPathComponent : c.title
+                refs.append(LassoArtifactRef(id: c.path, title: label, path: c.path))
+            }
+            self.popoverState.artifactFiles = refs
+
+            let inlineExtra = SpatialLassoGeometry.extractInlineArtifactText(
+                media: turnMedia,
+                capsules: turnCapsules
+            )
+            let fullAnswer: String
+            if inlineExtra.isEmpty {
+                fullAnswer = combined
+            } else if combined.isEmpty {
+                fullAnswer = inlineExtra
+            } else if combined.contains(inlineExtra) {
+                fullAnswer = combined
+            } else {
+                fullAnswer = combined + "\n\n---\n\n" + inlineExtra
+            }
+
+            if !fullAnswer.isEmpty {
+                self.popoverState.answerText = fullAnswer
+                self.resizePopover(expanded: true)
+            }
+            let stillActive = isGenerating && self.brainClient.currentTurnId == turnId
+            self.popoverState.isStreamingAnswer = stillActive
+            if !stillActive && !self.brainClient.errorBannerText.isEmpty && fullAnswer.isEmpty {
+                self.popoverState.statusNote = self.brainClient.errorBannerText
+            }
+        }
+        .store(in: &cancellables)
     }
 
     // MARK: - Pinned Floating Note
@@ -593,7 +697,8 @@ final class SpatialLassoController: NSObject {
             id: UUID(),
             thumbnail: popoverState.thumbnail,
             question: popoverState.submittedQuestion.isEmpty ? "屏幕圈选问答" : popoverState.submittedQuestion,
-            answer: popoverState.answerText
+            answer: popoverState.answerText,
+            artifactFiles: popoverState.artifactFiles
         )
         let origin = popoverPanel?.frame.origin ?? activeSelectionRect.origin
         closePopover()
@@ -679,13 +784,35 @@ final class SpatialLassoController: NSObject {
 
 // MARK: - In-Place Popover & Pinned Note Views
 
+private struct LassoQuickChip: Identifiable {
+    let id: String
+    let title: String
+    let prompt: String
+}
+
 struct LassoPopoverView: View {
     @ObservedObject var state: LassoPopoverState
-    let onSubmit: (String) -> Void
+    let onSubmit: (String, String?) -> Void
     let onPin: () -> Void
     let onClose: () -> Void
 
-    private let quickChips = ["解释一下", "翻译", "排查报错"]
+    private let quickChips: [LassoQuickChip] = [
+        LassoQuickChip(
+            id: "explain",
+            title: "解释一下",
+            prompt: "请直接用清晰简洁的文字解释选中截图里的核心内容，直接输出正文，不要放到外部文件卡片中。"
+        ),
+        LassoQuickChip(
+            id: "translate",
+            title: "翻译",
+            prompt: "请将选中截图中的文字准确翻译（中文译为英文，外文译为中文），直接输出完整译文正文，不要放到外部文件卡片中。"
+        ),
+        LassoQuickChip(
+            id: "debug",
+            title: "排查报错",
+            prompt: "请直接分析选中截图里的报错原因并给出具体修复步骤，直接输出正文，不要放到外部文件卡片中。"
+        ),
+    ]
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -782,11 +909,11 @@ struct LassoPopoverView: View {
 
     private var quickChipRow: some View {
         HStack(spacing: 6) {
-            ForEach(quickChips, id: \.self) { chip in
+            ForEach(quickChips) { chip in
                 Button {
-                    onSubmit(chip)
+                    onSubmit(chip.prompt, chip.title)
                 } label: {
-                    Text(chip)
+                    Text(chip.title)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color.white.opacity(0.86))
                         .padding(.horizontal, 9)
@@ -802,7 +929,7 @@ struct LassoPopoverView: View {
 
     private var answerSection: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 if !state.answerText.isEmpty {
                     Text(state.answerText)
                         .font(.system(size: 12.5))
@@ -821,10 +948,45 @@ struct LassoPopoverView: View {
                             .foregroundStyle(Color.white.opacity(0.62))
                     }
                 }
+
+                if !state.artifactFiles.isEmpty {
+                    artifactChipList(state.artifactFiles)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private func artifactChipList(_ files: [LassoArtifactRef]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(files) { ref in
+                Button {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: ref.path))
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 10, weight: .medium))
+                        Text(ref.title)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                        Image(systemName: "arrow.up.forward")
+                            .font(.system(size: 9))
+                            .opacity(0.7)
+                    }
+                    .foregroundStyle(Color(red: 0.36, green: 0.88, blue: 1.0))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("打开 \(ref.path)")
+            }
+        }
     }
 
     private var inputRow: some View {
@@ -834,11 +996,11 @@ struct LassoPopoverView: View {
                 .font(.system(size: 12.5))
                 .foregroundStyle(Color.white)
                 .onSubmit {
-                    onSubmit(state.questionText)
+                    onSubmit(state.questionText, nil)
                 }
 
             Button {
-                onSubmit(state.questionText)
+                onSubmit(state.questionText, nil)
             } label: {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 11, weight: .bold))
@@ -922,11 +1084,35 @@ struct PinnedNoteView: View {
                 .frame(height: 0.5)
 
             ScrollView {
-                Text(note.answer)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Color.white.opacity(0.90))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(note.answer)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.white.opacity(0.90))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if !note.artifactFiles.isEmpty {
+                        ForEach(note.artifactFiles) { ref in
+                            Button {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: ref.path))
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "doc.text")
+                                        .font(.system(size: 10, weight: .medium))
+                                    Text(ref.title)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .lineLimit(1)
+                                }
+                                .foregroundStyle(Color(red: 0.36, green: 0.88, blue: 1.0))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .help("打开 \(ref.path)")
+                        }
+                    }
+                }
             }
         }
         .padding(12)
