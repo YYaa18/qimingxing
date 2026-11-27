@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController!
     private var quickEntryController: QuickEntryController!
     private var dropPocketController: DropPocketController!
+    private var walkieTalkieController: WalkieTalkieVoiceController!
+    private var spatialLassoController: SpatialLassoController!
     private var settingsController: SettingsWindowController!
     private var approvalController: ApprovalSheetController!
     private var workspaceStore: WorkspaceStore!
@@ -36,6 +38,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if args.contains("--verify-phase1") {
             Phase1Verifier.runAll()
+            NSApp.terminate(nil)
+            return
+        }
+        if args.contains("--verify-phase2") {
+            Phase2Verifier.runAll()
             NSApp.terminate(nil)
             return
         }
@@ -76,6 +83,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dropPocketController.onDeliverToQuickEntry = { [weak self] attachments, snippets in
             self?.quickEntryController.openWithStagedItems(attachments: attachments, textSnippets: snippets)
         }
+        walkieTalkieController = WalkieTalkieVoiceController()
+        walkieTalkieController.onTranscriptReady = { [weak self] text in
+            self?.quickEntryController.submitPromptText(text)
+        }
+        walkieTalkieController.onCancelled = { [weak self] in
+            self?.hotkeyManager.cancelQuickEntryHold()
+        }
+        spatialLassoController = SpatialLassoController(brainClient: brainClient)
         settingsController = SettingsWindowController(
             brainClient: brainClient,
             supervisor: supervisor,
@@ -115,7 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 )
             },
-            onOpenDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() }
+            onOpenDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() },
+            onSpatialLasso: { [weak self] in self?.spatialLassoController.startSelection() }
         )
         dropPocketController.onPendingCountChanged = { [weak self] count in
             self?.menuBarController.setDropPocketBadgeCount(count)
@@ -226,9 +242,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 settings: settingsHk,
                 cancel: cancelHk,
                 onQuickEntry: { [weak self] in self?.quickEntryController.toggle() },
+                onQuickEntryHoldStart: { [weak self] in self?.walkieTalkieController.startHoldRecording() },
+                onQuickEntryHoldEnd: { [weak self] in self?.walkieTalkieController.endHoldAndSubmit() },
+                onQuickEntryHoldCancel: { [weak self] in self?.walkieTalkieController.cancelRecording() },
                 onSettings: { [weak self] in self?.settingsController.show() },
                 onEmergencyStop: { [weak self] in self?.brainClient.cancelActiveTurn(reason: "hotkey_stop") },
-                onDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() }
+                onDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() },
+                onSpatialLasso: { [weak self] in self?.spatialLassoController.startSelection() }
             )
         }
         desktopActions.onNotificationOpenRequested = { [weak self] _ in
@@ -291,6 +311,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: .qmxToggleWalkieTalkie)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.walkieTalkieController.toggleClickRecording()
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .qmxStartSpatialLasso)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.spatialLassoController.startSelection()
+                }
+            }
+            .store(in: &cancellables)
+
         NotificationCenter.default.publisher(for: .qmxDetachWorkspace)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -313,9 +349,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func registerHotkeys() {
         hotkeyManager.registerDefaults(
             onQuickEntry: { [weak self] in self?.quickEntryController.toggle() },
+            onQuickEntryHoldStart: { [weak self] in self?.walkieTalkieController.startHoldRecording() },
+            onQuickEntryHoldEnd: { [weak self] in self?.walkieTalkieController.endHoldAndSubmit() },
+            onQuickEntryHoldCancel: { [weak self] in self?.walkieTalkieController.cancelRecording() },
             onSettings: { [weak self] in self?.settingsController.show() },
             onEmergencyStop: { [weak self] in self?.brainClient.cancelActiveTurn(reason: "hotkey_stop") },
-            onDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() }
+            onDropPocket: { [weak self] in self?.dropPocketController.toggleAtCursor() },
+            onSpatialLasso: { [weak self] in self?.spatialLassoController.startSelection() }
         )
     }
 }

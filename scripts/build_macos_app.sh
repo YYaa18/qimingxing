@@ -216,6 +216,8 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>启明星需要使用麦克风进行按住说话语音识别 (PTT)。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>启明星使用本地语音识别将您的按住说话内容实时转为文字。</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>启明星在您主动请求“看屏”时采集当前屏幕画面以辅助问答分析。</string>
 	<key>NSAppleEventsUsageDescription</key>
