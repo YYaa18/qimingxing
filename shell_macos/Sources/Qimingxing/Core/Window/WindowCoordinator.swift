@@ -25,6 +25,15 @@ final class WindowCoordinator {
 
     private(set) var keyOwner: WindowRole?
 
+    private var debugEnabled: Bool {
+        ProcessInfo.processInfo.environment["QMX_WINDOW_DEBUG"] == "1"
+    }
+
+    private func debugLog(_ message: @autoclosure () -> String) {
+        guard debugEnabled else { return }
+        NSLog("[QMXWindow] %@", message())
+    }
+
     var onPresent: ((WindowRole, ActivationPolicy) -> Void)?
     var onDismiss: ((WindowRole) -> Void)?
     var onSuspend: ((WindowRole, String) -> Void)?
@@ -68,6 +77,10 @@ final class WindowCoordinator {
 
         recomputeKeyOwner()
         onPresent?(request.role, request.activation)
+        debugLog(
+            "present \(request.role.rawValue) gen=\(lease.generation) "
+                + "key=\(keyOwner?.rawValue ?? "nil") active=\(activeRoles.map(\.rawValue))"
+        )
         return lease
     }
 
@@ -95,6 +108,10 @@ final class WindowCoordinator {
         }
         recomputeKeyOwner()
         onDismiss?(entry.role)
+        debugLog(
+            "dismiss \(entry.role.rawValue) key=\(keyOwner?.rawValue ?? "nil") "
+                + "active=\(activeRoles.map(\.rawValue))"
+        )
     }
 
     // MARK: - Suspend / resume
@@ -105,6 +122,7 @@ final class WindowCoordinator {
         suspended[role] = SuspendedEntry(entry: entry, reason: reason)
         recomputeKeyOwner()
         onSuspend?(role, reason)
+        debugLog("suspend \(role.rawValue) reason=\(reason) key=\(keyOwner?.rawValue ?? "nil")")
     }
 
     func resume(_ role: WindowRole) {
@@ -120,6 +138,7 @@ final class WindowCoordinator {
         entries.append(entry)
         recomputeKeyOwner()
         onResume?(role)
+        debugLog("resume \(role.rawValue) key=\(keyOwner?.rawValue ?? "nil")")
     }
 
     // MARK: - Queries
