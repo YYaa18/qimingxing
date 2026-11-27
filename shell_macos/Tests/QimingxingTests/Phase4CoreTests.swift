@@ -170,9 +170,10 @@ final class MarkdownTableParsingTests: XCTestCase {
     func testScanCapsColumnsAndReportsTotal() {
         let header = (0..<20).map { "H\($0)" }
         let row = (0..<20).map { "\($0)" }
-        let raw = "| " + header.joined(separator: " | ") + " |\n"
-            + "| " + header.map { _ in "---" }.joined(separator: " | ") + " |\n"
-            + "| " + row.joined(separator: " | ") + " |"
+        let headerLine: String = "| " + header.joined(separator: " | ") + " |"
+        let separator: String = "| " + header.map { _ in "---" }.joined(separator: " | ") + " |"
+        let rowLine: String = "| " + row.joined(separator: " | ") + " |"
+        let raw: String = [headerLine, separator, rowLine].joined(separator: "\n")
         let table = QMXMarkdownTables.scan(raw).first
         XCTAssertEqual(table?.columns.count, 15)
         XCTAssertEqual(table?.totalColumns, 20)
