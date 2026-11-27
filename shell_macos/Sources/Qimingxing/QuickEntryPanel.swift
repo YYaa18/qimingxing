@@ -77,7 +77,6 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private var heightEngine = MonotonicPanelHeightEngine(baseHeight: QuickEntryLayout.idleHeight)
     private var lastTurnIDForHeight: String?
     private var focusObservers: [NSObjectProtocol] = []
-    private var hiddenForMediaViewer = false
 
     var debugPanel: FloatingQuickEntryPanel? { panel }
     var debugInputState: QuickEntryInputState { inputState }
@@ -178,23 +177,6 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
     /// A large table viewer needs the whole screen. Hide the floating chat
     /// instead of letting it sit on top of the table.
-    func hideForMediaViewer() {
-        guard isVisible else { return }
-        hiddenForMediaViewer = true
-        stopHeightDriver()
-        inputState.isWorkspaceWingOpen = false
-        panel?.orderOut(nil)
-    }
-
-    func restoreAfterMediaViewer() {
-        guard hiddenForMediaViewer else { return }
-        hiddenForMediaViewer = false
-        show()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            NotificationCenter.default.post(name: .qmxFocusComposer, object: nil)
-        }
-    }
-
     func hideWorkspaceWing() {
         inputState.isWorkspaceWingOpen = false
         NotificationCenter.default.post(name: .qmxStopMediaPlayback, object: nil)
@@ -401,6 +383,8 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     /// Hide the panel without destroying it or its draft (coordinator suspend).
     func orderOutForSuspend() {
         stopHeightDriver()
+        // The wing is part of the panel; hiding the panel hides the wing too.
+        inputState.isWorkspaceWingOpen = false
         panel?.orderOut(nil)
     }
 

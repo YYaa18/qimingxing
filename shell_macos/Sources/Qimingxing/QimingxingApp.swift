@@ -115,9 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MediaViewerLauncher.openHandler = { [weak self] prefersLargeWindow in
             guard let self else { return }
             if prefersLargeWindow || self.workspaceController.isVisible {
-                if prefersLargeWindow, self.quickEntryController.isVisible {
-                    self.quickEntryController.hideForMediaViewer()
-                }
+                // Presenting .mediaDetached suspends QuickEntry in the
+                // coordinator; no special-case hiding here.
                 MediaViewerWindowController.shared.show(large: prefersLargeWindow)
             } else if self.quickEntryController.isVisible {
                 self.quickEntryController.showMediaViewer()
@@ -239,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func wireWindowCoordinator() {
+        MediaViewerWindowController.shared.windowCoordinator = windowCoordinator
         windowCoordinator.onPresent = { [weak self] role, policy in
             self?.focusArbitrator.activate(for: role, policy: policy)
         }
@@ -347,15 +347,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     } else {
                         self.workspaceController.show()
                     }
-                }
-            }
-            .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .qmxMediaViewerClosed)
-            .sink { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    self?.quickEntryController.restoreAfterMediaViewer()
                 }
             }
             .store(in: &cancellables)
