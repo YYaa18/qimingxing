@@ -236,7 +236,18 @@ enum UIPreviewDumper {
             inputState: inputStateThinking,
             onClose: {}
         )
-        render(qeThinking, size: CGSize(width: QuickEntryLayout.chatWidth, height: QuickEntryLayout.thinkingHeight), to: outputDir.appendingPathComponent("quick_entry_thinking.png"))
+        render(
+            qeThinking,
+            size: CGSize(
+                width: QuickEntryLayout.chatWidth,
+                height: QuickEntryLayout.compactThinkingHeight(
+                    promptHeight: 0,
+                    attachmentBarHeight: 0,
+                    inputExtraHeight: 0
+                )
+            ),
+            to: outputDir.appendingPathComponent("quick_entry_thinking.png")
+        )
 
         // 3. Menu Bar Popover
         let popover = MenuBarPopoverView(
@@ -448,7 +459,7 @@ enum UIPreviewDumper {
         }
         capturePanel(panel, to: outputDir.appendingPathComponent("panel_1_initial_idle.png"))
 
-        // Thinking phase
+        // Thinking phase (compact height based on prompt + 28pt status bar, not fixed 248pt)
         panelClient.isGenerating = true
         panelClient.messages = [
             ChatEntry(id: "pv_u1", turnId: "pv_t1", isUser: true, meta: "我", text: "帮我详细说明一下工作区与实时流式面板的作用")
@@ -456,8 +467,8 @@ enum UIPreviewDumper {
         pump(0.25)
         let thinkingFrame = panel.frame
         assertZeroSafeArea(panel, phase: "thinking")
-        if abs(thinkingFrame.height - QuickEntryLayout.thinkingHeight) > 0.5 {
-            fatalError("PANEL_VERIFY FAIL (thinking): expected height \(QuickEntryLayout.thinkingHeight), got \(thinkingFrame.height)")
+        if thinkingFrame.height <= QuickEntryLayout.idleHeight || thinkingFrame.height >= 248 {
+            fatalError("PANEL_VERIFY FAIL (thinking): expected compact height in (120, 248), got \(thinkingFrame.height)")
         }
 
         // Streaming mid phase (~5 lines)
@@ -475,8 +486,8 @@ enum UIPreviewDumper {
         pump(0.25)
         let streamMidFrame = panel.frame
         assertZeroSafeArea(panel, phase: "streaming_mid")
-        if streamMidFrame.height <= 260 {
-            fatalError("PANEL_VERIFY FAIL (streaming_mid): expected height > 260 during streaming, got \(streamMidFrame.height)")
+        if streamMidFrame.height <= thinkingFrame.height {
+            fatalError("PANEL_VERIFY FAIL (streaming_mid): expected height > thinking (\(thinkingFrame.height)), got \(streamMidFrame.height)")
         }
         capturePanel(panel, to: outputDir.appendingPathComponent("panel_2a_streaming_mid.png"))
 
@@ -540,5 +551,207 @@ enum UIPreviewDumper {
             guard let png = rep.representation(using: .png, properties: [:]) else { return }
             try? png.write(to: url)
         }
+    }
+}
+
+@MainActor
+enum StreamingEngineVerifier {
+    private static func check(_ condition: Bool, _ message: String) {
+        if !condition {
+            fatalError("STREAMING_VERIFY FAIL: \(message)")
+        }
+    }
+
+    static func runAll() {
+        verifySanitizer()
+        verifyBlockParserAndTables()
+        verifyAdaptiveRevealer()
+        verifyMonotonicHeightEngine()
+        verifyMediaTableDedupe()
+        print("STREAMING_VERIFY PASS")
+    }
+
+    private static func verifySanitizer() {
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("关键是 **高度锁定") == "关键是 **高度锁定**",
+            "unclosed bold should be auto-closed"
+        )
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("关键是 **") == "关键是 ",
+            "dangling ** without content should be stripped"
+        )
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("执行 `lsof -i") == "执行 `lsof -i`",
+            "unclosed inline code should be auto-closed"
+        )
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("执行 `") == "执行 ",
+            "dangling backtick should be stripped"
+        )
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("详见 [官方手册](https://example.com/do") == "详见 官方手册",
+            "unclosed link should display readable label"
+        )
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("图 ![预览](https://example.com/a.p") == "图 ",
+            "unclosed image should be hidden"
+        )
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("价格为 \\*100") == "价格为 \\*100",
+            "escaped asterisk should not trigger closing asterisk"
+        )
+        check(
+            StreamingMarkdownSanitizer.sanitizeInline("* 列表项") == "* 列表项",
+            "list bullet should not trigger closing asterisk"
+        )
+    }
+
+    private static func verifyBlockParserAndTables() {
+        // 1. Settled vs activeTail split
+        let split = StreamingBlockParser.parse(
+            "第一段已闭合。\n\n第二段正在 **生成",
+            turnId: "t1",
+            isFinished: false
+        )
+        check(split.settled.count == 1, "expected 1 settled block, got \(split.settled.count)")
+        check(split.settled.first?.kind == .paragraph("第一段已闭合。"), "settled paragraph mismatch")
+        check(split.activeTail?.kind == .paragraph("第二段正在 **生成"), "activeTail mismatch")
+
+        // 2. Unclosed fenced code block
+        let unclosedCode = StreamingBlockParser.parse(
+            "示例：\n\n```swift\nlet x = 1",
+            turnId: "t1",
+            isFinished: false
+        )
+        check(unclosedCode.settled.count == 1, "prose before code fence should settle")
+        if case .codeBlock(let lang, let code, let isClosed)? = unclosedCode.activeTail?.kind {
+            check(lang == "swift" && code == "let x = 1" && !isClosed, "unclosed code block fields mismatch")
+        } else {
+            check(false, "expected unclosed codeBlock as activeTail")
+        }
+
+        // 3. Wide table (>3 cols) pre-placeholder at header + separator prefix
+        let wideHeaderOnly = StreamingBlockParser.parse("| A | B | C | D |\n|---", turnId: "t2", isFinished: false)
+        check(wideHeaderOnly.hasAnyTable, "wide table should trigger immediately on |---")
+        if case .tableNotice(_, _, let cols, let rows, let streaming, _)? = wideHeaderOnly.activeTail?.kind {
+            check(cols == 4 && rows == 0 && streaming, "wide table notice mismatch: cols=\(cols) rows=\(rows)")
+        } else {
+            check(false, "expected wide tableNotice on activeTail")
+        }
+
+        // 4. Active pipe header buffered without flashing raw pipes
+        let partialPipeHeader = StreamingBlockParser.parse("| 端口 | 进程", turnId: "t2", isFinished: false)
+        check(partialPipeHeader.settled.isEmpty && partialPipeHeader.activeTail == nil, "partial pipe header should be buffered")
+
+        // 5. False positive pipe header reverts to prose
+        let falsePositive = StreamingBlockParser.parse("A | B\n普通正文继续", turnId: "t2", isFinished: false)
+        if case .paragraph(let body)? = falsePositive.activeTail?.kind {
+            check(body.contains("A | B"), "false-positive pipe line should revert to prose")
+        } else {
+            check(false, "expected reverted prose paragraph")
+        }
+
+        // 6. Mini table (<=3 cols, <=6 rows) renders inline
+        let miniTableMd = """
+        **端口检查结果**
+
+        | 端口 | 进程 | 状态 |
+        | --- | --- | --- |
+        | 18790 | brain | 监听中 |
+        | 18791 | senses | 监听中 |
+        """
+        let miniParsed = StreamingBlockParser.parse(miniTableMd, turnId: "t3", isFinished: true)
+        check(miniParsed.activeTail == nil && miniParsed.settled.count == 2, "finished mini table should settle")
+        if case .inlineTable(_, let title, let headers, let rows, let total, let streaming, let truncated, _)? = miniParsed.settled.last?.kind {
+            check(title == "端口检查结果" && headers.count == 3 && rows.count == 2 && total == 2 && !streaming && !truncated, "mini inline table mismatch")
+        } else {
+            check(false, "expected inlineTable block")
+        }
+
+        // 7. Narrow table (>6 rows) locks to 6 rows and marks truncated
+        let longNarrowRows = (1...9).map { "| \($0) | item-\($0) |" }.joined(separator: "\n")
+        let longNarrowMd = "| ID | Name |\n| --- | --- |\n" + longNarrowRows
+        let longNarrowParsed = StreamingBlockParser.parse(longNarrowMd, turnId: "t4", isFinished: true)
+        if case .inlineTable(_, _, let headers, let rows, let total, _, let truncated, _)? = longNarrowParsed.settled.first?.kind {
+            check(headers.count == 2 && rows.count == 6 && total == 9 && truncated, "long narrow table should lock at 6 rows and mark truncated")
+        } else {
+            check(false, "expected truncated inlineTable block")
+        }
+
+        // 8. Incomplete data row debounce in inline table
+        let partialRowMd = "| 端口 | 状态 |\n| --- | --- |\n| 18790 | 监听 |\n| 8080"
+        let partialRowParsed = StreamingBlockParser.parse(partialRowMd, turnId: "t5", isFinished: false)
+        if case .inlineTable(_, _, _, let rows, _, _, _, _)? = partialRowParsed.activeTail?.kind {
+            check(rows.count == 1, "incomplete streaming data row should be debounced")
+        } else {
+            check(false, "expected inlineTable with debounced row")
+        }
+    }
+
+    private static func verifyAdaptiveRevealer() {
+        let revealer = AdaptiveStreamRevealer()
+        var finished = false
+        revealer.reset(turnId: "rev_1") {
+            finished = true
+        }
+        // Grapheme cluster safety with CJK + ZWJ emoji
+        let sample = "你好👨‍👩‍👧‍👦世界🚀测试自适应追赶流输出效果是否平滑无乱码！"
+        revealer.appendDelta(sample, turnId: "rev_1")
+        // Ignore wrong turnId
+        revealer.appendDelta("污染文本", turnId: "other_turn")
+
+        check(revealer.currentTargetCPS(backlog: 10) == 55.0, "base CPS should be 55 when backlog <= 15")
+        check(revealer.currentTargetCPS(backlog: 40) > 55.0, "catchUp CPS should accelerate when backlog > 15")
+
+        revealer.tick(dt: 0.016)
+        check(!revealer.revealedText.isEmpty, "tick should reveal characters")
+        check(!revealer.revealedText.contains("污染"), "wrong turnId delta must be ignored")
+
+        revealer.markServerTurnEnded(turnId: "rev_1")
+        check(revealer.currentTargetCPS(backlog: 10) >= 120.0, "finish sprint CPS should be >= 120")
+        for _ in 0..<20 {
+            revealer.tick(dt: 0.016)
+            if finished { break }
+        }
+        check(finished && revealer.revealedText == sample, "revealer should finish cleanly with exact grapheme output")
+    }
+
+    private static func verifyMonotonicHeightEngine() {
+        var engine = MonotonicPanelHeightEngine(baseHeight: 120)
+        let step1 = engine.evaluate(measured: 210, maxAllowed: 700, currentHeight: 120, isExpanded: true)
+        check(step1.target == 210 && step1.shouldUpdate, "first expansion should update to 210")
+
+        // Small jitter < 4pt should not trigger resize
+        let jitter = engine.evaluate(measured: 212, maxAllowed: 700, currentHeight: 210, isExpanded: true)
+        check(!jitter.shouldUpdate, "delta < 4pt should be suppressed")
+
+        // Shrink attempt within turn must be rejected
+        let shrink = engine.evaluate(measured: 180, maxAllowed: 700, currentHeight: 210, isExpanded: true)
+        check(shrink.target >= 210 && !shrink.shouldUpdate, "monotonic height must never shrink within a turn")
+
+        // Explicit collapse resets back to 120
+        let reset = engine.evaluate(measured: 120, maxAllowed: 700, currentHeight: 212, isExpanded: false)
+        check(reset.target == 120 && reset.shouldUpdate, "collapse must reset back to 120")
+    }
+
+    private static func verifyMediaTableDedupe() {
+        let tableMedia = MediaItem(
+            mediaId: "t_1",
+            kind: "file",
+            title: "表",
+            fileExt: "md-table"
+        )
+        let imgMedia = MediaItem(
+            mediaId: "img_1",
+            kind: "image",
+            title: "图",
+            fileExt: "png"
+        )
+        let streamingAnswer = "结果如下：\n\n| A | B | C | D |\n|---"
+        let deduped = qmxMediaWithoutInlineTables([tableMedia, imgMedia], answer: streamingAnswer)
+        check(deduped.count == 1 && deduped.first?.mediaId == "img_1", "streaming table should dedupe virtual md-table")
+
+        let noTable = qmxMediaWithoutInlineTables([tableMedia, imgMedia], answer: "仅卡片表格")
+        check(noTable.count == 2, "standalone card table without inline markdown should remain in media strip")
     }
 }

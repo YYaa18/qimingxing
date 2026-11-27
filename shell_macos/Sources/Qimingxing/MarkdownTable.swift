@@ -266,9 +266,51 @@ struct QMXTableNotice: View {
     let table: QMXMarkdownTable
     var media: MediaItem?
     var onOpen: (() -> Void)?
+    var isStreaming: Bool = false
+
+    init(
+        table: QMXMarkdownTable,
+        media: MediaItem? = nil,
+        onOpen: (() -> Void)? = nil,
+        isStreaming: Bool = false
+    ) {
+        self.table = table
+        self.media = media
+        self.onOpen = onOpen
+        self.isStreaming = isStreaming
+    }
+
+    init(
+        title: String,
+        colCount: Int,
+        rowCount: Int,
+        isStreaming: Bool,
+        rawMarkdown: String = "",
+        media: MediaItem? = nil,
+        onOpen: (() -> Void)? = nil
+    ) {
+        self.table = QMXMarkdownTable(
+            id: 0,
+            startLine: 0,
+            endLine: 0,
+            raw: rawMarkdown,
+            title: title,
+            columns: [],
+            rows: [],
+            totalRows: rowCount,
+            totalColumns: colCount
+        )
+        self.media = media
+        self.onOpen = onOpen
+        self.isStreaming = isStreaming
+    }
+
+    private var canOpen: Bool {
+        onOpen != nil && (media != nil || !isStreaming)
+    }
 
     var body: some View {
-        if let onOpen, media != nil {
+        if let onOpen, canOpen {
             Button(action: onOpen) {
                 content(showsAction: true)
             }
@@ -281,10 +323,16 @@ struct QMXTableNotice: View {
 
     private func content(showsAction: Bool) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "tablecells")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(QMXTheme.textSecondary)
-                .frame(width: 22)
+            Group {
+                if isStreaming {
+                    GlobeSpinner(size: 14, color: QMXTheme.textSecondary)
+                } else {
+                    Image(systemName: "tablecells")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                }
+            }
+            .frame(width: 22)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(table.title)
@@ -322,10 +370,208 @@ struct QMXTableNotice: View {
     }
 
     private func subtitle(showsAction: Bool) -> String {
+        if isStreaming {
+            return table.totalRows > 0
+                ? "正在整理表格 · 已生成 \(table.totalRows) 行…"
+                : "正在整理表格…"
+        }
         if showsAction {
             return "\(table.summary) · 在媒体区查看"
         }
         return "\(table.summary) · 表格"
+    }
+}
+
+/// Compact Quiet-Native inline table for narrow Markdown tables (<= 3 columns).
+/// Keeps up to 6 rows visible inline with copy-TSV and expand-in-media actions;
+/// if streaming exceeds 6 rows, locks height and offers an inline overflow strip.
+struct InlineMarkdownTableView: View {
+    let title: String
+    let headers: [String]
+    let rows: [[String]]
+    let totalRowCount: Int
+    let isStreaming: Bool
+    let isTruncated: Bool
+    var fontSize: CGFloat = 14
+    var selectable: Bool = true
+    var onOpen: (() -> Void)? = nil
+
+    @State private var copied = false
+
+    private var cellFontSize: CGFloat {
+        max(11.5, min(13.5, fontSize - 2.5))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerBar
+
+            Divider().opacity(0.45)
+
+            ZStack(alignment: .bottom) {
+                Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                    GridRow {
+                        ForEach(Array(headers.enumerated()), id: \.offset) { colIndex, header in
+                            Text(header)
+                                .font(.system(size: cellFontSize, weight: .semibold))
+                                .foregroundStyle(QMXTheme.textPrimary)
+                                .lineLimit(2)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(QMXTheme.surfaceRaised.opacity(0.85))
+                                .overlay(alignment: .trailing) {
+                                    if colIndex + 1 < headers.count {
+                                        Rectangle()
+                                            .fill(QMXTheme.hairline)
+                                            .frame(width: 0.5)
+                                    }
+                                }
+                        }
+                    }
+
+                    ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                        GridRow {
+                            ForEach(Array(headers.indices), id: \.self) { colIndex in
+                                let value = colIndex < row.count ? row[colIndex] : ""
+                                Text(value)
+                                    .font(.system(size: cellFontSize))
+                                    .foregroundStyle(QMXTheme.textPrimary)
+                                    .lineLimit(3)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5.5)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(
+                                        rowIndex % 2 == 1
+                                            ? Color.primary.opacity(0.025)
+                                            : Color.clear
+                                    )
+                                    .overlay(alignment: .top) {
+                                        Rectangle()
+                                            .fill(QMXTheme.hairline)
+                                            .frame(height: 0.5)
+                                    }
+                                    .overlay(alignment: .trailing) {
+                                        if colIndex + 1 < headers.count {
+                                            Rectangle()
+                                                .fill(QMXTheme.hairline)
+                                                .frame(width: 0.5)
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                }
+                .modifier(QMXTextSelectable(enabled: selectable))
+
+                if isTruncated {
+                    LinearGradient(
+                        colors: [.clear, QMXTheme.surface.opacity(0.82)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 22)
+                    .allowsHitTesting(false)
+                }
+            }
+
+            if isTruncated {
+                Divider().opacity(0.45)
+                truncationFooter
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(QMXTheme.surfaceMuted.opacity(0.22))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+        )
+    }
+
+    private var headerBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tablecells")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(QMXTheme.textTertiary)
+            Text(title.isEmpty ? "表格" : title)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(QMXTheme.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+
+            Button {
+                if qmxCopyTableToPasteboard(columns: headers, rows: rows) {
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                        copied = false
+                    }
+                }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(copied ? QMXTheme.success : QMXTheme.textTertiary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(copied ? "已复制 TSV" : "复制 TSV")
+
+            if let onOpen {
+                Button(action: onOpen) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("在媒体区放大")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(QMXTheme.surfaceRaised.opacity(0.6))
+    }
+
+    @ViewBuilder
+    private var truncationFooter: some View {
+        let labelText = isStreaming
+            ? "已生成 \(totalRowCount) 行 · 在媒体区查看全部"
+            : "共 \(totalRowCount) 行 · 在媒体区查看全部"
+        if let onOpen {
+            Button(action: onOpen) {
+                HStack(spacing: 5) {
+                    if isStreaming {
+                        GlobeSpinner(size: 11, color: QMXTheme.textTertiary)
+                    }
+                    Text(labelText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(QMXTheme.textTertiary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(QMXTheme.surfaceRaised.opacity(0.55))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            HStack(spacing: 5) {
+                Text(labelText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(QMXTheme.textSecondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(QMXTheme.surfaceRaised.opacity(0.55))
+        }
     }
 }
 
@@ -335,6 +581,8 @@ struct QMXTableNotice: View {
 /// keep the media card as the only entry point.
 func qmxMediaWithoutInlineTables(_ media: [MediaItem], answer: String) -> [MediaItem] {
     guard !media.isEmpty else { return media }
-    guard !QMXMarkdownTables.scan(answer).isEmpty else { return media }
+    let hasTable = !QMXMarkdownTables.scan(answer).isEmpty
+        || StreamingBlockParser.parse(answer, turnId: "", isFinished: false).hasAnyTable
+    guard hasTable else { return media }
     return media.filter { !$0.isMarkdownTable }
 }
