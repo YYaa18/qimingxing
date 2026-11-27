@@ -246,6 +246,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowCoordinator.onPresent = { [weak self] role, policy in
             self?.focusArbitrator.activate(for: role, policy: policy)
         }
+        windowCoordinator.onKeyOwnerChanged = { [weak self] role in
+            self?.focusWindow(for: role)
+        }
         windowCoordinator.onSuspend = { [weak self] role, _ in
             switch role {
             case .quickEntry:
@@ -269,6 +272,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             default:
                 break
             }
+        }
+    }
+
+    /// AppKit may hand key status to a floating panel when the previous key
+    /// window closes; enforce the coordinator's decision explicitly so the
+    /// model and the real key window never disagree.
+    private func focusWindow(for role: WindowRole?) {
+        switch role {
+        case .quickEntry:
+            quickEntryController.focusIfVisible()
+        case .settings:
+            settingsController.focusIfVisible()
+        case .workspaceWindow:
+            workspaceController.focusIfVisible()
+        default:
+            break
         }
     }
 

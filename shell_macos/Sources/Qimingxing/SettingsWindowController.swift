@@ -208,6 +208,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         windowLease = nil
     }
 
+    func focusIfVisible() {
+        guard let window, window.isVisible, !window.isKeyWindow else { return }
+        window.makeKeyAndOrderFront(nil)
+    }
+
     /// Coordinator suspend: keep the window (and its draft) alive, just hide.
     func orderOutForSuspend() {
         window?.orderOut(nil)

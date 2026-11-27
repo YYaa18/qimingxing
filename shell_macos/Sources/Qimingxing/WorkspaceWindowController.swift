@@ -497,6 +497,11 @@ final class WorkspaceWindowController: NSObject, NSWindowDelegate {
         windowLease = nil
     }
 
+    func focusIfVisible() {
+        guard let window, window.isVisible, !window.isKeyWindow else { return }
+        window.makeKeyAndOrderFront(nil)
+    }
+
     func orderOutForSuspend() {
         window?.orderOut(nil)
     }

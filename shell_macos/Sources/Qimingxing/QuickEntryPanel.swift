@@ -380,6 +380,12 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         )
     }
 
+    /// Coordinator says this role owns the key: make it real.
+    func focusIfVisible() {
+        guard let panel, panel.isVisible, !panel.isKeyWindow else { return }
+        panel.makeKey()
+    }
+
     /// Hide the panel without destroying it or its draft (coordinator suspend).
     func orderOutForSuspend() {
         stopHeightDriver()
