@@ -10,10 +10,21 @@ enum QuickEntryLayout {
     static let inputHeight: CGFloat = 68
     static let footerHeight: CGFloat = 48
     static let idleHeight: CGFloat = 120       // 68 input + 4 breathing + 48 footer
-    static let thinkingHeight: CGFloat = 248
+    static let statusBarHeight: CGFloat = 28
+    static let thinkingHeight: CGFloat = 248   // Legacy reference only; live panel uses compactThinkingHeight
     static let answeringHeight: CGFloat = 520
     static let wingMinHeight: CGFloat = 430
     static let panelChrome: CGFloat = inputHeight + 2 + footerHeight // 118
+
+    static func compactThinkingHeight(
+        promptHeight: CGFloat,
+        attachmentBarHeight: CGFloat,
+        inputExtraHeight: CGFloat
+    ) -> CGFloat {
+        let stagePadding: CGFloat = 40
+        let promptSpacing: CGFloat = promptHeight > 0 ? 10 : 0
+        return panelChrome + inputExtraHeight + attachmentBarHeight + stagePadding + promptHeight + promptSpacing + statusBarHeight
+    }
 }
 
 @MainActor
@@ -45,7 +56,9 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private var targetChatHeight: CGFloat = QuickEntryLayout.idleHeight
     private var currentAnimatedHeight: CGFloat = QuickEntryLayout.idleHeight
     private var heightVelocity: CGFloat = 0
-    private var heightDriverTask: Task<Void, Never>?
+    private let heightDisplayLink = DisplayLinkDriver()
+    private var heightEngine = MonotonicPanelHeightEngine(baseHeight: QuickEntryLayout.idleHeight)
+    private var lastTurnIDForHeight: String?
     private var focusObservers: [NSObjectProtocol] = []
     private var hiddenForMediaViewer = false
 
@@ -81,16 +94,14 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
                 object: nil,
                 queue: .main
             ) { [weak self] note in
-                guard let self,
-                      let closing = note.object as? NSWindow,
-                      closing !== self.panel
-                else { return }
+                let closingObjectID = (note.object as AnyObject?).map(ObjectIdentifier.init)
                 Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 120_000_000)
                     guard let self,
                           let panel = self.panel,
-                          panel.isVisible
+                          closingObjectID != ObjectIdentifier(panel)
                     else { return }
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    guard panel.isVisible else { return }
                     guard NSApp.keyWindow == nil || NSApp.keyWindow === panel else { return }
                     panel.makeKeyAndOrderFront(nil)
                     self.inputState.focusRequestToken = UUID()
@@ -223,8 +234,15 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     private func wireExpansion() {
         brainClient.$messages
             .sink { [weak self] messages in
-                guard let self, !messages.isEmpty, self.inputState.forceExpanded else { return }
-                self.inputState.forceExpanded = false
+                guard let self else { return }
+                let turnId = messages.last?.turnId
+                if let turnId, let prev = self.lastTurnIDForHeight, turnId != prev {
+                    self.heightEngine.reset()
+                }
+                self.lastTurnIDForHeight = turnId
+                if !messages.isEmpty, self.inputState.forceExpanded {
+                    self.inputState.forceExpanded = false
+                }
             }
             .store(in: &cancellables)
 
@@ -241,7 +259,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.inputState.isExpanded = expanded
             if !expanded {
-                self.resize(toContentHeight: QuickEntryLayout.idleHeight)
+                self.resize(toContentHeight: QuickEntryLayout.idleHeight, forceReset: true)
             }
         }
         .store(in: &cancellables)
@@ -254,6 +272,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
         inputState.isExpanded = expanded
         if !expanded {
+            heightEngine.reset()
             lastChatHeight = QuickEntryLayout.idleHeight
             targetChatHeight = QuickEntryLayout.idleHeight
         }
@@ -270,7 +289,14 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
 
     private var desiredPanelHeight: CGFloat {
         guard inputState.isExpanded else { return QuickEntryLayout.idleHeight }
-        return lastTurnHasAnswer ? QuickEntryLayout.answeringHeight : QuickEntryLayout.thinkingHeight
+        if lastTurnHasAnswer {
+            return QuickEntryLayout.answeringHeight
+        }
+        return QuickEntryLayout.compactThinkingHeight(
+            promptHeight: 25,
+            attachmentBarHeight: 0,
+            inputExtraHeight: 0
+        )
     }
 
     func toggle() {
@@ -397,8 +423,7 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     }
 
     private func stopHeightDriver() {
-        heightDriverTask?.cancel()
-        heightDriverTask = nil
+        heightDisplayLink.stop()
         heightVelocity = 0
     }
 
@@ -406,6 +431,12 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         inputState.isWorkspaceWingOpen
             ? max(chatHeight, QuickEntryLayout.wingMinHeight)
             : chatHeight
+    }
+
+    private func maxAllowedPanelHeight(for panel: FloatingQuickEntryPanel) -> CGFloat {
+        let visible = (panel.screen ?? NSScreen.main)?.visibleFrame
+        guard let visible else { return 880 }
+        return max(QuickEntryLayout.idleHeight, visible.height - 24)
     }
 
     private func applyPanelHeight(_ height: CGFloat, to panel: FloatingQuickEntryPanel, display: Bool = true) {
@@ -432,47 +463,50 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     }
 
     private func startHeightDriverIfNeeded() {
-        guard heightDriverTask == nil, let panel else { return }
+        guard !heightDisplayLink.isRunning, let panel else { return }
         currentAnimatedHeight = panel.frame.height
-        heightDriverTask = Task { @MainActor [weak self] in
-            let omega: CGFloat = 20.0
-            var lastTime = ProcessInfo.processInfo.systemUptime
-            while !Task.isCancelled {
-                // 30Hz is plenty for a smoothed height follow; 60Hz setFrame
-                // forced a full NSHostingView layout twice as often.
-                try? await Task.sleep(nanoseconds: 33_000_000)
-                guard !Task.isCancelled, let self, let panel = self.panel, panel.isVisible else { break }
-
-                let now = ProcessInfo.processInfo.systemUptime
-                let dt = CGFloat(min(max(now - lastTime, 0.004), 0.05))
-                lastTime = now
-
-                let target = self.resolvedPanelHeight(forChatHeight: self.targetChatHeight)
-                let delta = self.currentAnimatedHeight - target
-                let decay = exp(-omega * dt)
-                let nextHeight = target + (delta + (self.heightVelocity + omega * delta) * dt) * decay
-                let nextVelocity = (self.heightVelocity - omega * (self.heightVelocity + omega * delta) * dt) * decay
-
-                if abs(nextHeight - target) < 0.5 && abs(nextVelocity) < 4.0 {
-                    self.currentAnimatedHeight = target
-                    self.heightVelocity = 0
-                    self.applyPanelHeight(target, to: panel)
-                    panel.invalidateShadow()
-                    break
-                }
-
-                self.currentAnimatedHeight = nextHeight
-                self.heightVelocity = nextVelocity
-                self.applyPanelHeight(nextHeight, to: panel, display: false)
+        heightDisplayLink.start { [weak self] rawDt in
+            guard let self, let panel = self.panel, panel.isVisible else {
+                self?.stopHeightDriver()
+                return
             }
-            self?.heightVelocity = 0
-            self?.heightDriverTask = nil
+
+            let omega: CGFloat = 20.0
+            let dt = CGFloat(rawDt)
+            let target = self.resolvedPanelHeight(forChatHeight: self.targetChatHeight)
+            let delta = self.currentAnimatedHeight - target
+            let decay = exp(-omega * dt)
+            let nextHeight = target + (delta + (self.heightVelocity + omega * delta) * dt) * decay
+            let nextVelocity = (self.heightVelocity - omega * (self.heightVelocity + omega * delta) * dt) * decay
+
+            if abs(nextHeight - target) < 0.5 && abs(nextVelocity) < 4.0 {
+                self.currentAnimatedHeight = target
+                self.heightVelocity = 0
+                self.applyPanelHeight(target, to: panel)
+                panel.invalidateShadow()
+                self.stopHeightDriver()
+                return
+            }
+
+            self.currentAnimatedHeight = nextHeight
+            self.heightVelocity = nextVelocity
+            self.applyPanelHeight(nextHeight, to: panel, display: false)
         }
     }
 
-    func resize(toContentHeight height: CGFloat) {
-        // Always cache the chat height, even while the panel is hidden.
-        let chatHeight = max(QuickEntryLayout.idleHeight, height)
+    func resize(toContentHeight height: CGFloat, forceReset: Bool = false) {
+        if forceReset {
+            heightEngine.reset()
+        }
+        let maxAllowed = panel.map { maxAllowedPanelHeight(for: $0) } ?? 880
+        let evaluation = heightEngine.evaluate(
+            measured: height,
+            maxAllowed: maxAllowed,
+            currentHeight: panel?.frame.height ?? currentAnimatedHeight,
+            isExpanded: inputState.isExpanded
+        )
+
+        let chatHeight = evaluation.target
         lastChatHeight = chatHeight
         targetChatHeight = chatHeight
         guard let panel, panel.isVisible else { return }
@@ -486,8 +520,15 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
             return
         }
 
-        if heightDriverTask == nil &&
-           abs(panel.frame.height - target) <= 1.0 &&
+        if !heightDisplayLink.isRunning &&
+           !evaluation.shouldUpdate &&
+           abs(panel.frame.height - target) <= 4.0 &&
+           abs(panel.frame.width - panelWidth) <= 0.5 {
+            return
+        }
+
+        if !heightDisplayLink.isRunning &&
+           abs(panel.frame.height - target) <= 0.5 &&
            abs(panel.frame.width - panelWidth) <= 0.5 {
             currentAnimatedHeight = target
             return
@@ -584,6 +625,10 @@ struct QuickEntryRootView: View {
     @State private var answerRating: String?
     @State private var isDropTargeted = false
     @State private var cachedLatestTurn: LiveTurn?
+    @State private var turnStartedAt: Date?
+    @State private var lastToolLabel: String = ""
+    @State private var foldedStatusSummary: String?
+    @StateObject private var scrollController = SmartAutoScrollController()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -682,6 +727,25 @@ struct QuickEntryRootView: View {
         }
         .onReceive(brainClient.$messages) { messages in
             cachedLatestTurn = Self.makeLatestTurn(from: messages)
+            if hasAnswer && foldedStatusSummary == nil, let started = turnStartedAt {
+                let elapsed = max(0.1, Date().timeIntervalSince(started))
+                let sec = String(format: "%.1fs", elapsed)
+                let cleanedTool = lastToolLabel.trimmingCharacters(in: CharacterSet(charactersIn: "….")).trimmingCharacters(in: .whitespaces)
+                let summary = cleanedTool.isEmpty ? "已思考 · \(sec)" : "已完成：\(cleanedTool) · \(sec)"
+                if reduceMotion || QMXTheme.isHeadlessDump {
+                    foldedStatusSummary = summary
+                } else {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        foldedStatusSummary = summary
+                    }
+                }
+            }
+        }
+        .onChange(of: brainClient.toolStatusText) { newStatus in
+            let trimmed = newStatus.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                lastToolLabel = trimmed
+            }
         }
         .onChange(of: chatHeight) { height in
             onDesiredHeightChange(height)
@@ -690,7 +754,13 @@ struct QuickEntryRootView: View {
             if generating {
                 answerRevealFinished = QMXTheme.isHeadlessDump
                 caughtUpAnswerCount = -1
-                turnPeakHeight = 0
+                if turnStartedAt == nil {
+                    turnStartedAt = Date()
+                }
+                if !hasAnswer {
+                    turnPeakHeight = 0
+                    foldedStatusSummary = nil
+                }
                 onDesiredHeightChange(chatHeight)
             } else {
                 // The answer is done: keep the caret in the composer so the
@@ -709,6 +779,9 @@ struct QuickEntryRootView: View {
         .onChange(of: inputState.isExpanded) { expanded in
             if !expanded {
                 turnPeakHeight = 0
+                turnStartedAt = nil
+                lastToolLabel = ""
+                foldedStatusSummary = nil
                 onDesiredHeightChange(QuickEntryLayout.idleHeight)
             }
         }
@@ -722,6 +795,10 @@ struct QuickEntryRootView: View {
             caughtUpAnswerCount = -1
             copiedAnswer = false
             answerRating = nil
+            turnStartedAt = brainClient.isGenerating ? Date() : nil
+            lastToolLabel = ""
+            foldedStatusSummary = nil
+            scrollController.resetForNewTurn()
             onDesiredHeightChange(chatHeight)
         }
         .onChange(of: answerFontSize) { _ in
@@ -769,10 +846,10 @@ struct QuickEntryRootView: View {
         }
         .frame(width: QuickEntryLayout.chatWidth)
         .frame(maxHeight: .infinity, alignment: .top)
-        .onPreferenceChange(ChatAnswerHeightKey.self) { height in
-            answerContentHeight = height
-            if brainClient.isGenerating || !answerRevealFinished {
-                turnPeakHeight = max(turnPeakHeight, naturalAnswerChatHeight)
+        .onChange(of: answerContentHeight) { _ in
+            let current = naturalAnswerChatHeight
+            if current > turnPeakHeight {
+                turnPeakHeight = current
             }
         }
     }
@@ -889,22 +966,39 @@ struct QuickEntryRootView: View {
             }
 
             if isThinking {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     GlobeSpinner(size: 20, color: QMXTheme.textSecondary)
                     Text(brainClient.toolStatusText.isEmpty ? "正在思考与调度…" : brainClient.toolStatusText)
-                        .font(.system(size: 22, weight: .regular))
+                        .font(.system(size: 14, weight: .regular))
                         .foregroundStyle(QMXTheme.textSecondary)
-                        .lineLimit(2)
+                        .lineLimit(1)
                 }
+                .frame(height: QuickEntryLayout.statusBarHeight, alignment: .leading)
                 Spacer(minLength: 0)
             } else if let turn = latestTurn, !turn.answer.isEmpty {
+                if let summary = foldedStatusSummary {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 11, weight: .medium))
+                        Text(summary)
+                            .font(.system(size: 11.5))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(QMXTheme.textTertiary)
+                    .frame(height: 18, alignment: .leading)
+                    .transition(reduceMotion ? .identity : .opacity)
+                }
+
                 answerView(turn)
+
                 if !turn.sources.isEmpty {
                     SourceChipsView(sources: turn.sources)
+                        .transition(reduceMotion ? .identity : .opacity)
                 }
                 let stripMedia = qmxMediaWithoutInlineTables(turn.media, answer: turn.answer)
                 if !stripMedia.isEmpty {
                     MediaStripView(media: stripMedia, contextTitle: "本轮回答")
+                        .transition(reduceMotion ? .identity : .opacity)
                 }
                 workspaceLink
             } else if let turn = latestTurn,
@@ -913,10 +1007,12 @@ struct QuickEntryRootView: View {
                 // have no spoken text, but their media must still be visible.
                 if !turn.sources.isEmpty {
                     SourceChipsView(sources: turn.sources)
+                        .transition(reduceMotion ? .identity : .opacity)
                 }
                 let stripMedia = qmxMediaWithoutInlineTables(turn.media, answer: turn.answer)
                 if !stripMedia.isEmpty {
                     MediaStripView(media: stripMedia, contextTitle: "本轮回答")
+                        .transition(reduceMotion ? .identity : .opacity)
                 }
                 workspaceLink
             } else {
@@ -929,34 +1025,59 @@ struct QuickEntryRootView: View {
         .padding(.horizontal, 32)
         .padding(.vertical, 20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: latestTurn?.sources.isEmpty ?? true)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: latestTurn?.media.isEmpty ?? true)
     }
 
-    /// Short answers render as a plain stack so no ScrollView (and therefore
-    /// no scroll indicator) can appear. Long answers switch to a fixed-height
-    /// scroll view.
     private func answerView(_ turn: LiveTurn) -> some View {
-        let scrollable = answerContentHeight > maxLinesContentHeight + 0.5
-        let shouldAutoScroll = (turn.isStreaming || !answerRevealFinished) && scrollable
-        // Use one stable view for the whole turn. Switching between a plain
-        // stack and a ScrollView recreates TypewriterText and restarts the
-        // reveal, which looks like a large empty answer area.
-        return AnswerScrollView(
+        let maxH = maxLinesContentHeight
+        let scrollable = answerContentHeight > maxH + 0.5
+        return SmartAnswerScrollView(
             text: turn.answer,
             fontSize: CGFloat(answerFontSize),
             turnID: turn.id,
             width: QuickEntryLayout.answerWidth,
-            shouldAutoScroll: shouldAutoScroll,
+            maxHeight: maxH,
+            isServerStreaming: turn.isStreaming || brainClient.isGenerating,
+            isScrollable: scrollable,
+            scrollController: scrollController,
             tableMedia: turn.media.filter(\.isMarkdownTable),
-            onOpenTable: { index in
+            onContentHeightChange: { height in
+                if abs(answerContentHeight - height) > 0.5 {
+                    answerContentHeight = height
+                }
+            },
+            onOpenTable: { index, parsedTable in
                 let items = turn.media.filter(\.isMarkdownTable)
-                guard items.indices.contains(index) else { return }
-                MediaViewerLauncher.open(
-                    items: items,
-                    selectedID: items[index].mediaId,
-                    title: items[index].title.isEmpty ? "表格" : items[index].title,
-                    contextLabel: "本轮回答",
-                    prefersLargeWindow: true
-                )
+                if items.indices.contains(index) {
+                    MediaViewerLauncher.open(
+                        items: items,
+                        selectedID: items[index].mediaId,
+                        title: items[index].title.isEmpty ? "表格" : items[index].title,
+                        contextLabel: "本轮回答",
+                        prefersLargeWindow: true
+                    )
+                } else if let parsedTable {
+                    let fallback = MediaItem(
+                        mediaId: "inline_table_\(turn.id)_\(index)",
+                        kind: "file",
+                        title: parsedTable.title,
+                        mimeType: "text/markdown",
+                        sourceTitle: "本轮回答",
+                        provider: "qimingxing",
+                        fileExt: "md-table",
+                        summaryBadge: parsedTable.summary,
+                        previewColumns: parsedTable.columns,
+                        previewRows: parsedTable.rows
+                    )
+                    MediaViewerLauncher.open(
+                        items: [fallback],
+                        selectedID: fallback.mediaId,
+                        title: fallback.title,
+                        contextLabel: "本轮回答",
+                        prefersLargeWindow: true
+                    )
+                }
             },
             onFinish: {
                 caughtUpAnswerCount = latestTurn?.answer.count ?? -1
@@ -1049,6 +1170,7 @@ struct QuickEntryRootView: View {
                         action: { rateAnswer("down", turn: turn) }
                     )
                 }
+                .transition(reduceMotion ? .identity : .opacity)
             }
 
             Spacer()
@@ -1183,50 +1305,66 @@ struct QuickEntryRootView: View {
         return CGFloat(min(max(lines, 1), 8)) * 17 + 8
     }
 
+    private var foldedStatusHeight: CGFloat {
+        (foldedStatusSummary != nil && hasAnswer) ? 28 : 0
+    }
+
     private var maxLinesContentHeight: CGFloat {
         let visibleHeight = NSScreen.main?.visibleFrame.height ?? 960
         let prompt = promptBlockHeight
+        let promptSpacing: CGFloat = prompt > 0 ? 10 : 0
+        let sourceGap: CGFloat = sourceBarHeight > 0 ? 10 : 0
+        let mediaGap: CGFloat = mediaBarHeight > 0 ? 10 : 0
         let screenCap = max(
             160,
-            visibleHeight - 24 - QuickEntryLayout.panelChrome - inputExtraHeight - 40 - prompt - 26 - 12
-                - sourceBarHeight - mediaBarHeight - attachmentBarHeight
+            visibleHeight - 24 - QuickEntryLayout.panelChrome - inputExtraHeight - 40 - prompt - promptSpacing
+                - foldedStatusHeight - 26 - 10
+                - sourceBarHeight - sourceGap - mediaBarHeight - mediaGap - attachmentBarHeight
         )
         return min(CGFloat(answerMaxLines) * answerLineHeight, screenCap)
     }
 
     private var naturalAnswerChatHeight: CGFloat {
+        let thinkingBase = QuickEntryLayout.compactThinkingHeight(
+            promptHeight: promptBlockHeight,
+            attachmentBarHeight: attachmentBarHeight,
+            inputExtraHeight: inputExtraHeight
+        )
         let measured = answerContentHeight
         guard measured > 0 else {
-            return QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight
+            return thinkingBase
         }
         let promptBlock = promptBlockHeight
+        let promptSpacing: CGFloat = promptBlock > 0 ? 10 : 0
+        let sourceGap: CGFloat = sourceBarHeight > 0 ? 10 : 0
+        let mediaGap: CGFloat = mediaBarHeight > 0 ? 10 : 0
         let capped = min(measured, maxLinesContentHeight)
-        let stage = 40 + promptBlock + capped + sourceBarHeight + mediaBarHeight
-            + attachmentBarHeight + 26 + 12
+        let stage = 40 + promptBlock + promptSpacing + foldedStatusHeight + capped
+            + sourceBarHeight + sourceGap + mediaBarHeight + mediaGap
+            + attachmentBarHeight + 26 + 10
         return max(
-            QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight,
+            thinkingBase,
             QuickEntryLayout.panelChrome + inputExtraHeight + stage
         )
     }
 
-    /// Pure chat-column height. The wing floor is applied by the window
-    /// controller and never written back into this value.
+    /// Pure chat-column height. Monotonically non-decreasing within a turn
+    /// (including after generation completes) so footer controls never jump
+    /// under the user's cursor. Resets only on collapse / New Chat.
     private var chatHeight: CGFloat {
         if !inputState.isExpanded {
             return QuickEntryLayout.idleHeight + attachmentBarHeight + inputExtraHeight
         }
+        let thinkingBase = QuickEntryLayout.compactThinkingHeight(
+            promptHeight: promptBlockHeight,
+            attachmentBarHeight: attachmentBarHeight,
+            inputExtraHeight: inputExtraHeight
+        )
         if isThinking || latestTurn?.answer.isEmpty != false {
-            return QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight
+            return max(turnPeakHeight, thinkingBase)
         }
         let natural = naturalAnswerChatHeight
-        if brainClient.isGenerating || !answerRevealFinished {
-            return max(
-                QuickEntryLayout.thinkingHeight + attachmentBarHeight + inputExtraHeight,
-                turnPeakHeight,
-                natural
-            )
-        }
-        return natural
+        return max(thinkingBase, turnPeakHeight, natural)
     }
 
     private func completeRevealIfReady() {
@@ -1335,6 +1473,9 @@ struct QuickEntryRootView: View {
     private func startNewConversation() {
         answerContentHeight = 0
         turnPeakHeight = 0
+        turnStartedAt = nil
+        lastToolLabel = ""
+        foldedStatusSummary = nil
         answerRevealFinished = reduceMotion || QMXTheme.isHeadlessDump
         caughtUpAnswerCount = -1
         copiedAnswer = false
@@ -1343,6 +1484,7 @@ struct QuickEntryRootView: View {
         inputState.stagedAttachments = []
         inputState.uploadingNames = []
         brainClient.clearHistory()
+        scrollController.resetForNewTurn()
         inputState.focusRequestToken = UUID()
         onDesiredHeightChange(QuickEntryLayout.idleHeight)
     }
@@ -1434,420 +1576,353 @@ private struct ChatAnswerHeightKey: PreferenceKey {
     }
 }
 
-private struct AnswerScrollView: View {
+private struct SmartAnswerScrollView: View {
     let text: String
     let fontSize: CGFloat
     let turnID: String
     let width: CGFloat
-    let shouldAutoScroll: Bool
+    let maxHeight: CGFloat
+    let isServerStreaming: Bool
+    let isScrollable: Bool
+    @ObservedObject var scrollController: SmartAutoScrollController
     var tableMedia: [MediaItem] = []
-    var onOpenTable: (Int) -> Void = { _ in }
-    var onFinish: () -> Void = {}
-    @State private var lastAutoScrollAt = Date.distantPast
+    var onContentHeightChange: (CGFloat) -> Void
+    var onOpenTable: (Int, QMXMarkdownTable?) -> Void
+    var onFinish: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    TypewriterText(
-                        text: text,
-                        fontSize: fontSize,
-                        turnID: turnID,
-                        tableMedia: tableMedia,
-                        allowsSelection: !shouldAutoScroll,
-                        onOpenTable: onOpenTable,
-                        onTick: {
-                            guard shouldAutoScroll else { return }
-                            // The reveal runs at 60Hz; scrolling the whole
-                            // ScrollView at that rate is pure layout churn.
-                            let now = Date()
-                            guard now.timeIntervalSince(lastAutoScrollAt) >= 0.033 else { return }
-                            lastAutoScrollAt = now
-                            proxy.scrollTo("answerBottom", anchor: .bottom)
-                        },
-                        onFinish: {
-                            // Ensure the last content lands at the bottom even
-                            // if the 30Hz throttle or reduce-motion path
-                            // skipped the final onTick.
-                            if shouldAutoScroll {
-                                proxy.scrollTo("answerBottom", anchor: .bottom)
+        Group {
+            if QMXTheme.isHeadlessDump {
+                // Static headless snapshot renderers do not pump the RunLoop for
+                // nested NSHostingView async frame updates.
+                ScrollView {
+                    answerContent
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: ChatAnswerHeightKey.self,
+                                    value: geo.size.height
+                                )
                             }
-                            onFinish()
-                        }
-                    )
-                    .id(turnID)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(
-                                key: ChatAnswerHeightKey.self,
-                                value: geo.size.height
-                            )
-                        }
-                    )
-                    .id("answerTop")
-
-                    Color.clear
-                        .frame(height: 1)
-                        .id("answerBottom")
+                        )
                 }
-                .frame(width: width, alignment: .leading)
-            }
-            .scrollIndicators(.visible)
-            .onAppear {
-                proxy.scrollTo(shouldAutoScroll ? "answerBottom" : "answerTop", anchor: shouldAutoScroll ? .bottom : .top)
-            }
-            .onChange(of: turnID) { _ in
-                proxy.scrollTo("answerTop", anchor: .top)
-            }
-            .onChange(of: shouldAutoScroll) { autoScroll in
-                if autoScroll {
-                    proxy.scrollTo("answerBottom", anchor: .bottom)
+                .scrollIndicators(isScrollable ? .visible : .hidden)
+                .onPreferenceChange(ChatAnswerHeightKey.self) { height in
+                    onContentHeightChange(height)
+                }
+            } else {
+                QMXNativeAnswerScrollView(
+                    width: width,
+                    maxHeight: maxHeight,
+                    turnID: turnID,
+                    isScrollable: isScrollable,
+                    controller: scrollController,
+                    onContentHeightChange: onContentHeightChange
+                ) {
+                    answerContent
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .bottomTrailing) {
+            if !scrollController.isPinnedToBottom && (isServerStreaming || scrollController.hasUnreadContentBelow) {
+                Button {
+                    scrollController.scrollToBottomAnimated()
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(QMXTheme.textPrimary)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(QMXTheme.surfaceRaised))
+                        .overlay(Circle().strokeBorder(QMXTheme.hairline, lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+                }
+                .buttonStyle(TactileButtonStyle(haptic: .alignment))
+                .padding(.trailing, 14)
+                .padding(.bottom, 12)
+                .transition(reduceMotion ? .identity : .opacity)
+                .help("回到底部")
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: scrollController.isPinnedToBottom)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: scrollController.hasUnreadContentBelow)
+    }
+
+    private var answerContent: some View {
+        StreamingAnswerContentView(
+            text: text,
+            fontSize: fontSize,
+            turnID: turnID,
+            isServerStreaming: isServerStreaming,
+            tableMedia: tableMedia,
+            onOpenTable: onOpenTable,
+            onRevealProgress: {
+                scrollController.syncToBottomIfPinned()
+            },
+            onFinish: {
+                scrollController.syncToBottomIfPinned()
+                onFinish()
+            }
+        )
+        .frame(width: width, alignment: .leading)
     }
 }
 
-private struct TypewriterText: View {
+private struct StreamingAnswerContentView: View {
     let text: String
     let fontSize: CGFloat
     let turnID: String
+    let isServerStreaming: Bool
     var tableMedia: [MediaItem] = []
-    var allowsSelection: Bool = true
-    var onOpenTable: (Int) -> Void = { _ in }
-    var onTick: () -> Void = {}
+    var onOpenTable: (Int, QMXMarkdownTable?) -> Void = { _, _ in }
+    var onRevealProgress: () -> Void = {}
     var onFinish: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var visibleCount = 0
-    @State private var revealTask: Task<Void, Never>?
-    @State private var blocks: [StageBlock] = []
-    @State private var pendingParseText = ""
-    @State private var parsedText = ""
-    @State private var parseTask: Task<Void, Never>?
-    @State private var lastParseAt = Date.distantPast
-
-    init(
-        text: String,
-        fontSize: CGFloat,
-        turnID: String,
-        tableMedia: [MediaItem] = [],
-        allowsSelection: Bool = true,
-        onOpenTable: @escaping (Int) -> Void = { _ in },
-        onTick: @escaping () -> Void = {},
-        onFinish: @escaping () -> Void = {}
-    ) {
-        self.text = text
-        self.fontSize = fontSize
-        self.turnID = turnID
-        self.tableMedia = tableMedia
-        self.allowsSelection = allowsSelection
-        self.onOpenTable = onOpenTable
-        self.onTick = onTick
-        self.onFinish = onFinish
-        // Parsing in init would run on every parent body evaluation, even when
-        // State discards the value. Parse lazily in onAppear/onChange instead.
-        // Headless snapshots never run onAppear, so seed synchronously there.
-        if QMXTheme.isHeadlessDump {
-            let parsed = Self.parse(text)
-            _blocks = State(initialValue: parsed)
-            _visibleCount = State(initialValue: parsed.reduce(0) { $0 + $1.text.count })
-            _pendingParseText = State(initialValue: text)
-            _parsedText = State(initialValue: text)
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(blocks) { block in
-                let shown = min(max(0, visibleCount - block.start), block.text.count)
-                if shown > 0 {
-                    blockView(block, String(block.text.prefix(shown)))
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear {
-            rebuildBlocks(text, force: true)
-            start()
-        }
-        .onChange(of: text) { newText in
-            scheduleParse(newText)
-        }
-        .onChange(of: turnID) { _ in
-            revealTask?.cancel()
-            revealTask = nil
-            parseTask?.cancel()
-            parseTask = nil
-            rebuildBlocks(text, force: true)
-            visibleCount = (reduceMotion || QMXTheme.isHeadlessDump) ? totalCount : 0
-            start()
-        }
-        .onDisappear {
-            revealTask?.cancel()
-            revealTask = nil
-            parseTask?.cancel()
-            parseTask = nil
-        }
-    }
-
-    /// Parse at most every 80ms during a stream. Continuous deltas used to
-    /// re-split and re-scan the entire answer for every chunk.
-    private func scheduleParse(_ newText: String) {
-        pendingParseText = newText
-        if reduceMotion || QMXTheme.isHeadlessDump {
-            parseTask?.cancel()
-            parseTask = nil
-            rebuildBlocks(newText, force: true)
-            start()
-            return
-        }
-        let wait = 0.08 - Date().timeIntervalSince(lastParseAt)
-        if wait <= 0 {
-            parseTask?.cancel()
-            parseTask = nil
-            rebuildBlocks(newText, force: true)
-            start()
-            return
-        }
-        guard parseTask == nil else { return }
-        parseTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(max(0.01, wait) * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            parseTask = nil
-            rebuildBlocks(pendingParseText, force: true)
-            start()
-        }
-    }
-
-    private func rebuildBlocks(_ raw: String, force: Bool) {
-        guard force else { return }
-        lastParseAt = Date()
-        pendingParseText = raw
-        parsedText = raw
-        blocks = Self.parse(raw)
-    }
+    @StateObject private var revealer = AdaptiveStreamRevealer()
+    @State private var tailOpacity: Double = 1.0
 
     private var codeFontSize: CGFloat {
         max(12, (fontSize * 0.72).rounded())
     }
 
+    private var activeRawText: String {
+        if QMXTheme.isHeadlessDump || reduceMotion {
+            return text
+        }
+        return revealer.revealedText
+    }
+
+    private var isFullyFinished: Bool {
+        if QMXTheme.isHeadlessDump || reduceMotion {
+            return !isServerStreaming
+        }
+        return !isServerStreaming && !revealer.isRevealing && revealer.revealedCount >= revealer.totalCharacterCount
+    }
+
+    var body: some View {
+        let parsed = StreamingBlockParser.parse(
+            activeRawText,
+            turnId: turnID,
+            isFinished: isFullyFinished
+        )
+
+        VStack(alignment: .leading, spacing: 12) {
+            if !parsed.settled.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(parsed.settled) { block in
+                        blockView(block, isTail: false)
+                    }
+                }
+                .textSelection(.enabled)
+            }
+
+            if let tail = parsed.activeTail {
+                blockView(tail, isTail: true)
+                    .opacity(tailOpacity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            revealer.reset(turnId: turnID, onFinish: onFinish)
+            revealer.updateFullText(text, turnId: turnID)
+            if !isServerStreaming {
+                revealer.markServerTurnEnded(turnId: turnID)
+            }
+        }
+        .onChange(of: turnID) { newTurnID in
+            revealer.reset(turnId: newTurnID, onFinish: onFinish)
+            revealer.updateFullText(text, turnId: newTurnID)
+            if !isServerStreaming {
+                revealer.markServerTurnEnded(turnId: newTurnID)
+            }
+        }
+        .onChange(of: text) { newText in
+            if revealer.activeTurnId != turnID {
+                revealer.reset(turnId: turnID, onFinish: onFinish)
+            }
+            revealer.updateFullText(newText, turnId: turnID)
+            if !isServerStreaming {
+                revealer.markServerTurnEnded(turnId: turnID)
+            }
+            if reduceMotion || QMXTheme.isHeadlessDump {
+                onRevealProgress()
+                if !isServerStreaming {
+                    onFinish()
+                }
+            }
+        }
+        .onChange(of: isServerStreaming) { streaming in
+            if !streaming {
+                revealer.markServerTurnEnded(turnId: turnID)
+                if reduceMotion || QMXTheme.isHeadlessDump {
+                    onFinish()
+                }
+            }
+        }
+        .onChange(of: revealer.revealedText) { _ in
+            if !reduceMotion && !QMXTheme.isHeadlessDump {
+                tailOpacity = 0.92
+                withAnimation(.easeOut(duration: 0.08)) {
+                    tailOpacity = 1.0
+                }
+            }
+            onRevealProgress()
+        }
+        .onDisappear {
+            revealer.stop()
+        }
+    }
+
     @ViewBuilder
-    private func blockView(_ block: StageBlock, _ visible: String) -> some View {
-        if let table = block.table {
-            let media = tableMedia.indices.contains(table.id) ? tableMedia[table.id] : nil
-            QMXTableNotice(
-                table: table,
-                media: media,
-                onOpen: media == nil ? nil : { onOpenTable(table.id) }
-            )
-        } else if block.isCode {
-            Text(visible)
-                .font(.system(size: codeFontSize, design: .monospaced))
-                .lineSpacing(2)
-                .modifier(QMXTextSelectable(enabled: allowsSelection))
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.primary.opacity(0.05))
+    private func blockView(_ block: MarkdownBlock, isTail: Bool) -> some View {
+        switch block.kind {
+        case .paragraph(let content):
+            let display = isTail ? StreamingMarkdownSanitizer.sanitizeInline(content) : content
+            if !display.isEmpty {
+                InlineMarkdownText(
+                    text: display,
+                    fontSize: fontSize,
+                    lineSpacing: 3,
+                    selectable: !isTail || !isServerStreaming
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
-                )
-        } else {
-            InlineMarkdownText(
-                text: visible,
-                fontSize: fontSize,
-                lineSpacing: 3,
-                selectable: allowsSelection
-            )
                 .foregroundStyle(QMXTheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
+            }
 
-    private var totalCount: Int {
-        blocks.reduce(0) { $0 + $1.text.count }
-    }
+        case .heading(let level, let title):
+            let display = isTail ? StreamingMarkdownSanitizer.sanitizeInline(title) : title
+            let headingSize: CGFloat = level <= 1 ? fontSize + 3 : (level == 2 ? fontSize + 1.5 : fontSize)
+            InlineMarkdownText(
+                text: display,
+                fontSize: headingSize,
+                lineSpacing: 3,
+                weight: .semibold,
+                selectable: !isTail || !isServerStreaming
+            )
+            .foregroundStyle(QMXTheme.textPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-    private func finishRevealIfCaughtUp() {
-        // If a throttled parse is still pending, the visible blocks are stale;
-        // ending the reveal now would mark the answer complete before the last
-        // delta is actually rendered. Compare the two @State values: `text` is
-        // a captured struct property and may be older than the latest delta.
-        guard parseTask == nil, parsedText == pendingParseText else { return }
-        onFinish()
-    }
+        case .listItem(let prefix, let itemText):
+            let display = isTail ? StreamingMarkdownSanitizer.sanitizeInline(itemText) : itemText
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(prefix)
+                    .font(.system(size: fontSize, weight: .medium))
+                    .foregroundStyle(QMXTheme.textSecondary)
+                InlineMarkdownText(
+                    text: display,
+                    fontSize: fontSize,
+                    lineSpacing: 3,
+                    selectable: !isTail || !isServerStreaming
+                )
+                .foregroundStyle(QMXTheme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
-    private func start() {
-        if reduceMotion || QMXTheme.isHeadlessDump {
-            revealTask?.cancel()
-            revealTask = nil
-            visibleCount = totalCount
-            finishRevealIfCaughtUp()
-            return
-        }
-        if visibleCount > totalCount {
-            visibleCount = 0
-        }
-        if visibleCount >= totalCount {
-            finishRevealIfCaughtUp()
-            return
-        }
-        guard revealTask == nil else { return }
-        // Keep one steady 60Hz loop across incoming deltas so fast streams
-        // never cancel and starve the typewriter reveal.
-        revealTask = Task { @MainActor in
-            while visibleCount < totalCount {
-                try? await Task.sleep(nanoseconds: 16_000_000)
-                if Task.isCancelled {
-                    revealTask = nil
-                    return
+        case .blockquote(let quote):
+            let display = isTail ? StreamingMarkdownSanitizer.sanitizeInline(quote) : quote
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(QMXTheme.hairline.opacity(1.8))
+                    .frame(width: 2.5)
+                InlineMarkdownText(
+                    text: display,
+                    fontSize: fontSize,
+                    lineSpacing: 3,
+                    selectable: !isTail || !isServerStreaming
+                )
+                .foregroundStyle(QMXTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+        case .codeBlock(let language, let code, _):
+            VStack(alignment: .leading, spacing: 6) {
+                if !language.isEmpty {
+                    Text(language)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(QMXTheme.textTertiary)
                 }
-                let remaining = max(1, totalCount - visibleCount)
-                let step = max(1, (remaining + 29) / 30)
-                visibleCount = min(totalCount, visibleCount + step)
-                onTick()
+                Text(code.isEmpty ? " " : code)
+                    .font(.system(size: codeFontSize, design: .monospaced))
+                    .lineSpacing(2)
+                    .modifier(QMXTextSelectable(enabled: !isTail || !isServerStreaming))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            revealTask = nil
-            finishRevealIfCaughtUp()
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+            )
+
+        case .inlineTable(
+            let tableIndex,
+            let title,
+            let headers,
+            let rows,
+            let totalRowCount,
+            let isStreaming,
+            let isTruncated,
+            let rawMarkdown
+        ):
+            let parsed = QMXMarkdownTables.scan(rawMarkdown).first
+            let openAction: () -> Void = {
+                let fallback = parsed ?? QMXMarkdownTable(
+                    id: tableIndex,
+                    startLine: 0,
+                    endLine: 0,
+                    raw: rawMarkdown,
+                    title: title,
+                    columns: headers,
+                    rows: rows,
+                    totalRows: totalRowCount,
+                    totalColumns: headers.count
+                )
+                onOpenTable(tableIndex, fallback)
+            }
+            InlineMarkdownTableView(
+                title: title,
+                headers: headers,
+                rows: rows,
+                totalRowCount: totalRowCount,
+                isStreaming: isStreaming,
+                isTruncated: isTruncated,
+                fontSize: fontSize,
+                selectable: !isTail || !isServerStreaming,
+                onOpen: openAction
+            )
+
+        case .tableNotice(
+            let tableIndex,
+            let title,
+            let colCount,
+            let rowCount,
+            let isStreaming,
+            let rawMarkdown
+        ):
+            let media = tableMedia.indices.contains(tableIndex) ? tableMedia[tableIndex] : nil
+            let parsed = QMXMarkdownTables.scan(rawMarkdown).first
+            QMXTableNotice(
+                title: title,
+                colCount: colCount,
+                rowCount: rowCount,
+                isStreaming: isStreaming,
+                rawMarkdown: rawMarkdown,
+                media: media,
+                onOpen: (media != nil || !isStreaming) ? { onOpenTable(tableIndex, parsed) } : nil
+            )
         }
     }
-
-    private static func parse(_ raw: String) -> [StageBlock] {
-        var parsed: [StageBlock] = []
-        var proseLines: [String] = []
-        var codeLines: [String] = []
-        var inCode = false
-        var language = ""
-
-        func flushProse() {
-            let joined = proseLines
-                .joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !joined.isEmpty {
-                parsed.append(StageBlock(
-                    id: parsed.count,
-                    isCode: false,
-                    language: "",
-                    text: joined,
-                    table: nil,
-                    start: 0
-                ))
-            }
-            proseLines.removeAll()
-        }
-
-        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
-        let lines = normalized.components(separatedBy: "\n")
-        let tables = QMXMarkdownTables.scan(normalized)
-        var tableByStart: [Int: QMXMarkdownTable] = [:]
-        for table in tables {
-            tableByStart[table.startLine] = table
-        }
-
-        var index = 0
-        while index < lines.count {
-            if let table = tableByStart[index] {
-                flushProse()
-                parsed.append(StageBlock(
-                    id: parsed.count,
-                    isCode: false,
-                    language: "",
-                    text: "表格",
-                    table: table,
-                    start: 0
-                ))
-                index = table.endLine + 1
-                continue
-            }
-
-            let line = lines[index]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                if inCode {
-                    let code = codeLines.joined(separator: "\n")
-                    if !code.isEmpty {
-                        parsed.append(StageBlock(
-                            id: parsed.count,
-                            isCode: true,
-                            language: language,
-                            text: code,
-                            table: nil,
-                            start: 0
-                        ))
-                    }
-                    codeLines.removeAll()
-                    language = ""
-                    inCode = false
-                } else {
-                    flushProse()
-                    inCode = true
-                    language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                }
-                index += 1
-                continue
-            }
-            if inCode {
-                codeLines.append(line)
-            } else if trimmed.isEmpty {
-                flushProse()
-            } else {
-                proseLines.append(trimmed)
-            }
-            index += 1
-        }
-
-        if inCode {
-            let code = codeLines.joined(separator: "\n")
-            if !code.isEmpty {
-                parsed.append(StageBlock(
-                    id: parsed.count,
-                    isCode: true,
-                    language: language,
-                    text: code,
-                    table: nil,
-                    start: 0
-                ))
-            }
-        } else {
-            flushProse()
-        }
-
-        if parsed.isEmpty, !raw.isEmpty {
-            parsed.append(StageBlock(
-                id: 0,
-                isCode: false,
-                language: "",
-                text: raw,
-                table: nil,
-                start: 0
-            ))
-        }
-
-        var offset = 0
-        return parsed.map { block in
-            var block = block
-            block.start = offset
-            offset += block.text.count
-            return block
-        }
-    }
-}
-
-private struct StageBlock: Identifiable {
-    let id: Int
-    let isCode: Bool
-    let language: String
-    let text: String
-    let table: QMXMarkdownTable?
-    var start: Int
 }
 
 // MARK: - Native composer (IME-safe)
@@ -1909,10 +1984,12 @@ private struct ChineseIMETextView: NSViewRepresentable {
             object: nil,
             queue: .main
         ) { [weak tv] _ in
-            guard let tv, let window = tv.window else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKey()
-            window.makeFirstResponder(tv)
+            Task { @MainActor [weak tv] in
+                guard let tv, let window = tv.window else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKey()
+                window.makeFirstResponder(tv)
+            }
         }
         return scroll
     }
