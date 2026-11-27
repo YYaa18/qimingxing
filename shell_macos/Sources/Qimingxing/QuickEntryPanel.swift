@@ -25,6 +25,20 @@ enum QuickEntryLayout {
         let promptSpacing: CGFloat = promptHeight > 0 ? 10 : 0
         return panelChrome + inputExtraHeight + attachmentBarHeight + stagePadding + promptHeight + promptSpacing + statusBarHeight
     }
+
+    static func attachmentBarHeight(stagedCount: Int, uploadingCount: Int) -> CGFloat {
+        (stagedCount == 0 && uploadingCount == 0) ? 0 : 38
+    }
+
+    static func inputExtraHeight(for text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let charsPerLine = 28
+        var lines = 0
+        for line in text.components(separatedBy: "\n") {
+            lines += max(1, Int(ceil(Double(line.count) / Double(charsPerLine))))
+        }
+        return CGFloat(min(max(lines - 1, 0), 8)) * 24
+    }
 }
 
 @MainActor
@@ -265,6 +279,15 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         .store(in: &cancellables)
     }
 
+    private var idleContentHeight: CGFloat {
+        QuickEntryLayout.idleHeight
+            + QuickEntryLayout.attachmentBarHeight(
+                stagedCount: inputState.stagedAttachments.count,
+                uploadingCount: inputState.uploadingNames.count
+            )
+            + QuickEntryLayout.inputExtraHeight(for: inputState.text)
+    }
+
     private func refreshExpansion() {
         let expanded = inputState.forceExpanded
             || brainClient.isGenerating
@@ -273,8 +296,9 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         inputState.isExpanded = expanded
         if !expanded {
             heightEngine.reset()
-            lastChatHeight = QuickEntryLayout.idleHeight
-            targetChatHeight = QuickEntryLayout.idleHeight
+            let target = idleContentHeight
+            lastChatHeight = target
+            targetChatHeight = target
         }
     }
 
@@ -288,14 +312,17 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
     }
 
     private var desiredPanelHeight: CGFloat {
-        guard inputState.isExpanded else { return QuickEntryLayout.idleHeight }
+        guard inputState.isExpanded else { return idleContentHeight }
         if lastTurnHasAnswer {
             return QuickEntryLayout.answeringHeight
         }
         return QuickEntryLayout.compactThinkingHeight(
             promptHeight: 25,
-            attachmentBarHeight: 0,
-            inputExtraHeight: 0
+            attachmentBarHeight: QuickEntryLayout.attachmentBarHeight(
+                stagedCount: inputState.stagedAttachments.count,
+                uploadingCount: inputState.uploadingNames.count
+            ),
+            inputExtraHeight: QuickEntryLayout.inputExtraHeight(for: inputState.text)
         )
     }
 
@@ -911,53 +938,53 @@ struct QuickEntryRootView: View {
     }
 
     private var attachmentBar: some View {
-        HStack(spacing: 7) {
-            ForEach(inputState.stagedAttachments) { attachment in
-                HStack(spacing: 6) {
-                    Image(systemName: attachmentSymbol(attachment.kind))
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(QMXTheme.accent)
-                    Text(attachment.filename)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(QMXTheme.textPrimary)
-                        .lineLimit(1)
-                    Button {
-                        inputState.stagedAttachments.removeAll { $0.id == attachment.id }
-                        onDesiredHeightChange(chatHeight)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(QMXTheme.textTertiary)
-                            .frame(width: 14, height: 14)
-                            .contentShape(Rectangle())
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                ForEach(inputState.stagedAttachments) { attachment in
+                    HStack(spacing: 6) {
+                        Image(systemName: attachmentSymbol(attachment.kind))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(QMXTheme.accent)
+                        Text(attachment.filename)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(QMXTheme.textPrimary)
+                            .lineLimit(1)
+                        Button {
+                            inputState.stagedAttachments.removeAll { $0.id == attachment.id }
+                            onDesiredHeightChange(chatHeight)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(QMXTheme.textTertiary)
+                                .frame(width: 14, height: 14)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 9)
+                    .frame(height: 26)
+                    .background(Capsule().fill(QMXTheme.surfaceRaised))
+                    .overlay(Capsule().strokeBorder(QMXTheme.hairline, lineWidth: 0.5))
                 }
-                .padding(.horizontal, 9)
-                .frame(height: 26)
-                .background(Capsule().fill(QMXTheme.surfaceRaised))
-                .overlay(Capsule().strokeBorder(QMXTheme.hairline, lineWidth: 0.5))
-            }
 
-            ForEach(inputState.uploadingNames, id: \.self) { name in
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.65)
-                        .frame(width: 12, height: 12)
-                    Text(name)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(QMXTheme.textTertiary)
-                        .lineLimit(1)
+                ForEach(inputState.uploadingNames, id: \.self) { name in
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.65)
+                            .frame(width: 12, height: 12)
+                        Text(name)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 9)
+                    .frame(height: 26)
+                    .background(Capsule().fill(QMXTheme.surfaceMuted))
                 }
-                .padding(.horizontal, 9)
-                .frame(height: 26)
-                .background(Capsule().fill(QMXTheme.surfaceMuted))
             }
-
-            Spacer(minLength: 0)
+            .padding(.horizontal, 20)
         }
-        .padding(.horizontal, 20)
         .frame(height: attachmentBarHeight)
     }
 
@@ -1297,20 +1324,16 @@ struct QuickEntryRootView: View {
     }
 
     private var attachmentBarHeight: CGFloat {
-        (inputState.stagedAttachments.isEmpty && inputState.uploadingNames.isEmpty) ? 0 : 38
+        QuickEntryLayout.attachmentBarHeight(
+            stagedCount: inputState.stagedAttachments.count,
+            uploadingCount: inputState.uploadingNames.count
+        )
     }
 
-    /// Let the composer grow up to three extra lines so a pasted multi-line
+    /// Let the composer grow up to eight extra lines so a pasted multi-line
     /// instruction stays readable instead of hiding behind a one-line frame.
     private var inputExtraHeight: CGFloat {
-        let text = inputState.text
-        guard !text.isEmpty else { return 0 }
-        let charsPerLine = 28
-        var lines = 0
-        for line in text.components(separatedBy: "\n") {
-            lines += max(1, Int(ceil(Double(line.count) / Double(charsPerLine))))
-        }
-        return CGFloat(min(max(lines - 1, 0), 8)) * 24
+        QuickEntryLayout.inputExtraHeight(for: inputState.text)
     }
 
     private var promptBlockHeight: CGFloat {

@@ -942,12 +942,13 @@ struct MonotonicPanelHeightEngine {
         currentHeight: CGFloat,
         isExpanded: Bool
     ) -> (target: CGFloat, shouldUpdate: Bool) {
+        let boundedMax = max(baseHeight, maxAllowed)
         guard isExpanded else {
             monotonicHeight = baseHeight
-            return (baseHeight, abs(baseHeight - currentHeight) >= 0.5)
+            let idleTarget = min(boundedMax, max(baseHeight, measured))
+            return (idleTarget, abs(idleTarget - currentHeight) >= 0.5)
         }
 
-        let boundedMax = max(baseHeight, maxAllowed)
         let candidate = max(baseHeight, measured)
         let nextMonotonic = min(boundedMax, max(monotonicHeight, candidate))
         monotonicHeight = nextMonotonic

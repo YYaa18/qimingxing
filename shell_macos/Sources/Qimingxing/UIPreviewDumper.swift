@@ -738,7 +738,10 @@ enum StreamingEngineVerifier {
         let shrink = engine.evaluate(measured: 180, maxAllowed: 700, currentHeight: 210, isExpanded: true)
         check(shrink.target >= 210 && !shrink.shouldUpdate, "monotonic height must never shrink within a turn")
 
-        // Explicit collapse resets back to 120
+        // Explicit collapse resets back to 120 (or idle height with staged attachments)
+        let idleWithAttachment = engine.evaluate(measured: 158, maxAllowed: 700, currentHeight: 120, isExpanded: false)
+        check(idleWithAttachment.target == 158 && idleWithAttachment.shouldUpdate, "idle with staged attachment must grow to 158")
+
         let reset = engine.evaluate(measured: 120, maxAllowed: 700, currentHeight: 212, isExpanded: false)
         check(reset.target == 120 && reset.shouldUpdate, "collapse must reset back to 120")
     }
