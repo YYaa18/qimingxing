@@ -335,6 +335,24 @@ final class QuickEntryController: NSObject, NSWindowDelegate {
         }
     }
 
+    func openWithStagedItems(attachments: [StagedAttachment], textSnippets: [String]) {
+        for attachment in attachments where !inputState.stagedAttachments.contains(where: { $0.artifactId == attachment.artifactId }) {
+            inputState.stagedAttachments.append(attachment)
+        }
+        let joined = textSnippets
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        if !joined.isEmpty {
+            if inputState.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                inputState.text = joined
+            } else {
+                inputState.text += "\n" + joined
+            }
+        }
+        show()
+    }
+
     func hideAndRestoreFocus() {
         stopHeightDriver()
         inputState.isWorkspaceWingOpen = false
@@ -1841,12 +1859,19 @@ private struct StreamingAnswerContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-        case .codeBlock(let language, let code, _):
+        case .codeBlock(let language, let code, let isClosed):
             VStack(alignment: .leading, spacing: 6) {
-                if !language.isEmpty {
-                    Text(language)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(QMXTheme.textTertiary)
+                HStack(spacing: 6) {
+                    if !language.isEmpty {
+                        Text(language)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(QMXTheme.textTertiary)
+                    }
+                    Spacer(minLength: 0)
+                    if isClosed, !code.isEmpty, !QMXTheme.isHeadlessDump {
+                        QMXDragOutHandle(payload: .code(language: language, code: code))
+                            .frame(width: 22, height: 22)
+                    }
                 }
                 Text(code.isEmpty ? " " : code)
                     .font(.system(size: codeFontSize, design: .monospaced))

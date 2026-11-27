@@ -375,8 +375,17 @@ enum UIPreviewDumper {
             allowRemember: true,
             timeoutSec: 48
         )
-        let aprView = ApprovalModalView(item: aprItem) { _, _, _ in }
-        render(aprView, size: CGSize(width: 440, height: 360), to: outputDir.appendingPathComponent("approval_modal.png"))
+        let aprView = ApprovalModalView(
+            item: aprItem,
+            queueIndex: 0,
+            queueTotal: 2
+        ) { _, _, _ in }
+        render(aprView, size: CGSize(width: 440, height: 372), to: outputDir.appendingPathComponent("approval_modal.png"))
+
+        // 5a. Drop Pocket (Scheme B)
+        let pocketController = DropPocketController(brainClient: client)
+        let pocketView = DropPocketView(controller: pocketController, onClose: {})
+        render(pocketView, size: CGSize(width: DropPocketGeometry.width, height: DropPocketGeometry.emptyHeight), to: outputDir.appendingPathComponent("drop_pocket_empty.png"))
 
         // 5b. Detached media viewer with a virtual markdown table
         let tableView = MediaViewerContent(model: MediaViewerModel.shared, mode: .detached)
@@ -753,5 +762,128 @@ enum StreamingEngineVerifier {
 
         let noTable = qmxMediaWithoutInlineTables([tableMedia, imgMedia], answer: "仅卡片表格")
         check(noTable.count == 2, "standalone card table without inline markdown should remain in media strip")
+    }
+}
+
+@MainActor
+enum Phase1Verifier {
+    private static func check(_ condition: Bool, _ message: String) {
+        if !condition {
+            fatalError("PHASE1_VERIFY FAIL: \(message)")
+        }
+    }
+
+    static func runAll() {
+        verifyDropPocketGeometry()
+        verifyHoldToApproveAndQueue()
+        verifyFilePromiseSerialization()
+        print("PHASE1_VERIFY PASS")
+    }
+
+    private static func verifyDropPocketGeometry() {
+        let visible = NSRect(x: 1920, y: 0, width: 1440, height: 900) // secondary display
+        let size = NSSize(width: DropPocketGeometry.width, height: DropPocketGeometry.emptyHeight)
+
+        // Center placement: +24pt offset
+        let centerOrigin = DropPocketGeometry.clampedOrigin(
+            mouseLocation: NSPoint(x: 2400, y: 400),
+            panelSize: size,
+            visibleFrame: visible
+        )
+        check(centerOrigin.x == 2424 && centerOrigin.y == 424, "center offset should be +24pt")
+
+        // Top-right corner: clamped inside secondary display
+        let topRight = DropPocketGeometry.clampedOrigin(
+            mouseLocation: NSPoint(x: 3355, y: 895),
+            panelSize: size,
+            visibleFrame: visible
+        )
+        check(topRight.x + size.width <= visible.maxX - 12 + 0.5, "right edge must clamp within visibleFrame")
+        check(topRight.y + size.height <= visible.maxY - 12 + 0.5, "top edge must clamp within visibleFrame")
+
+        // Bottom-left corner: clamped inside secondary display
+        let bottomLeft = DropPocketGeometry.clampedOrigin(
+            mouseLocation: NSPoint(x: 1900, y: -10),
+            panelSize: size,
+            visibleFrame: visible
+        )
+        check(bottomLeft.x >= visible.minX + 12 - 0.5, "left edge must clamp within visibleFrame")
+        check(bottomLeft.y >= visible.minY + 12 - 0.5, "bottom edge must clamp within visibleFrame")
+
+        // Non-activating panel check
+        let pocketPanel = DropPocketPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        check(!pocketPanel.canBecomeKey && !pocketPanel.canBecomeMain, "DropPocketPanel must never steal key/main focus")
+    }
+
+    private static func verifyHoldToApproveAndQueue() {
+        let now = Date()
+        var hold = HoldToApproveState(appearedAt: now)
+        check(!hold.canClickInReduceMotion(now: now.addingTimeInterval(0.20)), "reduce motion must wait 400ms cooldown")
+        check(hold.canClickInReduceMotion(now: now.addingTimeInterval(0.45)), "reduce motion should unlock after 400ms")
+
+        hold.beginHold()
+        // Early release at 0.25s must cancel and reset progress
+        for _ in 0..<5 {
+            let triggered = hold.advance(dt: 0.05)
+            check(!triggered, "0.25s hold must not trigger approval")
+        }
+        check(hold.progress > 0.4 && hold.progress < 0.7, "progress should be ~0.55 at 0.25s")
+        hold.cancelHold()
+        check(hold.progress == 0 && !hold.didTrigger, "early release must reset progress to 0")
+
+        // Full 0.45s hold triggers once
+        hold.beginHold()
+        var triggeredCount = 0
+        for _ in 0..<10 {
+            if hold.advance(dt: 0.05) {
+                triggeredCount += 1
+            }
+        }
+        check(triggeredCount == 1 && hold.didTrigger, "0.45s hold must trigger exactly once")
+
+        // Stacked queue model
+        let queue = ApprovalQueueModel()
+        let item1 = PendingApprovalItem(approvalId: "a1", turnId: "t1", toolName: "browser_act", riskLevel: "confirm", summary: "1", details: [:], options: [], isClarification: false, allowRemember: true, timeoutSec: 60)
+        let item2 = PendingApprovalItem(approvalId: "a2", turnId: "t1", toolName: "macos_mail_draft", riskLevel: "confirm", summary: "2", details: [:], options: [], isClarification: false, allowRemember: true, timeoutSec: 60)
+        queue.sync([item1, item2])
+        check(queue.items.count == 2 && queue.currentItem?.approvalId == "a1", "queue should start on first item")
+        queue.step(by: 1)
+        check(queue.currentItem?.approvalId == "a2", "queue step should advance to second item")
+        queue.remove(approvalId: "a2")
+        check(queue.currentItem?.approvalId == "a1", "removing resolved item should keep valid selection")
+    }
+
+    private static func verifyFilePromiseSerialization() {
+        let csv = QMXFilePromiseSerializer.csvData(
+            columns: ["名称", "备注"],
+            rows: [["启明星", "支持 \"引号\", 逗号"]]
+        )
+        let csvStr = String(data: csv, encoding: .utf8) ?? ""
+        check(csv.starts(with: [0xEF, 0xBB, 0xBF]), "CSV must include UTF-8 BOM for Excel/Numbers")
+        check(csvStr.contains("\"支持 \"\"引号\"\", 逗号\""), "CSV must RFC-4180 escape quotes and commas")
+
+        check(QMXFilePromiseSerializer.fileExtension(forLanguage: "python") == "py", "python -> .py")
+        check(QMXFilePromiseSerializer.fileExtension(forLanguage: "swift") == "swift", "swift -> .swift")
+        check(
+            QMXFilePromiseSerializer.suggestedFilename(for: .table(title: "端口/状态:检查", columns: ["A"], rows: [["1"]])) == "端口_状态_检查.csv",
+            "table filename must sanitize invalid path chars and append .csv"
+        )
+
+        // Lazy write check
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("qmx_promise_test_\(UUID().uuidString.prefix(6))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let targetURL = tmpDir.appendingPathComponent("out.csv")
+        try? QMXFilePromiseSerializer.write(
+            payload: .table(title: "Test", columns: ["Col"], rows: [["Val"]]),
+            to: targetURL
+        )
+        check(FileManager.default.fileExists(atPath: targetURL.path), "lazy write must produce target CSV file")
     }
 }

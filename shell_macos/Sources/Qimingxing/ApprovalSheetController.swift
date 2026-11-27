@@ -1,51 +1,235 @@
 import AppKit
 import SwiftUI
 
+struct HoldToApproveState: Equatable {
+    static let requiredHoldSeconds: TimeInterval = 0.45
+    static let reduceMotionCooldownSeconds: TimeInterval = 0.40
+
+    private(set) var progress: Double = 0
+    private(set) var isHolding: Bool = false
+    private(set) var didTrigger: Bool = false
+    var appearedAt: Date = Date()
+
+    mutating func beginHold() {
+        guard !didTrigger else { return }
+        isHolding = true
+    }
+
+    mutating func cancelHold() {
+        isHolding = false
+        if !didTrigger {
+            progress = 0
+        }
+    }
+
+    mutating func reset(appearedAt: Date = Date()) {
+        progress = 0
+        isHolding = false
+        didTrigger = false
+        self.appearedAt = appearedAt
+    }
+
+    mutating func advance(dt: TimeInterval) -> Bool {
+        guard isHolding, !didTrigger else { return false }
+        let clampedDt = min(max(dt, 0.001), 0.1)
+        progress = min(1.0, progress + clampedDt / Self.requiredHoldSeconds)
+        if progress >= 1.0 {
+            didTrigger = true
+            isHolding = false
+            return true
+        }
+        return false
+    }
+
+    func canClickInReduceMotion(now: Date = Date()) -> Bool {
+        !didTrigger && now.timeIntervalSince(appearedAt) >= Self.reduceMotionCooldownSeconds
+    }
+}
+
+@MainActor
+final class HoldToApproveDriver: ObservableObject {
+    @Published private(set) var progress: Double = 0
+    @Published private(set) var isHolding: Bool = false
+    @Published private(set) var cooldownReady: Bool = false
+
+    private var state = HoldToApproveState()
+    private let displayLink = DisplayLinkDriver()
+    nonisolated(unsafe) private var cooldownTimer: Timer?
+    var onApprove: (() -> Void)?
+
+    func reset() {
+        displayLink.stop()
+        cooldownTimer?.invalidate()
+        cooldownTimer = nil
+        state.reset(appearedAt: Date())
+        progress = 0
+        isHolding = false
+        cooldownReady = false
+
+        let timer = Timer(timeInterval: HoldToApproveState.reduceMotionCooldownSeconds, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.cooldownReady = true
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cooldownTimer = timer
+    }
+
+    func beginHold() {
+        guard !state.isHolding, !state.didTrigger else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            if state.canClickInReduceMotion() {
+                triggerApprove()
+            }
+            return
+        }
+        state.beginHold()
+        isHolding = true
+        displayLink.start { [weak self] dt in
+            self?.tick(dt: dt)
+        }
+    }
+
+    func endHold() {
+        guard state.isHolding || state.progress > 0 else { return }
+        displayLink.stop()
+        state.cancelHold()
+        isHolding = false
+        if !state.didTrigger {
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.78)) {
+                progress = 0
+            }
+        }
+    }
+
+    func triggerInReduceMotion() {
+        guard state.canClickInReduceMotion() else { return }
+        triggerApprove()
+    }
+
+    private func tick(dt: TimeInterval) {
+        let completed = state.advance(dt: dt)
+        progress = state.progress
+        if completed {
+            displayLink.stop()
+            isHolding = false
+            triggerApprove()
+        }
+    }
+
+    private func triggerApprove() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+        let action = onApprove
+        onApprove = nil
+        action?()
+    }
+
+    deinit {
+        cooldownTimer?.invalidate()
+    }
+}
+
+@MainActor
+final class ApprovalQueueModel: ObservableObject {
+    @Published private(set) var items: [PendingApprovalItem] = []
+    @Published var selectedIndex: Int = 0
+
+    var currentItem: PendingApprovalItem? {
+        guard items.indices.contains(selectedIndex) else { return items.first }
+        return items[selectedIndex]
+    }
+
+    func sync(_ next: [PendingApprovalItem]) {
+        let currentId = currentItem?.approvalId
+        items = next
+        if let currentId, let idx = next.firstIndex(where: { $0.approvalId == currentId }) {
+            selectedIndex = idx
+        } else {
+            selectedIndex = min(selectedIndex, max(0, next.count - 1))
+        }
+    }
+
+    func remove(approvalId: String) {
+        items.removeAll { $0.approvalId == approvalId }
+        selectedIndex = min(selectedIndex, max(0, items.count - 1))
+    }
+
+    func step(by delta: Int) {
+        guard !items.isEmpty else { return }
+        selectedIndex = (selectedIndex + delta + items.count) % items.count
+    }
+}
+
 @MainActor
 final class ApprovalSheetController {
-    private var windows: [String: NSWindow] = [:]
+    private var window: NSWindow?
     private weak var brainClient: BrainClient?
+    private let queueModel = ApprovalQueueModel()
+    private let holdDriver = HoldToApproveDriver()
+    private var keyMonitor: Any?
 
     init(brainClient: BrainClient) {
         self.brainClient = brainClient
     }
 
     func syncPending(_ items: [PendingApprovalItem]) {
-        let activeIds = Set(items.map(\.approvalId))
-        for (aid, win) in windows where !activeIds.contains(aid) {
-            win.close()
-            windows.removeValue(forKey: aid)
-        }
-        for item in items where windows[item.approvalId] == nil {
-            showWindow(for: item)
+        queueModel.sync(items)
+        if items.isEmpty {
+            closeAll()
+        } else {
+            showOrUpdateWindow()
         }
     }
 
     func closeWindow(approvalId: String) {
-        if let win = windows.removeValue(forKey: approvalId) {
-            win.close()
+        queueModel.remove(approvalId: approvalId)
+        if queueModel.items.isEmpty {
+            closeAll()
+        } else {
+            holdDriver.reset()
         }
     }
 
-    private func showWindow(for item: PendingApprovalItem) {
-        guard let brainClient else { return }
-        let view = ApprovalModalView(item: item) { [weak brainClient, weak self] approved, remember, answerText in
-            brainClient?.respondToApproval(
-                approvalId: item.approvalId,
-                turnId: item.turnId,
-                approved: approved,
-                rememberForSession: remember,
-                answerText: answerText
-            )
-            self?.closeWindow(approvalId: item.approvalId)
+    private func closeAll() {
+        holdDriver.endHold()
+        removeKeyMonitor()
+        window?.close()
+        window = nil
+    }
+
+    private func respond(_ item: PendingApprovalItem, approved: Bool, remember: Bool, answerText: String) {
+        brainClient?.respondToApproval(
+            approvalId: item.approvalId,
+            turnId: item.turnId,
+            approved: approved,
+            rememberForSession: remember,
+            answerText: answerText
+        )
+        closeWindow(approvalId: item.approvalId)
+    }
+
+    private func showOrUpdateWindow() {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
         }
 
-        let hosting = NSHostingController(rootView: view)
+        holdDriver.reset()
+        let rootView = ApprovalQueueView(
+            model: queueModel,
+            holdDriver: holdDriver,
+            onRespond: { [weak self] item, approved, remember, answerText in
+                self?.respond(item, approved: approved, remember: remember, answerText: answerText)
+            }
+        )
+
+        let hosting = NSHostingController(rootView: rootView)
         hosting.view.wantsLayer = true
         hosting.view.layer?.backgroundColor = NSColor.clear.cgColor
 
         let win = NSWindow(contentViewController: hosting)
-        win.title = item.isClarification ? "启明星 · 请确认" : "启明星 · 操作审批"
+        win.title = "启明星 · 操作审批"
         win.styleMask = [.borderless]
         win.isOpaque = false
         win.backgroundColor = .clear
@@ -53,23 +237,118 @@ final class ApprovalSheetController {
         win.level = .floating
         win.isMovableByWindowBackground = true
         win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        win.setContentSize(NSSize(width: 440, height: item.isClarification ? 300 : 360))
+        win.setContentSize(NSSize(width: 440, height: 372))
         win.center()
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)
-        windows[item.approvalId] = win
+        self.window = win
+        installKeyMonitor()
+    }
+
+    private func installKeyMonitor() {
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
+            guard let self, let win = self.window, win.isKeyWindow,
+                  let item = self.queueModel.currentItem
+            else { return event }
+
+            if event.type == .flagsChanged {
+                if !event.modifierFlags.contains(.command), self.holdDriver.isHolding {
+                    self.holdDriver.endHold()
+                }
+                return event
+            }
+
+            if event.keyCode == 53, event.type == .keyDown {
+                self.respond(item, approved: false, remember: false, answerText: "")
+                return nil
+            }
+
+            // Never intercept Return in clarification text fields, except swallowing
+            // accidental bare Return for high-risk approval modals.
+            if !item.isClarification && (event.keyCode == 36 || event.keyCode == 76) {
+                let hasCommand = event.modifierFlags.contains(.command)
+                if event.type == .keyDown {
+                    if hasCommand {
+                        if !event.isARepeat {
+                            self.holdDriver.beginHold()
+                        }
+                    }
+                    // Swallow both bare Return and Cmd+Return so bare Enter
+                    // can never accidentally approve a pending action.
+                    return nil
+                } else if event.type == .keyUp {
+                    self.holdDriver.endHold()
+                    return nil
+                }
+            }
+
+            return event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+    }
+}
+
+private struct ApprovalQueueView: View {
+    @ObservedObject var model: ApprovalQueueModel
+    @ObservedObject var holdDriver: HoldToApproveDriver
+    let onRespond: (PendingApprovalItem, Bool, Bool, String) -> Void
+
+    var body: some View {
+        if let item = model.currentItem {
+            ApprovalModalView(
+                item: item,
+                queueIndex: model.selectedIndex,
+                queueTotal: model.items.count,
+                externalHoldDriver: holdDriver,
+                onNavigate: { delta in
+                    model.step(by: delta)
+                    holdDriver.reset()
+                },
+                onRespond: { approved, remember, answerText in
+                    onRespond(item, approved, remember, answerText)
+                }
+            )
+            .id(item.approvalId)
+        }
     }
 }
 
 struct ApprovalModalView: View {
     let item: PendingApprovalItem
+    var queueIndex: Int = 0
+    var queueTotal: Int = 1
+    var externalHoldDriver: HoldToApproveDriver? = nil
+    var onNavigate: ((Int) -> Void)? = nil
     let onRespond: (Bool, Bool, String) -> Void
 
     @State private var customReply: String = ""
     @State private var rememberChoice: Bool = false
+    @StateObject private var fallbackHoldDriver = HoldToApproveDriver()
 
-    init(item: PendingApprovalItem, onRespond: @escaping (Bool, Bool, String) -> Void) {
+    private var activeHoldDriver: HoldToApproveDriver {
+        externalHoldDriver ?? fallbackHoldDriver
+    }
+
+    init(
+        item: PendingApprovalItem,
+        queueIndex: Int = 0,
+        queueTotal: Int = 1,
+        externalHoldDriver: HoldToApproveDriver? = nil,
+        onNavigate: ((Int) -> Void)? = nil,
+        onRespond: @escaping (Bool, Bool, String) -> Void
+    ) {
         self.item = item
+        self.queueIndex = queueIndex
+        self.queueTotal = queueTotal
+        self.externalHoldDriver = externalHoldDriver
+        self.onNavigate = onNavigate
         self.onRespond = onRespond
     }
 
@@ -101,6 +380,19 @@ struct ApprovalModalView: View {
             RoundedRectangle(cornerRadius: QMXTheme.approvalRadius, style: .continuous)
                 .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
         )
+        .onAppear {
+            if externalHoldDriver == nil {
+                fallbackHoldDriver.reset()
+            }
+            activeHoldDriver.onApprove = {
+                onRespond(true, rememberChoice, "")
+            }
+        }
+        .onChange(of: rememberChoice) { _ in
+            activeHoldDriver.onApprove = {
+                onRespond(true, rememberChoice, "")
+            }
+        }
     }
 
     private var header: some View {
@@ -119,6 +411,38 @@ struct ApprovalModalView: View {
             }
 
             Spacer()
+
+            if queueTotal > 1 {
+                HStack(spacing: 4) {
+                    Button {
+                        onNavigate?(-1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 18, height: 20)
+                    }
+                    .buttonStyle(.plain)
+
+                    Text("\(queueIndex + 1) / \(queueTotal)")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(QMXTheme.textSecondary)
+                        .monospacedDigit()
+
+                    Button {
+                        onNavigate?(1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 18, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .foregroundStyle(QMXTheme.textSecondary)
+                .padding(.horizontal, 6)
+                .frame(height: 22)
+                .background(Capsule().fill(QMXTheme.surfaceRaised))
+                .overlay(Capsule().strokeBorder(QMXTheme.hairline, lineWidth: 0.5))
+            }
         }
     }
 
@@ -177,17 +501,13 @@ struct ApprovalModalView: View {
 
     private var actionButtons: some View {
         HStack(spacing: 10) {
-            ApprovalButton(title: "拒绝", isPrimary: false, haptic: .generic) {
+            ApprovalButton(title: "拒绝 (Esc)", isPrimary: false, haptic: .generic) {
                 onRespond(false, false, "")
             }
-            .keyboardShortcut(.cancelAction)
 
             Spacer()
 
-            ApprovalButton(title: "允许", isPrimary: true, haptic: .generic) {
-                onRespond(true, rememberChoice, "")
-            }
-            .keyboardShortcut(.defaultAction)
+            HoldToApproveButton(driver: activeHoldDriver)
         }
     }
 
@@ -292,6 +612,66 @@ struct ApprovalModalView: View {
         case "instruction": return "需要你做什么"
         default: return key.replacingOccurrences(of: "_", with: " ")
         }
+    }
+}
+
+private struct HoldToApproveButton: View {
+    @ObservedObject var driver: HoldToApproveDriver
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pressed = false
+
+    var body: some View {
+        let fillFraction = reduceMotion ? (driver.cooldownReady ? 1.0 : 0.35) : driver.progress
+        let label = reduceMotion ? "允许 ⌘↩" : "长按允许 ⌘↩"
+
+        ZStack {
+            Capsule(style: .continuous)
+                .fill(QMXTheme.surfaceRaised)
+
+            GeometryReader { geo in
+                Capsule(style: .continuous)
+                    .fill(QMXTheme.primaryFill)
+                    .frame(width: max(0, geo.size.width * fillFraction))
+            }
+            .clipShape(Capsule(style: .continuous))
+
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(fillFraction > 0.52 ? QMXTheme.primaryText : QMXTheme.textPrimary)
+            .padding(.horizontal, 18)
+        }
+        .frame(minWidth: 146)
+        .frame(height: 36)
+        .fixedSize(horizontal: true, vertical: true)
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(QMXTheme.hairline, lineWidth: 0.5)
+        )
+        .contentShape(Capsule(style: .continuous))
+        .scaleEffect(reduceMotion ? 1.0 : (driver.isHolding ? 0.97 : 1.0))
+        .animation(.easeOut(duration: 0.12), value: driver.isHolding)
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !pressed else { return }
+                    pressed = true
+                    if reduceMotion {
+                        driver.triggerInReduceMotion()
+                    } else {
+                        driver.beginHold()
+                    }
+                }
+                .onEnded { _ in
+                    pressed = false
+                    if !reduceMotion {
+                        driver.endHold()
+                    }
+                }
+        )
+        .opacity(reduceMotion && !driver.cooldownReady ? 0.65 : 1.0)
+        .help("长按 0.45 秒或按住 ⌘↩ 以确认高危操作")
     }
 }
 
