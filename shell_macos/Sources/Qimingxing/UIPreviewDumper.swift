@@ -851,7 +851,7 @@ enum Phase1Verifier {
         check(leftPlace.edge == .left, "single screen left cursor should dock left")
         let leftIdleFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: leftPlace)
         check(abs(leftIdleFrame.minX - primary.visibleFrame.minX) < 0.5, "left dock must sit flush at minX")
-        check(leftIdleFrame.size == CGSize(width: 48, height: 136), "idle ear size must be 48x136")
+        check(leftIdleFrame.size == CGSize(width: 48, height: 220), "idle ear size must be 48x220")
 
         let rightPlace = ScreenEdgeResolver.resolve(for: CGPoint(x: 1300, y: 500), screens: [primary])
         check(rightPlace.edge == .right, "single screen right cursor should dock right")
@@ -876,11 +876,11 @@ enum Phase1Verifier {
 
         // 4. Target sizes across all 3 phases + edge-anchored resize invariant
         let expSize = ScreenEdgeResolver.targetSize(for: .dragExpanded(hoveredSlot: .summary), itemCount: 0)
-        check(expSize == CGSize(width: 216, height: 220), "dragExpanded size must be 216x220")
+        check(expSize == CGSize(width: 224, height: 220), "dragExpanded size must be 224x220")
         let stashed1 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 1)
         let stashed3 = ScreenEdgeResolver.targetSize(for: .stashedStack, itemCount: 5)
-        check(stashed1.width == 84 && stashed1.height >= 160, "stashed 1-item size mismatch")
-        check(stashed3 == CGSize(width: 84, height: 264), "stashed 3+-item size mismatch: \(stashed3)")
+        check(stashed1.width == 112 && stashed1.height >= 176, "stashed 1-item size mismatch")
+        check(stashed3 == CGSize(width: 112, height: 288), "stashed 3+-item size mismatch: \(stashed3)")
 
         let earRightFrame = ScreenEdgeResolver.frame(for: ScreenEdgeResolver.idleEarSize, placement: rightPlace)
         let expRightFrame = ScreenEdgeResolver.frame(for: expSize, placement: rightPlace)

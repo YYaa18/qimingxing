@@ -52,12 +52,12 @@ enum ShelfPhase: Equatable {
 }
 
 enum ScreenEdgeResolver {
-    static let idleEarSize = CGSize(width: 48, height: 136)
-    static let dragExpandedSize = CGSize(width: 216, height: 220)
-    static let stashedWidth: CGFloat = 84
-    static let stashedMaxHeight: CGFloat = 280
-    static let stashedMinHeight: CGFloat = 160
-    static let cornerRadius: CGFloat = 22
+    static let idleEarSize = CGSize(width: 48, height: 220)
+    static let dragExpandedSize = CGSize(width: 224, height: 220)
+    static let stashedWidth: CGFloat = 112
+    static let stashedMaxHeight: CGFloat = 292
+    static let stashedMinHeight: CGFloat = 176
+    static let cornerRadius: CGFloat = 20
 
     static func resolve(for mouse: CGPoint, screens: [ShelfScreenBounds]) -> ShelfPlacement {
         let fallback = ShelfScreenBounds(
@@ -110,7 +110,7 @@ enum ScreenEdgeResolver {
             return dragExpandedSize
         case .stashedStack:
             let visibleCount = min(max(itemCount, 1), 3)
-            let height = min(stashedMaxHeight, max(stashedMinHeight, 108 + CGFloat(visibleCount) * 52))
+            let height = min(stashedMaxHeight, max(stashedMinHeight, 96 + CGFloat(visibleCount) * 64))
             return CGSize(width: stashedWidth, height: height)
         }
     }
@@ -350,6 +350,28 @@ final class DropPocketController: ObservableObject {
         onPendingCountChanged?(0)
         hide()
         onDeliverToQuickEntry?(attachments, snippets)
+    }
+
+    func summarizeStashedItems() {
+        let attachments = items.compactMap(\.attachment)
+        let snippets = items.compactMap(\.textSnippet)
+        guard !attachments.isEmpty || !snippets.isEmpty else { return }
+        items.removeAll()
+        onPendingCountChanged?(0)
+        hide()
+
+        var prompt = ShelfQuickSlot.summary.promptPrefix
+        if !snippets.isEmpty {
+            prompt += "\n\n" + snippets.joined(separator: "\n---\n")
+        }
+        brainClient.sendText(prompt, attachments: attachments, includeScreen: false)
+        TaskToastController.shared.show(
+            title: "已派发 · \(ShelfQuickSlot.summary.rawValue)",
+            message: "正在后台处理暂存素材，完成后将在工作区与通知提示",
+            isError: false
+        ) {
+            NotificationCenter.default.post(name: .qmxOpenWorkspace, object: nil)
+        }
     }
 
     func configureForPreview(edge: ShelfDockEdge, phase: ShelfPhase, items: [DropPocketItem]) {
@@ -721,6 +743,10 @@ struct EdgeShelfRootView: View {
         return false
     }
 
+    private var cyanGlowColor: Color {
+        Color(red: 0.36, green: 0.88, blue: 1.0)
+    }
+
     var body: some View {
         ZStack {
             if !QMXTheme.isHeadlessDump {
@@ -731,9 +757,21 @@ struct EdgeShelfRootView: View {
                     cornerRadius: 0
                 )
             }
-            // Dark obsidian frosted glass layer regardless of system theme
-            Color(red: 0.067, green: 0.078, blue: 0.102)
-                .opacity(QMXTheme.isHeadlessDump ? 0.94 : 0.84)
+            // Dark smoky obsidian frosted glass regardless of system theme
+            LinearGradient(
+                colors: [
+                    Color(red: 0.095, green: 0.110, blue: 0.138).opacity(QMXTheme.isHeadlessDump ? 0.94 : 0.80),
+                    Color(red: 0.058, green: 0.068, blue: 0.088).opacity(QMXTheme.isHeadlessDump ? 0.96 : 0.84),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            if isDragActive {
+                shelfShape
+                    .strokeBorder(cyanGlowColor.opacity(0.28), lineWidth: 5)
+                    .blur(radius: 4)
+            }
 
             Group {
                 switch controller.phase {
@@ -748,72 +786,99 @@ struct EdgeShelfRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(shelfShape)
-        .overlay(
-            shelfShape.strokeBorder(
-                LinearGradient(
-                    colors: [
-                        isDragActive ? Color.cyan.opacity(0.82) : Color.white.opacity(0.28),
-                        isDragActive ? QMXTheme.accent.opacity(0.42) : Color.white.opacity(0.05),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                lineWidth: isDragActive ? 1.5 : 0.75
-            )
-        )
+        .overlay(borderOverlay)
         .environment(\.colorScheme, .dark)
         .onHover { isHovering = $0 }
     }
 
+    private var borderOverlay: some View {
+        let strokeGradient = LinearGradient(
+            colors: isDragActive
+                ? [cyanGlowColor.opacity(0.95), cyanGlowColor.opacity(0.75)]
+                : [Color.white.opacity(0.28), Color.white.opacity(0.10)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        return shelfShape.strokeBorder(strokeGradient, lineWidth: isDragActive ? 1.5 : 0.75)
+    }
+
     private var idleEarContent: some View {
-        ZStack(alignment: .top) {
-            VStack(spacing: 14) {
-                MorningStarMark(size: 16, color: .white.opacity(0.92))
+        ZStack {
+            // Centered morning star
+            MorningStarMark(size: 18, color: .white)
+
+            // Docked screen-edge cyan vertical light streak
+            HStack {
+                if controller.dockEdge == .right { Spacer() }
                 Capsule()
                     .fill(
                         LinearGradient(
-                            colors: [.white.opacity(0.45), .white.opacity(0.04)],
+                            colors: [.clear, cyanGlowColor.opacity(0.92), .clear],
                             startPoint: .top,
                             endPoint: .bottom
                         )
                     )
-                    .frame(width: 2, height: 32)
+                    .frame(width: 2.5, height: 68)
+                    .shadow(color: cyanGlowColor.opacity(0.85), radius: 5)
+                if controller.dockEdge == .left { Spacer() }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(controller.dockEdge == .right ? .trailing : .leading, 1)
 
             if isHovering {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .frame(width: 18, height: 18)
-                        .background(.white.opacity(0.10), in: Circle())
+                VStack {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.68))
+                            .frame(width: 18, height: 18)
+                            .background(Color.white.opacity(0.12), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 12)
+                    .help("收起投喂托盘")
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 10)
-                .help("收起投喂托盘")
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func dragExpandedContent(hoveredSlot: ShelfQuickSlot?) -> some View {
-        let dropZoneAlpha = hoveredSlot == nil ? 0.10 : 0.04
-        let iconAlpha = hoveredSlot == nil ? 0.90 : 0.55
-        let textAlpha = hoveredSlot == nil ? 0.88 : 0.58
+        let dropZoneFill = Color.white.opacity(hoveredSlot == nil ? 0.065 : 0.03)
+        let dropZoneStroke = Color.white.opacity(hoveredSlot == nil ? 0.16 : 0.08)
+        let iconColor = Color.white.opacity(hoveredSlot == nil ? 0.50 : 0.35)
+        let titleColor = Color.white.opacity(hoveredSlot == nil ? 0.88 : 0.56)
 
-        return VStack(spacing: 10) {
+        return VStack(spacing: 9) {
             VStack(spacing: 7) {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 20, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(iconAlpha))
-                Text("拖入素材")
+                Image(systemName: "tray.and.arrow.down")
+                    .font(.system(size: 24, weight: .light))
+                    .foregroundStyle(iconColor)
+                Text("拖入文件、图片或文本")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(textAlpha))
+                    .foregroundStyle(titleColor)
+                Text("⌥D")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.56))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
+                    )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.white.opacity(dropZoneAlpha))
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(dropZoneFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(dropZoneStroke, lineWidth: 0.75)
             )
 
             HStack(spacing: 8) {
@@ -826,11 +891,13 @@ struct EdgeShelfRootView: View {
     }
 
     private func quickSlotCard(_ slot: ShelfQuickSlot, active: Bool) -> some View {
-        let fgColor: Color = active ? .white : Color.white.opacity(0.75)
-        let bgColor: Color = active ? Color.accentColor.opacity(0.45) : Color.white.opacity(0.06)
-        let strokeColor: Color = active ? Color.white.opacity(0.35) : Color.white.opacity(0.06)
+        let fgColor: Color = active ? .white : Color.white.opacity(0.84)
+        let bgColor: Color = active
+            ? Color(red: 0.25, green: 0.65, blue: 0.95).opacity(0.42)
+            : Color.white.opacity(0.07)
+        let strokeColor: Color = active ? cyanGlowColor.opacity(0.85) : Color.white.opacity(0.15)
 
-        return VStack(spacing: 4) {
+        return VStack(spacing: 3) {
             Image(systemName: slot.symbol)
                 .font(.system(size: 13, weight: .medium))
             Text(slot.rawValue)
@@ -838,92 +905,108 @@ struct EdgeShelfRootView: View {
         }
         .foregroundStyle(fgColor)
         .frame(maxWidth: .infinity)
-        .frame(height: 52)
+        .frame(height: 48)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(bgColor)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(strokeColor, lineWidth: active ? 1 : 0.5)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(strokeColor, lineWidth: active ? 1 : 0.75)
         )
     }
 
     private var stashedStackContent: some View {
-        VStack(spacing: 7) {
-            ForEach(Array(controller.items.prefix(3))) { item in
-                stashedItemTile(item)
-            }
+        let canAct = controller.items.contains { $0.attachment != nil || $0.textSnippet != nil }
 
-            if controller.items.count > 3 {
-                Text("+\(controller.items.count - 3)")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.68))
-            }
+        return ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                VStack(spacing: 10) {
+                    ForEach(Array(controller.items.prefix(3))) { item in
+                        stashedItemTile(item)
+                    }
 
-            Spacer(minLength: 2)
+                    if controller.items.count > 3 {
+                        Text("+\(controller.items.count - 3)")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.65))
+                    }
+                }
+                .padding(.top, 14)
 
-            let canDeliver = controller.items.contains { $0.attachment != nil || $0.textSnippet != nil }
-            Button {
-                controller.deliverToQuickEntry()
-            } label: {
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(canDeliver ? 1.0 : 0.45), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!canDeliver)
-            .help("带入对话")
+                Spacer(minLength: 6)
 
-            Button {
-                controller.clear()
-            } label: {
-                Text("清空")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(isHovering ? 0.68 : 0.44))
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(height: 0.5)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+
+                HStack(spacing: 12) {
+                    Button {
+                        controller.deliverToQuickEntry()
+                    } label: {
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Color.black)
+                            .frame(width: 34, height: 34)
+                            .background(Color.white.opacity(canAct ? 1.0 : 0.45), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canAct)
+                    .help("带入对话")
+
+                    Button {
+                        controller.summarizeStashedItems()
+                    } label: {
+                        Image(systemName: "text.bubble")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(canAct ? 0.90 : 0.40))
+                            .frame(width: 34, height: 34)
+                            .background(Color.white.opacity(0.10), in: Circle())
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canAct)
+                    .help("立即速览")
+                }
+                .padding(.bottom, 12)
             }
-            .buttonStyle(.plain)
-            .help("清空全部暂存")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if isHovering {
+                Button {
+                    controller.clear()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.70))
+                        .frame(width: 20, height: 20)
+                        .background(Color.black.opacity(0.55), in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.20), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 8)
+                .padding(.trailing, 8)
+                .help("清空全部暂存")
+            }
         }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 10)
     }
 
     private func stashedItemTile(_ item: DropPocketItem) -> some View {
         let isHoveredTile = hoveredItemId == item.id
         return ZStack(alignment: .topTrailing) {
-            Group {
-                if let thumb = item.thumbnail {
-                    Image(nsImage: thumb)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    ZStack {
-                        Color.white.opacity(0.10)
-                        Image(systemName: item.kind == "text" ? "text.alignleft" : "doc.fill")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.75))
+            stashedItemPreview(item)
+                .overlay {
+                    if item.isUploading {
+                        ZStack {
+                            Color.black.opacity(0.45)
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                 }
-            }
-            .frame(width: 56, height: 42)
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
-            )
-            .overlay {
-                if item.isUploading {
-                    ZStack {
-                        Color.black.opacity(0.45)
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-            }
 
             if isHoveredTile {
                 Button {
@@ -933,11 +1016,11 @@ struct EdgeShelfRootView: View {
                         .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 15, height: 15)
-                        .background(.black.opacity(0.78), in: Circle())
-                        .overlay(Circle().strokeBorder(.white.opacity(0.28), lineWidth: 0.5))
+                        .background(Color.black.opacity(0.82), in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.30), lineWidth: 0.5))
                 }
                 .buttonStyle(.plain)
-                .offset(x: 4, y: -4)
+                .offset(x: 5, y: -5)
                 .help("移除 \(item.filename)")
             }
         }
@@ -945,5 +1028,66 @@ struct EdgeShelfRootView: View {
             hoveredItemId = hovering ? item.id : (hoveredItemId == item.id ? nil : hoveredItemId)
         }
         .help(item.filename)
+    }
+
+    @ViewBuilder
+    private func stashedItemPreview(_ item: DropPocketItem) -> some View {
+        if let thumb = item.thumbnail {
+            if item.kind == "image" {
+                Image(nsImage: thumb)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 72, height: 46)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5)
+                    )
+                    .shadow(color: .black.opacity(0.38), radius: 4, y: 2)
+            } else {
+                Image(nsImage: thumb)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 60, height: 54)
+                    .shadow(color: .black.opacity(0.38), radius: 4, y: 2)
+            }
+        } else {
+            textDocThumbnailCard(label: item.filename)
+                .shadow(color: .black.opacity(0.38), radius: 4, y: 2)
+        }
+    }
+
+    private func textDocThumbnailCard(label: String) -> some View {
+        ZStack(alignment: .topTrailing) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(label)
+                    .font(.system(size: 6.5, weight: .semibold))
+                    .foregroundStyle(Color.black.opacity(0.78))
+                    .lineLimit(1)
+                Capsule().fill(Color.black.opacity(0.22)).frame(width: 34, height: 1.5)
+                Capsule().fill(Color.black.opacity(0.16)).frame(width: 38, height: 1.5)
+                Capsule().fill(Color.black.opacity(0.16)).frame(width: 28, height: 1.5)
+                Capsule().fill(Color.black.opacity(0.14)).frame(width: 34, height: 1.5)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 9)
+            .padding(.bottom, 6)
+            .frame(width: 48, height: 54, alignment: .topLeading)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color(white: 0.94))
+            )
+
+            // Subtle folded corner accent
+            Path { path in
+                path.move(to: CGPoint(x: 37, y: 0))
+                path.addLine(to: CGPoint(x: 48, y: 11))
+                path.addLine(to: CGPoint(x: 37, y: 11))
+                path.closeSubpath()
+            }
+            .fill(Color(white: 0.80))
+            .frame(width: 48, height: 54)
+        }
     }
 }
