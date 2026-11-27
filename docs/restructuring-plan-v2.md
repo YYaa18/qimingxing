@@ -440,9 +440,9 @@ brain/
 
 顺序：
 
-1. `main.py` 路由拆分（低风险，先做）；
-2. `rich_content` 拆 `rich/`；
-3. `hub` 拆连接/回合/审批/媒体/ui_state；
+1. `[现状]` `main.py` 路由拆分完成（PR #23）：`brain/app/routes/` 10 个模块，`main.py` 1,161 → 502 行；
+2. `[现状]` `rich_content` 拆 `rich/` 完成：`sources.py` / `tables.py` / `media.py`，`rich_content.py` 降为 31 行兼容 facade；
+3. `hub` 拆连接/回合/审批/媒体/ui_state（下一项，3,207 行）；
 4. `worker`、`llm`、`tools`、`memory`；
 5. `config`、`browser` 最后。
 
