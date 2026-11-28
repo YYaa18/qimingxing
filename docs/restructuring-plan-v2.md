@@ -443,7 +443,7 @@ brain/
 1. `[现状]` `main.py` 路由拆分完成（PR #23）：`brain/app/routes/` 10 个模块，`main.py` 1,161 → 502 行；
 2. `[现状]` `rich_content` 拆 `rich/` 完成：`sources.py` / `tables.py` / `media.py`，`rich_content.py` 降为 31 行兼容 facade；
 3. `[现状]` `hub` 拆分完成（PR #24–#29）：`connection` / `ui_state` / `approvals` / `turns`（含 `_start_turn` / `_run_turn` / 截屏）/ `tool_schema` / `media`；`core.py` 3,207 → **1,617**，只剩 Hub 本体与编排方法；
-4. `[现状]` `worker` 完成（#30–#32，1,410 → 591）；`llm` 完成（#33–#35，1,354 → 209）；`memory` 已拆 schema + rows（#36、#37，`sqlite_store.py` 2,517 → 2,041）；方法分块后进入 `tools` 与 `config`/`browser`；
+4. `[现状]` `worker` 完成（#30–#32）；`llm` 完成（#33–#35）；`memory` 已拆 schema / rows / messages（#36–#38，`sqlite_store.py` 2,517 → 1,840）；余 facts-episodes / skills-work / usage；再 `tools` 与 `config`/`browser`；
 5. `config`、`browser` 最后。
 
 ### 7.2 Swift 目标结构
