@@ -656,7 +656,17 @@ func qmxMediaWithoutInlineTables(
     cards: [OutputCardItem] = []
 ) -> [MediaItem] {
     guard !media.isEmpty else { return media }
-    var signatures = Set(QMXMarkdownTables.scan(answer).map(\.dedupeSignature))
+    let scannedTables = QMXMarkdownTables.scan(answer)
+    // While a table is still streaming, `scan` cannot parse it yet, so content
+    // signatures are unavailable; fall back to the pre-Phase-1a rule and hide
+    // all md-table media to avoid showing a half-row duplicate.
+    let streamingTable = scannedTables.isEmpty && StreamingBlockParser.parse(
+        answer, turnId: "", isFinished: false
+    ).hasAnyTable
+    if streamingTable {
+        return media.filter { !$0.isMarkdownTable }
+    }
+    var signatures = Set(scannedTables.map(\.dedupeSignature))
     for card in cards {
         signatures.formUnion(QMXMarkdownTables.scan(card.contentMarkdown).map(\.dedupeSignature))
     }
