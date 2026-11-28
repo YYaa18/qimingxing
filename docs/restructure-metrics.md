@@ -237,8 +237,8 @@ wc -l brain/hub/*.py
 | `hub/connection.py` | 48 |
 | `hub/ui_state.py` | 94 |
 | `hub/approvals.py` | 244（PR #25） |
-| `hub/turns.py` | 123（PR #26） |
-| `hub/core.py` | 2,793（原 3,207） |
+| `hub/turns.py` | 254（PR #26、#27） |
+| `hub/core.py` | 2,670（原 3,207） |
 
 公共 import 未改；`Hub` 通过 `UIStateMixin + ApprovalMixin` 复用搬出的方法。剩余 `turns` / `media` 待搬。
 
