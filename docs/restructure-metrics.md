@@ -239,7 +239,8 @@ wc -l brain/hub/*.py
 | `hub/approvals.py` | 244（PR #25） |
 | `hub/turns.py` | 1,269（PR #26–#28） |
 | `hub/tool_schema.py` | 40（PR #28） |
-| `hub/core.py` | 1,652（原 3,207） |
+| `hub/media.py` | 52（PR #29） |
+| `hub/core.py` | 1,617（原 3,207） |
 
 公共 import 未改；`Hub` 通过 `UIStateMixin + ApprovalMixin + TurnStreamMixin` 复用搬出的方法。剩余 `media` 待搬。
 
