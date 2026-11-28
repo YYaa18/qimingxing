@@ -571,8 +571,10 @@ def test_worker_slot_follow_chat_clear_and_dispatch_risk_gate(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_worker_lock_waits_for_conflicting_writer(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(task_runner_module, "_LOCK_RETRY_SECONDS", 0.1)
-    monkeypatch.setattr(task_runner_module, "_LOCK_WAIT_SECONDS", 3.0)
+    from brain import worker_runner as worker_runner_module
+
+    monkeypatch.setattr(worker_runner_module, "_LOCK_RETRY_SECONDS", 0.1)
+    monkeypatch.setattr(worker_runner_module, "_LOCK_WAIT_SECONDS", 3.0)
     cfg = _cfg(tmp_path, "lock_wait.db")
     cfg.background_tasks.max_concurrency = 2
     backend = create_memory_backend(cfg.memory)
