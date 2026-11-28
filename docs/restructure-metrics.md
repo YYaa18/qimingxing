@@ -244,6 +244,15 @@ wc -l brain/hub/*.py
 
 公共 import 未改；`Hub` 通过 `UIStateMixin + ApprovalMixin + TurnStreamMixin` 复用搬出的方法。剩余 `media` 待搬。
 
+### 3.9 Phase 5h 证据（worker 第一片）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/worker_bundle.py` | 99 |
+| `brain/task_runner.py` | 1,338（原 1,410） |
+
+`_collect_result_files` 保留静态别名以兼容现有测试；`write_report_artifact` 改为显式 `artifact_dir` 参数。
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
