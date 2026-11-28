@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from brain.config_defaults import (
+    DEFAULT_BLOCKED_APPS,
+    DEFAULT_BLOCKED_SHELL_PATTERNS,
+    DEFAULT_BLOCKED_TITLE_KEYWORDS,
+    DEFAULT_SAFE_SHELL_COMMANDS,
+)
+
 import os
 import re
 from dataclasses import dataclass, field
@@ -13,30 +20,6 @@ from protocol.models import PrivacyMode, ProfileInfo
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-DEFAULT_BLOCKED_APPS = [
-    "1Password",
-    "Bitwarden",
-    "KeePass",
-    "Keychain Access",
-    "钥匙串访问",
-    "微信",
-    "WeChat",
-]
-
-DEFAULT_BLOCKED_TITLE_KEYWORDS = [
-    "Incognito",
-    "InPrivate",
-    "Private Browsing",
-    "无痕",
-    "网银",
-    "支付宝",
-    "Alipay",
-    "Bank",
-    "Password",
-    "密码",
-]
-
 
 def is_local_provider(name: str, base_url: str, protocol: str = "") -> bool:
     """Return True for local keyless endpoints such as mock or Ollama on loopback."""
@@ -255,41 +238,6 @@ class ContextBudgetConfig:
 
     # --- legacy hard cap; used when no resolved budget is supplied ---
     total_max_tokens: int = 32000
-
-
-DEFAULT_SAFE_SHELL_COMMANDS = [
-    "pwd",
-    "ls",
-    "git status",
-    "git log",
-    "git diff",
-    "which",
-    "whoami",
-    "uname",
-    "date",
-    "echo",
-    "head",
-    "tail",
-    "wc",
-    "cat",
-]
-
-DEFAULT_BLOCKED_SHELL_PATTERNS = [
-    r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(/|\*|~)",
-    r"rm\s+-[a-zA-Z]*f[a-zA-Z]*r\s+(/|\*|~)",
-    r"\bmkfs(\.[a-z0-9]+)?\b",
-    r"\bdd\s+if=",
-    r"\bsudo\b",
-    r"\b(shutdown|reboot|halt|poweroff)\b",
-    r"\bdiskutil\s+(erase|partition|zeroDisk)",
-    r"\bprintenv\b",
-    r"\benv\b\s*$",
-    r"config\.yaml",
-    r"\.env\b",
-    r":\(\)\s*\{",
-    r">\s*/dev/sd",
-    r"chmod\s+-R\s+777\s+/",
-]
 
 
 @dataclass
