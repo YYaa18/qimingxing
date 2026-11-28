@@ -444,7 +444,7 @@ brain/
 2. `[现状]` `rich_content` 拆 `rich/` 完成：`sources.py` / `tables.py` / `media.py`，`rich_content.py` 降为 31 行兼容 facade；
 3. `[现状]` `hub` 拆分完成（PR #24–#29）：`connection` / `ui_state` / `approvals` / `turns`（含 `_start_turn` / `_run_turn` / 截屏）/ `tool_schema` / `media`；`core.py` 3,207 → **1,617**，只剩 Hub 本体与编排方法；
 4. `[现状]` `worker` 完成（#30–#32）；`llm` 完成（#33–#35）；`memory` **拆分完成**（#36–#39：schema/rows/messages/facts/skills_usage/tasks_store/snapshot，`sqlite_store.py` 2,517 → **264**）；再 `tools` 与 `config`/`browser`；
-5. `[现状]` `browser` 已拆（#40）；`config` 已开工（#41：`config_defaults.py`，`config.py` 2,069 → 2,017）；`config.py` 的 models/io 与 `tools/macos_apps.py`（968）仍是最后两块。
+5. `[现状]` `browser` 已拆（#40）；`config` **拆分完成**（#41–#43：defaults 59 / models 700 / io 1,370，`config.py` 2,069 → **72 行 facade**）；仅剩 `tools/macos_apps.py`（968，需先加 `run_osascript` 注入缝）。
 
 ### 7.2 Swift 目标结构
 
