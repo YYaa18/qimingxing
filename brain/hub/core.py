@@ -67,6 +67,8 @@ from brain.tools import (
 from brain.tools.base import ToolTraceStep
 from brain.tools.desktop_io import AttachPathsResult
 from brain.utils import get_app_version
+from brain.hub.connection import ClientConnection
+from brain.hub.ui_state import UIStateMixin
 from protocol.models import (
     AudioInputChunkPayload,
     AudioInputEndPayload,
@@ -196,45 +198,8 @@ class _AudioInputBuffer:
     max_bytes: int = 16000 * 2 * 60
 
 
-@dataclass
-class ClientConnection:
-    client_id: str
-    websocket: WebSocket
-    role: Optional[SourceRole] = None
-    client_name: str = "unknown"
-    client_type: Optional[str] = None
-    platform: str = "unknown"
-    app_version: str = ""
-    client_instance_id: str = ""
-    ui_subscribed: bool = False
-    capabilities: ClientCapabilities = field(default_factory=ClientCapabilities)
-    active_turn_id: Optional[str] = None
-    active_task: Optional[asyncio.Task[None]] = None
-    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    disconnected: bool = False
-    outbox: List[Envelope] = field(default_factory=list)
-    grace_task: Optional[asyncio.Task[None]] = None
 
-    async def send_envelope(self, envelope: Envelope) -> None:
-        async with self.send_lock:
-            if self.disconnected:
-                self._queue_outbox(envelope)
-                return
-            try:
-                await self.websocket.send_text(envelope.model_dump_json())
-            except Exception:
-                # Keep the turn alive during a short reconnect window; the
-                # envelope is replayed after the same client instance resumes.
-                self.disconnected = True
-                self._queue_outbox(envelope)
-
-    def _queue_outbox(self, envelope: Envelope) -> None:
-        self.outbox.append(envelope)
-        if len(self.outbox) > 512:
-            self.outbox = self.outbox[-512:]
-
-
-class Hub:
+class Hub(UIStateMixin):
     """Central star-topology WebSocket hub orchestrating Body, Senses, and Brain components."""
 
     def __init__(
@@ -877,32 +842,6 @@ class Hub:
                 except Exception:
                     logger.debug("Failed sending welcome broadcast to %s", client.client_id)
 
-    def _build_shortcuts_sync_payload(self) -> SystemShortcutsSyncPayload:
-        sc = self.config.shortcuts
-        return SystemShortcutsSyncPayload(
-            ptt_hotkey=sc.ptt_hotkey or self.config.audio.ptt.hotkey,
-            chat_input_hotkey=sc.chat_input_hotkey,
-            cancel_hotkey=sc.cancel_hotkey,
-            toggle_dock_hotkey=sc.toggle_dock_hotkey,
-            settings_hotkey=sc.settings_hotkey,
-        )
-
-    async def _send_shortcuts_sync(self, conn: ClientConnection) -> None:
-        await conn.send_envelope(
-            make_envelope("brain", "system.shortcuts_sync", self._build_shortcuts_sync_payload())
-        )
-
-    async def _broadcast_shortcuts_sync(self) -> None:
-        payload = self._build_shortcuts_sync_payload()
-        for client in list(self.clients.values()):
-            if client.role == "senses":
-                try:
-                    await client.send_envelope(
-                        make_envelope("brain", "system.shortcuts_sync", payload)
-                    )
-                except Exception:
-                    logger.debug("Failed sending shortcuts_sync to %s", client.client_id)
-
     async def _cancel_active_turn_or_bodies(
         self,
         sender_conn: ClientConnection,
@@ -991,53 +930,6 @@ class Hub:
                     turn_id=old_turn_id,
                 )
             )
-
-    def _build_ui_state_payload(self) -> UIStatePayload:
-        return UIStatePayload(
-            avatar_enabled=self.config.ui.avatar_enabled,
-            avatar_scale=self.config.ui.avatar_scale,
-            roam=self.config.ui.roam,
-            earcons=self.config.ui.earcons,
-            ambient=self.config.ui.ambient,
-            docked=False,
-            active_profile=self.llm_router.active_profile,
-            privacy_mode=self.privacy_mode,
-            shortcuts=self._build_shortcuts_sync_payload(),
-            pending_approvals=list(self._pending_approval_requests.values()),
-        )
-
-    async def _send_ui_state(self, conn: ClientConnection) -> None:
-        await conn.send_envelope(
-            make_envelope("brain", "ui.state", self._build_ui_state_payload())
-        )
-
-    async def _broadcast_ui_state(self) -> None:
-        env = make_envelope("brain", "ui.state", self._build_ui_state_payload())
-        for client in list(self.clients.values()):
-            if client.role in ("body", None) and client.ui_subscribed:
-                try:
-                    await client.send_envelope(env)
-                except Exception:
-                    logger.debug("Failed broadcasting ui.state to %s", client.client_id)
-
-    async def _handle_ui_set_state(self, payload: UISetStatePayload) -> None:
-        patch = payload.patch or {}
-        if "avatar_enabled" in patch:
-            self.config.ui.avatar_enabled = bool(patch["avatar_enabled"])
-        if "avatar_scale" in patch and patch["avatar_scale"] is not None:
-            try:
-                val = float(patch["avatar_scale"])
-                self.config.ui.avatar_scale = max(0.5, min(1.5, val))
-            except (TypeError, ValueError):
-                pass
-        if "roam" in patch:
-            self.config.ui.roam = bool(patch["roam"])
-        if "earcons" in patch:
-            self.config.ui.earcons = bool(patch["earcons"])
-            self.config.godot.earcons_enabled = bool(patch["earcons"])
-        if "ambient" in patch:
-            self.config.ui.ambient = bool(patch["ambient"])
-        await self._broadcast_ui_state()
 
     async def _send_shell_ui_action(
         self, action: str, args: Dict[str, Any]

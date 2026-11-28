@@ -442,7 +442,7 @@ brain/
 
 1. `[现状]` `main.py` 路由拆分完成（PR #23）：`brain/app/routes/` 10 个模块，`main.py` 1,161 → 502 行；
 2. `[现状]` `rich_content` 拆 `rich/` 完成：`sources.py` / `tables.py` / `media.py`，`rich_content.py` 降为 31 行兼容 facade；
-3. `hub` 拆连接/回合/审批/媒体/ui_state（下一项，3,207 行）；
+3. `[现状]` `hub` 已转包（PR #24）：`hub/{__init__,connection,ui_state,core}.py`，`ClientConnection` 与 `UIStateMixin` 已搬出，`core.py` 3,207 → 3,109；剩余 `approvals`/`turns`/`media` 继续用 mixin 方式搬；
 4. `worker`、`llm`、`tools`、`memory`；
 5. `config`、`browser` 最后。
 
