@@ -287,6 +287,14 @@ wc -l brain/hub/*.py
 | `brain/memory/schema.py` | 239 |
 | `brain/memory/sqlite_store.py` | 2,279（原 2,517） |
 
+### 3.14 Phase 5o 证据（memory rows）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/memory/schema.py` | 239 |
+| `brain/memory/rows.py` | 271 |
+| `brain/memory/sqlite_store.py` | 2,041（原 2,517） |
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
