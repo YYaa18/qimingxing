@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from protocol.models import (
+    ContextScreenRefPayload,
+    OutputToolStatusPayload,
+    SensesCaptureRequestPayload,
+    SystemCaptureDonePayload,
+    SystemCapturePreparePayload,
     AvatarStatePayload,
     CardAction,
     Envelope,
@@ -121,3 +128,127 @@ class TurnStreamMixin:
                     )
                 )
         return seq
+
+    async def _start_turn(
+        self,
+        conn: ClientConnection,
+        turn_id: str,
+        user_text: str,
+        *,
+        force_screen: bool,
+        attachments: Optional[List[str]] = None,
+    ) -> None:
+        await self._cancel_active_turn(conn, notify=True)
+        conn.active_turn_id = turn_id
+        task = asyncio.create_task(
+            self._run_turn(
+                conn,
+                turn_id,
+                user_text,
+                force_screen=force_screen,
+                attachments=attachments,
+            )
+        )
+
+        def _log_turn_crash(t: asyncio.Task[None]) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "Turn task crashed turn_id=%s: %s",
+                    turn_id,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_log_turn_crash)
+        conn.active_task = task
+
+    async def _request_screen_capture(
+        self,
+        conn: ClientConnection,
+        turn_id: str,
+        reason: str,
+    ) -> tuple[Optional[ContextScreenRefPayload], Optional[str]]:
+        senses_conn = self._get_active_senses()
+        if senses_conn is None:
+            return None, "当前桌面感官服务尚未连接，暂时看不到你的屏幕，请先启动感官客户端（python -m senses.main）。"
+
+        req_id = f"cap_{uuid.uuid4().hex[:10]}"
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[ContextScreenRefPayload] = loop.create_future()
+        self._pending_captures[req_id] = fut
+
+        await conn.send_envelope(
+            make_envelope(
+                "brain",
+                "output.tool_status",
+                OutputToolStatusPayload(
+                    status="running",
+                    tool="screen_capture",
+                    label="正在查看当前桌面…",
+                ),
+                turn_id=turn_id,
+            )
+        )
+
+        try:
+            auto_hide_bodies = [
+                c
+                for c in self.clients.values()
+                if c.role == "body" and c.capabilities.auto_hide
+            ]
+            hid_bodies = False
+            if self.config.godot.auto_hide_on_capture and auto_hide_bodies:
+                prep_env = make_envelope(
+                    "brain",
+                    "system.capture_prepare",
+                    SystemCapturePreparePayload(
+                        request_id=req_id, turn_id=turn_id, hide_ms=150
+                    ),
+                    turn_id=turn_id,
+                )
+                for body_conn in auto_hide_bodies:
+                    try:
+                        await body_conn.send_envelope(prep_env)
+                        hid_bodies = True
+                    except Exception:
+                        pass
+                if hid_bodies:
+                    await asyncio.sleep(0.15)
+
+            await senses_conn.send_envelope(
+                make_envelope(
+                    "brain",
+                    "senses.capture_request",
+                    SensesCaptureRequestPayload(
+                        request_id=req_id,
+                        turn_id=turn_id,
+                        reason=reason,  # type: ignore[arg-type]
+                        max_edge=1280,
+                    ),
+                    turn_id=turn_id,
+                )
+            )
+            screen_ref = await asyncio.wait_for(fut, timeout=self.capture_timeout_seconds)
+            return screen_ref, None
+        except asyncio.TimeoutError:
+            logger.warning("Screen capture timed out after %.1fs (turn=%s)", self.capture_timeout_seconds, turn_id)
+            return None, "获取桌面画面超时了（超过 3.5 秒），暂时没能看到你的屏幕，你可以稍后再试一次。"
+        finally:
+            self._pending_captures.pop(req_id, None)
+            if self.config.godot.auto_hide_on_capture:
+                done_env = make_envelope(
+                    "brain",
+                    "system.capture_done",
+                    SystemCaptureDonePayload(request_id=req_id, turn_id=turn_id),
+                    turn_id=turn_id,
+                )
+                for body_conn in list(self.clients.values()):
+                    if body_conn.role == "body" and body_conn.capabilities.auto_hide:
+                        try:
+                            await body_conn.send_envelope(done_env)
+                        except Exception:
+                            pass
+
