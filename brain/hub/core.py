@@ -70,6 +70,7 @@ from brain.utils import get_app_version
 from brain.hub.connection import ClientConnection
 from brain.hub.approvals import ApprovalMixin
 from brain.hub.turns import TurnStreamMixin
+from brain.hub.media import MediaMixin
 from brain.hub.ui_state import UIStateMixin
 from protocol.models import (
     AudioInputChunkPayload,
@@ -166,7 +167,7 @@ class _AudioInputBuffer:
 
 
 
-class Hub(UIStateMixin, ApprovalMixin, TurnStreamMixin):
+class Hub(UIStateMixin, ApprovalMixin, TurnStreamMixin, MediaMixin):
     """Central star-topology WebSocket hub orchestrating Body, Senses, and Brain components."""
 
     def __init__(
@@ -1119,28 +1120,6 @@ class Hub(UIStateMixin, ApprovalMixin, TurnStreamMixin):
                 except Exception:
                     logger.debug("Failed broadcasting tool notice to %s", client.client_id)
 
-    async def emit_artifact_capsule(
-        self,
-        conn: ClientConnection,
-        *,
-        turn_id: Optional[str],
-        path: str,
-        title: Optional[str] = None,
-    ) -> None:
-        p = Path(os.path.abspath(os.path.expanduser(path)))
-        mtype = infer_media_type(p)
-        actions = actions_for_media_type(mtype)
-        payload = OutputArtifactCapsulePayload(
-            turn_id=turn_id,
-            title=title or p.name or "产物文件",
-            path=str(p),
-            media_type=mtype,
-            actions=actions,
-        )
-        await conn.send_envelope(
-            make_envelope("brain", "output.artifact_capsule", payload, turn_id=turn_id)
-        )
-
     async def handle_raw_bytes(self, conn: ClientConnection, raw_bytes: bytes) -> None:
         """Accept raw binary WS PCM chunk routed to client's active audio input session."""
         resolved = self._resolve_conn(conn)
@@ -1507,19 +1486,6 @@ class Hub(UIStateMixin, ApprovalMixin, TurnStreamMixin):
             "brain", "task.watchdog_alert", payload, turn_id=payload.task_id
         )
         await self._broadcast_to_bodies(env, "task.watchdog_alert")
-
-    async def broadcast_artifact_capsule(
-        self, payload: OutputArtifactCapsulePayload
-    ) -> None:
-        env = make_envelope(
-            "brain", "output.artifact_capsule", payload, turn_id=payload.turn_id
-        )
-        for client in list(self.clients.values()):
-            if client.role in ("body", None):
-                try:
-                    await client.send_envelope(env)
-                except Exception:
-                    logger.debug("Failed broadcasting artifact_capsule to %s", client.client_id)
 
     async def _emit_direct_guidance(
         self,
