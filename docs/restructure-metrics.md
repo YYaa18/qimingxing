@@ -315,6 +315,13 @@ wc -l brain/hub/*.py
 | `memory/snapshot.py` | 439 |
 | `memory/sqlite_store.py` | 264（原 2,517） |
 
+### 3.17 Phase 5r 证据（browser）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/browser_security.py` | 72 |
+| `brain/browser_runtime.py` | 607（原 663） |
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
