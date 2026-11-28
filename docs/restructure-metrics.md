@@ -271,6 +271,15 @@ wc -l brain/hub/*.py
 | `brain/llm/providers.py` | 497 |
 | `brain/llm_router.py` | 649（原 1,354） |
 
+### 3.12 Phase 5m 证据（llm 完成）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/llm/models.py` | 258 |
+| `brain/llm/providers.py` | 497 |
+| `brain/llm/streaming.py` | 470 |
+| `brain/llm_router.py` | 209（原 1,354） |
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |

@@ -443,7 +443,7 @@ brain/
 1. `[现状]` `main.py` 路由拆分完成（PR #23）：`brain/app/routes/` 10 个模块，`main.py` 1,161 → 502 行；
 2. `[现状]` `rich_content` 拆 `rich/` 完成：`sources.py` / `tables.py` / `media.py`，`rich_content.py` 降为 31 行兼容 facade；
 3. `[现状]` `hub` 拆分完成（PR #24–#29）：`connection` / `ui_state` / `approvals` / `turns`（含 `_start_turn` / `_run_turn` / 截屏）/ `tool_schema` / `media`；`core.py` 3,207 → **1,617**，只剩 Hub 本体与编排方法；
-4. `[现状]` `worker` 完成（PR #30–#32，`task_runner.py` 1,410 → 591）；`llm` 已拆 models + providers（PR #33、#34，`llm_router.py` 1,354 → 649），剩 `stream_chat`/OpenAI tool loop；再 `tools`、`memory`；
+4. `[现状]` `worker` 完成（PR #30–#32，`task_runner.py` 1,410 → 591）；`llm` 拆分完成（PR #33–#35：models/providers/streaming，`llm_router.py` 1,354 → 209）；再 `tools`、`memory`；
 5. `config`、`browser` 最后。
 
 ### 7.2 Swift 目标结构
