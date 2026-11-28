@@ -329,6 +329,15 @@ wc -l brain/hub/*.py
 | `brain/config_defaults.py` | 59 |
 | `brain/config.py` | 2,017（原 2,069） |
 
+### 3.19 Phase 5u 证据（config 完成）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/config_defaults.py` | 59 |
+| `brain/config_models.py` | 700 |
+| `brain/config_io.py` | 1,370 |
+| `brain/config.py` | 72（原 2,069） |
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
