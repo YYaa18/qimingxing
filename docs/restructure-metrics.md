@@ -280,6 +280,13 @@ wc -l brain/hub/*.py
 | `brain/llm/streaming.py` | 470 |
 | `brain/llm_router.py` | 209（原 1,354） |
 
+### 3.13 Phase 5n 证据（memory 第一片）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/memory/schema.py` | 239 |
+| `brain/memory/sqlite_store.py` | 2,279（原 2,517） |
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
