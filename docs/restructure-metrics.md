@@ -264,6 +264,13 @@ wc -l brain/hub/*.py
 
 `from brain.llm_router import LLMUsage / LLMError / parse_dsml_tool_calls / ...` 仍然可用。
 
+### 3.11 Phase 5l 证据（llm providers）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/llm/providers.py` | 497 |
+| `brain/llm_router.py` | 649（原 1,354） |
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
