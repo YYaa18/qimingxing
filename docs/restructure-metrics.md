@@ -250,7 +250,8 @@ wc -l brain/hub/*.py
 |---|---:|
 | `brain/worker_bundle.py` | 99 |
 | `brain/worker_runner.py` | 617（PR #31） |
-| `brain/task_runner.py` | 762（原 1,410） |
+| `brain/worker_watchdog.py` | 191（PR #32） |
+| `brain/task_runner.py` | 591（原 1,410） |
 
 `_collect_result_files` 保留静态别名以兼容现有测试；`write_report_artifact` 改为显式 `artifact_dir` 参数。
 
