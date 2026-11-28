@@ -302,6 +302,19 @@ wc -l brain/hub/*.py
 | `brain/memory/messages.py` | 215 |
 | `brain/memory/sqlite_store.py` | 1,840（原 2,517） |
 
+### 3.16 Phase 5q 证据（memory 完成）
+
+| 文件 | 行数 |
+|---|---:|
+| `memory/schema.py` | 239 |
+| `memory/rows.py` | 271 |
+| `memory/messages.py` | 215 |
+| `memory/facts.py` | 418 |
+| `memory/skills_usage.py` | 430 |
+| `memory/tasks_store.py` | 483 |
+| `memory/snapshot.py` | 439 |
+| `memory/sqlite_store.py` | 264（原 2,517） |
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
