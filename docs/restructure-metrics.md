@@ -255,6 +255,15 @@ wc -l brain/hub/*.py
 
 `_collect_result_files` 保留静态别名以兼容现有测试；`write_report_artifact` 改为显式 `artifact_dir` 参数。
 
+### 3.10 Phase 5k 证据（llm 第一片）
+
+| 文件 | 行数 |
+|---|---:|
+| `brain/llm/models.py` | 258 |
+| `brain/llm_router.py` | 1,117（原 1,354） |
+
+`from brain.llm_router import LLMUsage / LLMError / parse_dsml_tool_calls / ...` 仍然可用。
+
 ## 4. 性能
 
 | 指标 | 基线 `22ca135` | 目标 | 实测 |
